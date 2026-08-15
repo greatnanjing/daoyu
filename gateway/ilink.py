@@ -1,5 +1,6 @@
 """iLink (ClawBot) 协议封装。纯协议、无业务；字段必须全填（缺字段会 200 但静默不投递）。"""
 import base64
+import json
 import logging
 import random
 from urllib.parse import quote
@@ -46,19 +47,25 @@ class ILinkClient:
                     base_url: str | None = None) -> dict:
         url = f"{base_url or self._base}/{path}"
         async with self._session.post(url, json=body, headers=make_headers(token)) as res:
-            # 服务器 Content-Type 是 application/octet-stream，必须 content_type=None
-            data = await res.json(content_type=None)
+            # 服务器 Content-Type 是 application/octet-stream，故手动 text + json.loads（content-type 无关）
+            text = await res.text()
             if res.status != 200:
-                raise ILinkError(f"POST {path} HTTP {res.status}: {data}")
-            return data
+                raise ILinkError(f"POST {path} HTTP {res.status}: {text[:200]}")
+            try:
+                return json.loads(text)
+            except ValueError:  # 200 但非 JSON 体
+                return {}
 
     async def _get(self, path: str, token: str | None = None) -> dict:
         url = f"{self._base}/{path}"
         async with self._session.get(url, headers=make_headers(token)) as res:
-            data = await res.json(content_type=None)
+            text = await res.text()
             if res.status != 200:
-                raise ILinkError(f"GET {path} HTTP {res.status}: {data}")
-            return data
+                raise ILinkError(f"GET {path} HTTP {res.status}: {text[:200]}")
+            try:
+                return json.loads(text)
+            except ValueError:  # 200 但非 JSON 体
+                return {}
 
     # ---- 登录 ----
     async def get_bot_qrcode(self, local_tokens: list[str],
@@ -118,8 +125,9 @@ class ILinkClient:
                     "item_list": [{"type": 1, "text_item": {"text": text}}],
                 },
                     "base_info": base_info()}, token, base_url)
-        except ILinkError:
-            log.warning("sendmessage HTTP 失败（送达未确认）", exc_info=True)
+        except (ILinkError, aiohttp.ClientError, ValueError) as e:
+            # 送达未确认 → False 交由 outbox 重试；网络故障/坏响应体也不让异常逃逸
+            log.warning("sendmessage 发送失败（送达未确认）: %s", e, exc_info=True)
             return False
         errcode = data.get("errcode", 0)
         if errcode:

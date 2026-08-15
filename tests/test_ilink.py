@@ -83,6 +83,14 @@ async def test_sendmessage_http_error_is_failure(client):
         assert await client.sendmessage("u", "c", "t") is False
 
 
+async def test_sendmessage_network_error_returns_false(client):
+    import aiohttp
+    with aioresponses() as m:
+        m.post(f"{BASE_URL}/ilink/bot/sendmessage",
+               exception=aiohttp.ClientConnectionError("net down"))
+        assert await client.sendmessage("u", "c", "t", token="T") is False
+
+
 async def test_getconfig_typing_ticket(client):
     with aioresponses() as m:
         m.post(f"{BASE_URL}/ilink/bot/getconfig", payload={"typing_ticket": "TK"})
