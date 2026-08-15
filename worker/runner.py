@@ -8,6 +8,9 @@ from worker.stream import StreamParser, Throttle
 
 # 进度推送里工具命令 JSON 的截断长度（够认出在跑什么即可）
 _PROGRESS_DETAIL_LIMIT = 60
+# stdout/stderr StreamReader 行上限（默认 64KB 太小：result 行内嵌完整回复，
+# 长报告/重写大文件时 > 64KB 很常见，超限 readline 抛 ValueError）
+_STREAM_LIMIT = 8 * 1024 * 1024
 # 失败诊断里 stderr 尾部的截断长度（字符）
 _STDERR_TAIL_CHARS = 500
 # stderr 并发收取时内存里保留的尾部字节数（防子进程刷屏撑大内存）
@@ -68,6 +71,7 @@ class TaskRunner:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=_STREAM_LIMIT,
                 cwd=session.cwd, env=env)
         except OSError as e:
             await self._fail(task, session.wechat_user, f"无法启动 claude 子进程: {e}")
@@ -133,6 +137,17 @@ class TaskRunner:
                         self._db.audit("cost", json.dumps({"task_id": task.id, "usd": ev.cost_usd}))
             await proc.wait()
             stderr_tail = (await stderr_task).decode("utf-8", "replace").strip()
+        except Exception as e:
+            # 流读取/解析任何异常（如单行超 _STREAM_LIMIT 的 ValueError）：kill 防
+            # 孤儿进程、wait 收尸、走 _fail —— 任务不卡 running、用户有反馈。
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass   # 进程已自行退出，kill 只是兜底
+            await proc.wait()
+            stderr_task.cancel()
+            await self._fail(task, session.wechat_user, f"输出流读取/解析异常: {e!r}")
+            return
         finally:
             self._procs.pop(task.id, None)
             stderr_task.cancel()   # 正常路径已 await 完；此处兜底异常路径不泄漏

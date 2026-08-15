@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -75,10 +76,11 @@ async def test_run_task_subprocess_fail(db, cfg):
 
 
 async def test_run_task_subprocess_fail_stderr_in_error(db, cfg, tmp_path):
-    # stderr 尾部并入错误消息与 audit（排障可见）
+    # stderr 尾部并入错误消息与 audit（排障可见）。
+    # 60 行 × 16B = 960B（strip 尾换行后 959 > 500）→ 500 字符截断真实生效
     failer = tmp_path / "fail_claude.py"
     failer.write_text("import sys\nsys.stdin.read()\n"
-                      "sys.stderr.write('boom: bad model\\n' * 30)\n"
+                      "sys.stderr.write('boom: bad model\\n' * 60)\n"
                       "sys.exit(2)\n", encoding="utf-8")
     cfg.claude_bin = [sys.executable, str(failer)]
     s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
@@ -88,7 +90,8 @@ async def test_run_task_subprocess_fail_stderr_in_error(db, cfg, tmp_path):
     texts = _outbox_texts(db)
     err = [x for x in texts if x.startswith("❌")]
     assert err and "退出码 2" in err[0] and "boom: bad model" in err[0]
-    assert len(err[0]) <= 500 + len("❌ 任务失败：claude 退出码 2: ")
+    # 精确断言：恰保留尾部 500 字符（若未截断则为前缀+959，可区分）
+    assert len(err[0]) == len("❌ 任务失败：claude 退出码 2: ") + 500
     audit = db._conn.execute(
         "SELECT detail FROM audit_log WHERE kind='task_failed'").fetchall()
     assert audit and "boom: bad model" in audit[-1]["detail"]
@@ -147,3 +150,50 @@ async def test_cancel_kills_process(db, cfg, tmp_path):
     texts = _outbox_texts(db)
     assert "已取消。" in texts
     assert not any("never" in x for x in texts)   # 半截 result 不推
+
+
+async def test_long_result_line_over_64kb(db, cfg, tmp_path):
+    # 回归（readline 64KB 行上限曾抛 ValueError → 孤儿进程 + 卡 running）：
+    # result 行内嵌 ~70KB 完整回复（长报告/重写大文件常态），必须整行读完、
+    # 任务 done、内容分页完整送达
+    payload = "x" * 70000
+    result_line = json.dumps({"type": "result", "result": payload,
+                              "total_cost_usd": 0.1, "is_error": False})
+    assert len(result_line.encode("utf-8")) > 64 * 1024   # 确实越过旧 64KB 上限
+    big = tmp_path / "big_claude.py"
+    big.write_text("import sys\nsys.stdin.read()\n"
+                   f"print({result_line!r}, flush=True)\n", encoding="utf-8")
+    cfg.claude_bin = [sys.executable, str(big)]
+    s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+    t = db.create_task(None, s.id, "report")
+    registry = {}
+    runner = TaskRunner(db, cfg, process_registry=registry)
+    await runner.run(db.get_task(t), s)
+
+    assert db.get_task(t).state == "done"
+    assert not registry                                        # 进程已回收注销
+    pages = [x for x in _outbox_texts(db) if "(第 " in x]
+    assert len(pages) == 35                                    # 70000 / 2000
+    assert all(p.endswith("x" * 2000) for p in pages)          # 每页内容无缺损
+
+
+async def test_result_line_over_stream_limit_fails_gracefully(db, cfg, tmp_path):
+    # 兜底路径：单行 > 8MB 上限（真实回复不会到，纯防御）→ readline 异常必须被
+    # 捕获 → 进程 kill 收尸、任务落终态、用户有反馈（而非孤儿进程 + 零反馈）
+    huge = tmp_path / "huge_claude.py"
+    huge.write_text(
+        "import sys\n"
+        "sys.stdin.read()\n"
+        "print('{\"type\":\"result\",\"result\":\"' + 'x' * (8 * 1024 * 1024 + 100)"
+        " + '\"}', flush=True)\n", encoding="utf-8")
+    cfg.claude_bin = [sys.executable, str(huge)]
+    s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+    t = db.create_task(None, s.id, "huge")
+    registry = {}
+    runner = TaskRunner(db, cfg, process_registry=registry)
+    await runner.run(db.get_task(t), s)   # 正常返回 = kill + wait 已收尸
+
+    assert db.get_task(t).state in ("failed", "pending")       # 不卡 running
+    assert not registry
+    err = [x for x in _outbox_texts(db) if x.startswith("❌")]
+    assert err and "输出流读取/解析异常" in err[0]               # 用户有反馈
