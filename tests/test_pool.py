@@ -1,8 +1,12 @@
 import asyncio
+import sys
+from types import SimpleNamespace
 
 import pytest
 
+from common.models import Budget
 from worker.pool import WorkerPool
+from worker.runner import TaskRunner
 
 
 class FakeRunner:
@@ -45,6 +49,7 @@ async def test_same_session_serial(db, fake_runner):
         await asyncio.sleep(0.05)
     assert fake_runner.ran == [1, 2]
     loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)
 
 
 async def test_different_sessions_parallel(db, fake_runner):
@@ -59,6 +64,7 @@ async def test_different_sessions_parallel(db, fake_runner):
     assert sorted(fake_runner.ran) == [1, 2]          # 跨 session 并行
     fake_runner.finish.set()
     loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)
 
 
 async def test_concurrency_cap(db, fake_runner):
@@ -72,6 +78,7 @@ async def test_concurrency_cap(db, fake_runner):
     assert len(fake_runner.ran) == 2                   # 上限 2
     fake_runner.finish.set()
     loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)
 
 
 async def test_cancel_pending_and_running(db, fake_runner):
@@ -93,6 +100,7 @@ async def test_cancel_pending_and_running(db, fake_runner):
     assert "取消" in reply
     await asyncio.sleep(0.2)
     loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)
 
 
 async def test_submit_check_snapshot_cancel_edges(db, fake_runner):
@@ -115,6 +123,7 @@ async def test_submit_check_snapshot_cancel_edges(db, fake_runner):
     assert "无需取消" in await pool.cancel(t)           # 终态 → 不动进程
     fake_runner.finish.set()
     loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)
 
 
 async def test_runner_crash_does_not_kill_pool(db):
@@ -139,3 +148,42 @@ async def test_runner_crash_does_not_kill_pool(db):
         "SELECT kind FROM audit_log").fetchall()]
     assert "runner_crash" in kinds              # 崩溃已审计
     loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)
+
+
+async def test_cancel_via_injected_real_runner(db, tmp_path):
+    # 生产接线回归（Task 13 方式）：外部构造真实 TaskRunner 注入 pool，/cancel
+    # 必须经 runner 公开 procs 注册表拿到句柄 kill 运行中任务——若接线断裂则
+    # 回复"进程句柄未注册"、任务卡 running。
+    hang = tmp_path / "hang_claude.py"
+    hang.write_text("import sys, time\nsys.stdin.read()\n"
+                    "print('{\"type\":\"result\",\"result\":\"never\"}', flush=True)\n"
+                    "time.sleep(300)\n", encoding="utf-8")
+    cfg = SimpleNamespace(
+        claude_bin=[sys.executable, str(hang)], secrets={}, repo_root=tmp_path,
+        throttle={"progress_window_s": 0.0}, budget=Budget(max_turns=10, max_usd=1.0),
+        page_char_limit=2000)
+
+    runner = TaskRunner(db, cfg, process_registry={})
+    s = db.get_or_create_session("u@im.wechat", str(tmp_path))
+    t = db.create_task(None, s.id, "long")
+    pool = WorkerPool(db, config=cfg, runner=runner, concurrency=1, poll_interval_s=0.05)
+    loop_task = asyncio.create_task(pool.run_forever())
+
+    for _ in range(200):                        # 等子进程注册进 runner 注册表
+        if t in runner.procs:
+            break
+        await asyncio.sleep(0.05)
+    assert t in runner.procs                    # 任务确在运行中
+
+    reply = await pool.cancel(t)
+    assert "取消" in reply                      # 而非"进程句柄未注册"
+    for _ in range(200):                        # 等 runner 走取消路径落终态并释放 session
+        if db.get_task(t).state == "canceled" and not pool.running_session_ids():
+            break
+        await asyncio.sleep(0.05)
+    assert db.get_task(t).state == "canceled"
+    assert pool.running_session_ids() == set()  # session 已释放，后续任务可领取
+
+    loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)

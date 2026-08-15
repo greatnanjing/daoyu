@@ -1,5 +1,6 @@
 """任务调度池：按 session 分组串行、跨 session 并行、并发上限、取消。
-同一 Claude 会话（同 UUID）任务必须串行（--resume 并发会冲突）——TRD 硬约束。"""
+同一 Claude 会话（同 UUID）任务必须串行（--resume 并发会冲突）——TRD 硬约束。
+同 session 串行依赖本进程内存状态，单实例假设——勿起第二个池实例。"""
 import asyncio
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,10 @@ class WorkerPool:
         self._concurrency = concurrency
         self._interval = poll_interval_s
         self._running_sessions: set[int] = set()
+        # 裸 create_task 的事件循环只持弱引用：不存强引用则任务可能在执行中被
+        # GC 回收 → finally 不执行 → _running_sessions 永不 discard → 该 session
+        # 永久卡死（7×24 常驻不可接受）。
+        self._live: set[asyncio.Task] = set()
         self._wake = asyncio.Event()
 
     async def run_forever(self) -> None:
@@ -65,7 +70,9 @@ class WorkerPool:
             self._running_sessions.add(sid)
             started = True
             free -= 1
-            asyncio.create_task(self._run_one(task, session))
+            t = asyncio.create_task(self._run_one(task, session))
+            self._live.add(t)                # 持强引用防 GC（见 __init__ 注释）
+            t.add_done_callback(self._live.discard)
         return started
 
     async def _run_one(self, task, session) -> None:

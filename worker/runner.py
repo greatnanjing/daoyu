@@ -47,6 +47,11 @@ class TaskRunner:
         self._cfg = config
         self._procs = process_registry
 
+    @property
+    def procs(self):
+        """取消注册表（pool 的 /cancel 经此 kill 运行中任务）。"""
+        return self._procs
+
     async def run(self, task, session) -> None:
         # 该 Claude 会话是否已被首次调用过（--session-id 建立后才能 --resume；
         # 对不存在的 UUID 直接 --resume 会报错，所以必须显式记录。
