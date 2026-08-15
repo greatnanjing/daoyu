@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 
+from common.text import split_text
 from worker.cli_builder import build_argv
 from worker.stream import StreamParser, Throttle
 
@@ -15,14 +16,6 @@ _STREAM_LIMIT = 8 * 1024 * 1024
 _STDERR_TAIL_CHARS = 500
 # stderr 并发收取时内存里保留的尾部字节数（防子进程刷屏撑大内存）
 _STDERR_TAIL_BYTES = 8192
-
-
-def split_text(text: str, limit: int) -> list[str]:
-    """超长文本分页（M1 按字符数切，UTF-16 代理对安全——不切字节）。"""
-    if len(text) <= limit:
-        return [text]
-    pages = [text[i:i + limit] for i in range(0, len(text), limit)]
-    return [f"(第 {i}/{len(pages)} 页)\n{p}" for i, p in enumerate(pages, 1)]
 
 
 class TrackedProcess:
