@@ -5,7 +5,7 @@ import time
 import uuid
 from pathlib import Path
 
-from common.models import InboundMessage, SessionBinding
+from common.models import InboundMessage, OutboxItem, SessionBinding, Task
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -172,3 +172,126 @@ class Database:
 
     def get_active_cwd(self, wechat_user: str, default: str) -> str:
         return self.get_state(f"cwd:{wechat_user}", default) or default
+
+    # ---- tasks ----
+    def create_task(self, message_id: int | None, session_id: int, prompt: str,
+                    kind: str = "chat", max_attempts: int = 3) -> int:
+        now = int(time.time())
+        cur = self._conn.execute(
+            "INSERT INTO tasks(message_id, session_id, prompt, kind, state, "
+            "max_attempts, created_at, updated_at) VALUES(?,?,?,?, 'pending',?,?,?)",
+            (message_id, session_id, prompt, kind, max_attempts, now, now))
+        self._conn.commit()
+        return cur.lastrowid
+
+    def _task_row(self, row) -> Task:
+        return Task(id=row["id"], message_id=row["message_id"], session_id=row["session_id"],
+                    prompt=row["prompt"], kind=row["kind"], state=row["state"],
+                    attempts=row["attempts"], max_attempts=row["max_attempts"],
+                    created_at=row["created_at"], updated_at=row["updated_at"],
+                    claude_bg_id=row["claude_bg_id"])
+
+    def get_task(self, task_id: int) -> Task | None:
+        row = self._conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        return self._task_row(row) if row else None
+
+    def pending_sessions(self) -> list[int]:
+        rows = self._conn.execute(
+            "SELECT session_id FROM tasks WHERE state='pending' "
+            "GROUP BY session_id ORDER BY MIN(id)").fetchall()
+        return [r["session_id"] for r in rows]
+
+    def claim_next_pending(self, session_ids: set[int]) -> Task | None:
+        """pending→running（attempts+1）。UPDATE...RETURNING 单语句原子领取，防并发双取。"""
+        for sid in session_ids:
+            cur = self._conn.execute(
+                "UPDATE tasks SET state='running', attempts=attempts+1, updated_at=? "
+                "WHERE id=(SELECT id FROM tasks WHERE state='pending' AND session_id=? "
+                "ORDER BY id LIMIT 1) RETURNING *",
+                (int(time.time()), sid))
+            row = cur.fetchone()
+            self._conn.commit()
+            if row:
+                return self._task_row(row)
+        return None
+
+    def finish_task(self, task_id: int, state: str) -> None:
+        if state == "failed":
+            row = self._conn.execute(
+                "SELECT attempts, max_attempts FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row and row["attempts"] < row["max_attempts"]:
+                state = "pending"   # 未耗尽 → 回队列重试
+            else:
+                state = "dead"      # 重试耗尽 → 死信（task context 确认：否则 dead）
+        self._conn.execute(
+            "UPDATE tasks SET state=?, updated_at=? WHERE id=?",
+            (state, int(time.time()), task_id))
+        self._conn.commit()
+
+    def reset_running_tasks(self) -> int:
+        cur = self._conn.execute(
+            "UPDATE tasks SET state='pending', updated_at=? WHERE state='running'",
+            (int(time.time()),))
+        self._conn.commit()
+        return cur.rowcount
+
+    def active_tasks(self) -> list[Task]:
+        rows = self._conn.execute(
+            "SELECT * FROM tasks WHERE state IN ('running','pending') ORDER BY id").fetchall()
+        return [self._task_row(r) for r in rows]
+
+    def cancel_task(self, task_id: int) -> bool:
+        cur = self._conn.execute(
+            "UPDATE tasks SET state='canceled', updated_at=? WHERE id=? AND state='pending'",
+            (int(time.time()), task_id))
+        self._conn.commit()
+        return bool(cur.rowcount)
+
+    # ---- outbox ----
+    def enqueue(self, task_id: int | None, to_user: str, text: str) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO outbox(task_id, to_user, text, created_at) VALUES(?,?,?,?)",
+            (task_id, to_user, text, int(time.time())))
+        self._conn.commit()
+        return cur.lastrowid
+
+    def _outbox_row(self, row) -> OutboxItem:
+        return OutboxItem(id=row["id"], task_id=row["task_id"], to_user=row["to_user"],
+                          text=row["text"], seq=row["seq"], state=row["state"],
+                          attempts=row["attempts"], max_attempts=row["max_attempts"],
+                          last_error=row["last_error"], created_at=row["created_at"])
+
+    def get_outbox(self, outbox_id: int) -> OutboxItem | None:
+        row = self._conn.execute("SELECT * FROM outbox WHERE id=?", (outbox_id,)).fetchone()
+        return self._outbox_row(row) if row else None
+
+    def next_outbox_batch(self, limit: int = 10) -> list[OutboxItem]:
+        cur = self._conn.execute(
+            "UPDATE outbox SET attempts=attempts+1 WHERE id IN "
+            "(SELECT id FROM outbox WHERE state='pending' ORDER BY id LIMIT ?) "
+            "RETURNING *", (limit,))
+        rows = cur.fetchall()
+        self._conn.commit()
+        return [self._outbox_row(r) for r in rows]
+
+    def mark_sent(self, outbox_id: int) -> None:
+        self._conn.execute("UPDATE outbox SET state='sent' WHERE id=?", (outbox_id,))
+        self._conn.commit()
+
+    def mark_send_failed(self, outbox_id: int, error: str) -> None:
+        row = self._conn.execute(
+            "SELECT attempts, max_attempts FROM outbox WHERE id=?", (outbox_id,)).fetchone()
+        state = "dead" if row and row["attempts"] >= row["max_attempts"] else "pending"
+        self._conn.execute(
+            "UPDATE outbox SET state=?, last_error=? WHERE id=?", (state, error, outbox_id))
+        self._conn.commit()
+
+    def dead_letter_count(self) -> int:
+        return self._conn.execute(
+            "SELECT COUNT(*) c FROM outbox WHERE state='dead'").fetchone()["c"]
+
+    def retry_failed_outbox(self) -> int:
+        """启动恢复兜底：failed→pending（正常路径 mark_send_failed 不留 failed 态）。"""
+        cur = self._conn.execute("UPDATE outbox SET state='pending' WHERE state='failed'")
+        self._conn.commit()
+        return cur.rowcount
