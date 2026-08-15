@@ -57,6 +57,13 @@ def load_config(repo_root: Path | None = None) -> Config:
     reconnect = dict(_DEFAULT_RECONNECT)
     reconnect.update(raw.get("reconnect") or {})
 
+    budget_raw = raw.get("budget", {})
+    try:
+        budget = Budget(**budget_raw)
+    except TypeError as e:
+        raise SystemExit(
+            f"gateway/config.json 的 budget 含未知键: {e}（合法键: max_turns, max_usd）")
+
     return Config(
         repo_root=root,
         db_path=root / "data" / "daoyu.db",
@@ -66,6 +73,6 @@ def load_config(repo_root: Path | None = None) -> Config:
         throttle=throttle,
         worker=worker,
         reconnect=reconnect,
-        budget=Budget(**raw.get("budget", {})),
+        budget=budget,
         secrets=secrets,
     )

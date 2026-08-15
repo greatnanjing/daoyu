@@ -79,3 +79,11 @@ def test_load_config_partial_throttle_merged(tmp_path):
 def test_load_config_missing_file_exits(tmp_path):
     with pytest.raises(SystemExit):
         load_config(tmp_path)
+
+
+def test_load_config_budget_unknown_key_exits_with_hint(tmp_path):
+    # M-4：budget 未知键原本是裸 TypeError（启动崩且不知来源），
+    # 现在 SystemExit 指明 config.json 来源与合法键名。
+    _write_config(tmp_path, {"budget": {"max_turns": 10, "budget_usd": 1.0}})
+    with pytest.raises(SystemExit, match="budget"):
+        load_config(tmp_path)

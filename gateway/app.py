@@ -106,10 +106,14 @@ async def poll_loop(db, cfg, ilink, pool, outbound, token_ref) -> None:
         except Exception as e:
             fails += 1
             log.warning("getupdates 失败（连续 %d 次），5s 后重试: %s", fails, e)
-            if fails >= 5 and ("401" in str(e) or "403" in str(e)):
-                log.error("连续 %d 次 401/403：bot_token 已失效，清空等待重新登录", fails)
-                db.set_state("bot_token", "")
-                token_ref["token"] = ""
+            if fails >= 5 and ("HTTP 401" in str(e) or "HTTP 403" in str(e)):
+                # 幂等门：token 已被清空后每轮失败不再重复清；精确匹配 "HTTP 401/403"
+                # （ILinkError 文案形如 "POST ... HTTP 401: ..."），避免响应体里
+                # 恰含 "401" 子串的普通错误误清仍有效的 token。
+                if token_ref["token"]:
+                    log.error("连续 %d 次 401/403：bot_token 已失效，清空等待重新登录", fails)
+                    db.set_state("bot_token", "")
+                    token_ref["token"] = ""
             await asyncio.sleep(5)
             continue
         fails = 0
