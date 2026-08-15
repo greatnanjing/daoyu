@@ -8,12 +8,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**设计完成、代码未开始**（截至 2026-08-15）。仓库现有内容仅 `docs/` 下两份已确认的权威文档，所有实现决策以它们为准：
+**M1（MVP）已实现**（2026-08-16），89 个测试全绿（`python -m pytest`）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `.superpowers/sdd/task-14-brief.md` Self-Review 节：
 
 - [docs/PRD.md](docs/PRD.md) — 产品需求（功能 FR-1~10、非功能需求、里程碑 M1/M2/M3、范围外）
 - [docs/TRD.md](docs/TRD.md) — 技术设计（架构、SQLite 数据模型、claude CLI 调用规范、命令路由、安全设计、测试策略）
+- [README.md](README.md) — 部署、使用命令表与 M1 边界
 
-尚无构建/测试系统与 git 仓库。代码落地后应在本文件补充常用命令。
+组件清单（入口文件）：
+
+- **入口**：`daoyu` console script → [gateway/app.py](gateway/app.py) `start()`（读 `gateway/config.json` + `claude/secrets.env`，崩溃恢复后常驻 poll / outbound / reconnect / worker-pool 四协程）；`daoyu-login` → [gateway/login.py](gateway/login.py)（终端扫码，token 写 DB state 后退出）。
+- **gateway**：[gateway/ilink.py](gateway/ilink.py)（iLink 协议封装）、[gateway/router.py](gateway/router.py)（命令总线路由）、[gateway/bridge.py](gateway/bridge.py)（桥命令 + 三层 /help）、[gateway/outbound.py](gateway/outbound.py)（outbox 投递/重试/死信/节流/typing）、[gateway/reconnect.py](gateway/reconnect.py)（24h 连接过期守护）。
+- **worker**：[worker/pool.py](worker/pool.py)（按 session 串行调度池）、[worker/cli_builder.py](worker/cli_builder.py)（claude argv 组装）、[worker/runner.py](worker/runner.py)（子进程执行/流式进度/费用记账）、[worker/stream.py](worker/stream.py)（stream-json 解析 + 节流器）。
+- **common**：[common/db.py](common/db.py)（SQLite 五表 + state KV）、[common/config.py](common/config.py)（配置加载契约）、[common/models.py](common/models.py)、[common/text.py](common/text.py)（长文本分页）。
+- **配置**：`gateway/config.example.json`（实例 config.json 进 gitignore）；`claude/settings.json` + `claude/mcp.json`（进 git，`--bare` 隔离宿主配置）；`claude/secrets.env`（gitignore）；`deploy/daoyu.service`（systemd 单元）。
+
+## 常用命令
+
+```bash
+python -m pytest                        # 全量测试（89 个）
+python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程）
+daoyu-login                             # 终端扫码登录（token 落盘后退出）
+python -m gateway.app                   # 前台调试运行（不进 systemd）
+```
+
+Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Linux 生产在 `.venv/bin/python`。
 
 ## 核心架构（写代码前必读）
 
