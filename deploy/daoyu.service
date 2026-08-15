@@ -1,0 +1,16 @@
+[Unit]
+Description=daoyu - WeChat remote for Claude Code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/proj/daoyu
+ExecStart=/home/<user>/proj/daoyu/.venv/bin/daoyu
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
