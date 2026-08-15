@@ -17,9 +17,9 @@ class FakeConfig:
         self.claude_bin = [sys.executable, str(FIXTURES / "fake_claude.py")]
         self.secrets = {"ANTHROPIC_API_KEY": "sk-test"}
         self.repo_root = tmp_path
-        self.throttle = {"progress_window_s": 0.0}   # 测试窗口=0 → 每条都推
+        # 形状与真实 load_config 一致：page_char_limit 只在 throttle dict 内（无顶层属性）
+        self.throttle = {"progress_window_s": 0.0, "page_char_limit": 2000}  # 窗口=0 → 每条都推
         self.budget = Budget(max_turns=10, max_usd=1.0)
-        self.page_char_limit = 2000
         self.fake_script = str(FIXTURES / "review_stream.jsonl")
         self.stdin_log = tmp_path / "stdin.log"
         monkeypatch.setenv("FAKE_CLAUDE_SCRIPT", self.fake_script)
@@ -136,7 +136,7 @@ async def test_cancel_kills_process(db, cfg, tmp_path):
                     "print('{\"type\":\"result\",\"result\":\"never\"}', flush=True)\n"
                     "time.sleep(300)\n", encoding="utf-8")
     cfg.claude_bin = [sys.executable, str(hang)]
-    cfg.throttle = {"progress_window_s": 0.5}
+    cfg.throttle = {"progress_window_s": 0.5, "page_char_limit": 2000}
     s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
     t = db.create_task(None, s.id, "long")
     registry = {}

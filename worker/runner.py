@@ -164,7 +164,8 @@ class TaskRunner:
             return
 
         flush(force=True)   # 尾批兜底：节流窗口内残留的最后一批也送达（仅成功路径）
-        for page in split_text(result_text or "(空回复)", self._cfg.page_char_limit):
+        for page in split_text(result_text or "(空回复)",
+                               self._cfg.throttle["page_char_limit"]):
             self._push(task, session.wechat_user, page)
         # 先置位再完结：消除"done 但未置位 → 下次对已存在会话误用 --session-id"窗口
         self._db.set_state(f"claude_session_inited:{session.claude_uuid}", "1")

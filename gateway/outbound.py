@@ -11,6 +11,9 @@ log = logging.getLogger(__name__)
 _IDLE_POLL_S = 0.5   # 无唤醒信号时的兜底轮询周期（notify() 可即时唤醒）
 _BATCH = 10          # 每轮领取的 outbox 条数
 
+_NO_TOKEN_ERR = "无有效 context_token（该用户无入站历史）"
+_UNCONFIRMED_ERR = "sendmessage 未确认"
+
 
 class OutboundLoop:
     def __init__(self, db, ilink, config, token_ref: dict, typing_state: dict):
@@ -23,6 +26,7 @@ class OutboundLoop:
         self._sent_today = 0
         self._day = time.localtime().tm_yday
         self._last_send = 0.0
+        self._limit_audited_day = -1         # daily_limit 熔断 audit 已记过的 yday
 
     async def run_forever(self) -> None:
         while True:
@@ -46,45 +50,58 @@ class OutboundLoop:
         if today != self._day:
             self._day, self._sent_today = today, 0
         if self._sent_today >= self._cfg.throttle["daily_send_limit"]:
+            if self._limit_audited_day != today:
+                # 熔断告警：每个熔断周期只记一次（循环 0.5s 一轮，不逐轮刷屏）
+                self._db.audit("daily_limit",
+                               f"sent={self._sent_today} "
+                               f"limit={self._cfg.throttle['daily_send_limit']} "
+                               f"出站熔断至明日")
+                self._limit_audited_day = today
             return  # 熔断：超每日上限暂停出站（/status 可见，明日自动恢复）
 
         for item in self._db.next_outbox_batch(limit=_BATCH):
             pages = split_text(item.text, self._cfg.throttle["page_char_limit"])
-            ok = True
+            err = None   # None=全部页送达；str=失败原因（空 token / 未确认 / 异常）
             for page in pages:
                 await self._respect_interval()
-                ok = await self._send(item.to_user, page)
-                if not ok:
+                err = await self._send(item.to_user, page)
+                if err:
                     break   # 任一页失败即止：整条留待重试（item 级重试语义）
-            if ok:
+            if err is None:
                 self._db.mark_sent(item.id)
                 self._sent_today += 1
             else:
-                self._db.mark_send_failed(item.id, "sendmessage 未确认")
+                self._db.mark_send_failed(item.id, err)
                 if self._db.get_outbox(item.id).state == "dead":
                     self._db.audit("dead_letter",
                                    f"count={self._db.dead_letter_count()} id={item.id}")
 
-    async def _send(self, to_user: str, text: str) -> bool:
+    async def _send(self, to_user: str, text: str) -> str | None:
+        """发送单页。成功返回 None；失败返回原因（直传 mark_send_failed 的 last_error）。"""
         # TRD "token 陷阱"对策：context_token 只用该用户最新入站消息的。无入站
         # 历史 → 拿不到有效 token，空 token 会 HTTP 200 但静默不投递——绝不发送，
-        # return False 交由 outbox 重试/死信路径（用户下次来信后即有 token 可投）。
+        # 失败原因交由 outbox 重试/死信路径（用户下次来信后即有 token 可投）。
         ctx = self._db.latest_context_token(to_user)
         if not ctx:
-            return False
+            return _NO_TOKEN_ERR
         token = self._token_ref["token"]
         base = self._token_ref["base_url"] or None
         try:
-            await self._typing_on(to_user, ctx)
+            # typing 是 cosmetic 功能且端点独立：故障时只告警，绝不阻断发送主路径
+            try:
+                await self._typing_on(to_user, ctx)
+            except Exception as e:
+                log.warning("typing_on 失败（忽略，继续发送）: user=%s err=%r", to_user, e)
             ok = await self._ilink.sendmessage(to_user, ctx, text, token, base)
-        except Exception:
-            return False
+        except Exception as e:
+            log.warning("sendmessage 异常: user=%s err=%r", to_user, e)
+            return f"sendmessage 异常: {e!r}"
         finally:
             try:
                 await self._typing_off(to_user)
             except Exception:
                 pass   # typing 收尾失败不影响发送结果判定
-        return ok
+        return None if ok else _UNCONFIRMED_ERR
 
     async def _typing_on(self, user: str, ctx: str) -> None:
         if not ctx:

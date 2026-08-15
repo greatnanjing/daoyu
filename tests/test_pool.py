@@ -161,8 +161,8 @@ async def test_cancel_via_injected_real_runner(db, tmp_path):
                     "time.sleep(300)\n", encoding="utf-8")
     cfg = SimpleNamespace(
         claude_bin=[sys.executable, str(hang)], secrets={}, repo_root=tmp_path,
-        throttle={"progress_window_s": 0.0}, budget=Budget(max_turns=10, max_usd=1.0),
-        page_char_limit=2000)
+        throttle={"progress_window_s": 0.0, "page_char_limit": 2000},
+        budget=Budget(max_turns=10, max_usd=1.0))
 
     runner = TaskRunner(db, cfg, process_registry={})
     s = db.get_or_create_session("u@im.wechat", str(tmp_path))

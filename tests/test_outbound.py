@@ -4,6 +4,7 @@ import time
 
 from common.models import InboundMessage
 from common.text import split_text
+from gateway.ilink import ILinkError
 from gateway.outbound import OutboundLoop
 
 
@@ -28,6 +29,16 @@ class FakeILink:
 
     async def sendtyping(self, ilink_user_id, ticket, status, token=None, base_url=None):
         self.typed.append((ilink_user_id, ticket, status))
+
+
+class TypingBrokenILink(FakeILink):
+    """typing 端点独立故障：getconfig/sendtyping 全抛 ILinkError（对齐真实非 200 行为）。"""
+
+    async def getconfig(self, ilink_user_id, context_token, token=None, base_url=None):
+        raise ILinkError("getconfig down")
+
+    async def sendtyping(self, ilink_user_id, ticket, status, token=None, base_url=None):
+        raise ILinkError("sendtyping down")
 
 
 class FakeCfg:
@@ -109,6 +120,8 @@ async def test_no_inbound_history_skips_send_and_deads(db):
         assert il.calls == 0      # 一次都没真正发过
         assert il.sent == []
         assert il.typed == []     # 拿不到 ticket，typing 也未发
+        # last_error 按原因区分：空 token ≠ sendmessage 未确认（排障不被误导）
+        assert "context_token" in db.get_outbox(1).last_error
         dead = db._conn.execute(
             "SELECT detail FROM audit_log WHERE kind='dead_letter'").fetchall()
         assert dead and "id=1" in dead[-1]["detail"]
@@ -132,6 +145,51 @@ async def test_paging_uses_latest_token(db):
         assert all(t == "CTX-NEW" for _, t, _ in il.sent)     # 每页都用最新 token
         assert il.sent[0][2].startswith("(第 1/3 页)")
         assert il.calls == 3
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_typing_failure_does_not_block_send(db):
+    # typing 是 cosmetic 功能：getconfig/sendtyping 端点独立故障（抛 ILinkError）
+    # 只能降级，绝不阻断 sendmessage 主路径——否则 typing 故障期间全部出站会
+    # 逐条烧完 5 次尝试进死信、回复全丢。
+    il = TypingBrokenILink()
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    loop = OutboundLoop(db, il, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    db.enqueue(None, "u@im.wechat", "m")
+    task = asyncio.create_task(loop.run_forever())
+    try:
+        assert await wait_until(lambda: db.get_outbox(1).state == "sent")
+        assert il.sent == [("u@im.wechat", "CTX", "m")]   # sendmessage 照常送达
+        assert il.calls == 1                              # 且只发一次（无徒劳重试）
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_daily_limit_circuit_breaker_audits_once(db):
+    # 熔断告警：每日上限触发时记 audit，但每个熔断周期只记一次（循环 0.5s 一轮，
+    # 不逐轮刷屏）；熔断期间不 claim outbox（attempts 不空耗）
+    il = FakeILink()
+    cfg = FakeCfg()
+    cfg.throttle["daily_send_limit"] = 0                    # 上来即熔断
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    loop = OutboundLoop(db, il, cfg,
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    db.enqueue(None, "u@im.wechat", "m")
+    task = asyncio.create_task(loop.run_forever())
+    try:
+        await asyncio.sleep(1.2)                            # 跨 ~3 轮 drain
+        rows = db._conn.execute(
+            "SELECT detail FROM audit_log WHERE kind='daily_limit'").fetchall()
+        assert len(rows) == 1                               # 恰一次，非每轮一条
+        assert "limit=0" in rows[0]["detail"]
+        assert db.get_outbox(1).state == "pending"          # 未被 claim、未空耗
+        assert il.calls == 0
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
