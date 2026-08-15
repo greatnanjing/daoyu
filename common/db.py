@@ -2,7 +2,10 @@
 import json
 import sqlite3
 import time
+import uuid
 from pathlib import Path
+
+from common.models import InboundMessage, SessionBinding
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -110,3 +113,62 @@ class Database:
     def queue_depth(self) -> int:
         return self._conn.execute(
             "SELECT COUNT(*) c FROM tasks WHERE state='pending'").fetchone()["c"]
+
+    # ---- messages ----
+    def insert_message(self, msg: InboundMessage) -> int | None:
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO messages(msg_id, from_user, text, context_token, received_at) "
+            "VALUES(?,?,?,?,?)",
+            (msg.msg_id, msg.from_user, msg.text, msg.context_token, msg.received_at))
+        self._conn.commit()
+        return cur.lastrowid if cur.rowcount else None
+
+    def latest_context_token(self, from_user: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT context_token FROM messages WHERE from_user=? "
+            "ORDER BY id DESC LIMIT 1", (from_user,)).fetchone()
+        return row["context_token"] if row else None
+
+    # ---- sessions ----
+    def get_or_create_session(self, wechat_user: str, cwd: str) -> SessionBinding:
+        row = self._conn.execute(
+            "SELECT * FROM sessions WHERE wechat_user=? AND cwd=?",
+            (wechat_user, cwd)).fetchone()
+        if row is None:
+            now = int(time.time())
+            self._conn.execute(
+                "INSERT INTO sessions(wechat_user, cwd, claude_uuid, policy, created_at, last_active_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (wechat_user, cwd, str(uuid.uuid4()), "auto", now, now))
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM sessions WHERE wechat_user=? AND cwd=?",
+                (wechat_user, cwd)).fetchone()
+        return SessionBinding(**dict(row))
+
+    def get_session(self, session_id: int) -> SessionBinding | None:
+        row = self._conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        return SessionBinding(**dict(row)) if row else None
+
+    def set_policy(self, session_id: int, policy: str) -> None:
+        self._conn.execute("UPDATE sessions SET policy=? WHERE id=?", (policy, session_id))
+        self._conn.commit()
+
+    def touch_session(self, session_id: int) -> None:
+        self._conn.execute(
+            "UPDATE sessions SET last_active_at=? WHERE id=?",
+            (int(time.time()), session_id))
+        self._conn.commit()
+
+    def list_sessions(self, wechat_user: str) -> list[SessionBinding]:
+        rows = self._conn.execute(
+            "SELECT * FROM sessions WHERE wechat_user=? ORDER BY last_active_at DESC",
+            (wechat_user,)).fetchall()
+        return [SessionBinding(**dict(r)) for r in rows]
+
+    # ---- 每用户当前 cwd 指针（state KV）----
+    def set_active_cwd(self, wechat_user: str, cwd: str) -> None:
+        self.set_state(f"cwd:{wechat_user}", cwd)
+
+    def get_active_cwd(self, wechat_user: str, default: str) -> str:
+        return self.get_state(f"cwd:{wechat_user}", default) or default
