@@ -1,9 +1,9 @@
 {
   "permissions": {
     "deny": [
-      "Read(/etc/**)", "Read(~/.ssh/**)", "Read(~/.claude/**)",
-      "Edit(/)", "Edit(/etc/**)", "Edit(~/.ssh/**)", "Edit(~/.claude/**)",
-      "Edit(./data/daoyu.db)", "Bash(rm -rf /*)", "Bash(rm -rf ~)"
+      "Read(//etc/**)", "Read(~/.ssh/**)", "Read(~/.claude/**)",
+      "Edit(//etc/**)", "Edit(~/.ssh/**)", "Edit(~/.claude/**)",
+      "Edit(//**/data/daoyu.db)", "Bash(rm -rf /*)", "Bash(rm -rf ~)"
     ]
   }
 }

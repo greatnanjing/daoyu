@@ -46,6 +46,12 @@ class OutboundLoop:
         self._wake.set()
 
     async def _drain_once(self) -> None:
+        if not self._token_ref["token"]:
+            # I-1 守卫：token 空窗期（401/403 清空 → 重连扫码窗最长 600s）绝不
+            # claim outbox——空 token 发送必败，5 次尝试会在几十秒内烧光进死信
+            # （M1 无 re-drive）。token 恢复后（_swap_token 原子替换 + 下轮 0.5s
+            # 轮询/notify 唤醒）自动续投，积压消息活到重连。
+            return
         today = time.localtime().tm_yday
         if today != self._day:
             self._day, self._sent_today = today, 0

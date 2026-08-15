@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from common.models import Budget
-from worker.cli_builder import build_argv
+from worker.cli_builder import BYPASS_DISALLOWED_TOOLS, build_argv
 
 
 def test_new_session_uses_session_id():
@@ -53,3 +53,21 @@ def test_budget_and_stream_flags_always_present():
         assert argv[argv.index("--mcp-config") + 1] == str(Path("/mcp.json"))
         assert argv[argv.index("--settings") + 1] == str(Path("/settings.json"))
         assert "--strict-mcp-config" in argv
+
+
+def test_bypass_disallowed_tools_use_absolute_anchor():
+    # I-2 回归：--disallowedTools 是 CLI flag，官方 permissions 文档规定 Read/Edit
+    # 单前导 / 锚定 original cwd（会话目录可被 /cd 切走）→ 系统路径必须 // 绝对
+    # 锚定；Bash 兜底两项与 claude/settings.json deny 清单对齐，防回退。
+    assert "Read(//etc/**)" in BYPASS_DISALLOWED_TOOLS
+    assert "Edit(//etc/**)" in BYPASS_DISALLOWED_TOOLS
+    assert "Edit(//**/data/daoyu.db)" in BYPASS_DISALLOWED_TOOLS
+    assert "Read(~/.ssh/**)" in BYPASS_DISALLOWED_TOOLS
+    assert "Edit(~/.claude/**)" in BYPASS_DISALLOWED_TOOLS
+    assert "Bash(rm -rf /*)" in BYPASS_DISALLOWED_TOOLS
+    assert "Bash(rm -rf ~)" in BYPASS_DISALLOWED_TOOLS
+    # 旧形态（单 / 锚定 settings 来源目录、cwd 相对、未定义形态）不得复活
+    assert "Edit(/)" not in BYPASS_DISALLOWED_TOOLS
+    assert "Read(/etc/**)" not in BYPASS_DISALLOWED_TOOLS
+    assert "Edit(/etc/**)" not in BYPASS_DISALLOWED_TOOLS
+    assert "Edit(./data/**)" not in BYPASS_DISALLOWED_TOOLS

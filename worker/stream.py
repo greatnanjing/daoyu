@@ -13,6 +13,8 @@ class StreamEvent:
     session_id: str | None = None
     cost_usd: float | None = None
     is_error: bool = False
+    subtype: str | None = None                 # result 事件：success / error_max_turns /
+                                               # error_max_budget_usd / error_during_execution
 
 
 class StreamParser:
@@ -64,7 +66,8 @@ class StreamParser:
         if t == "result":
             return StreamEvent(type="result", text=obj.get("result") or "",
                                cost_usd=obj.get("total_cost_usd"),
-                               is_error=bool(obj.get("is_error")))
+                               is_error=bool(obj.get("is_error")),
+                               subtype=obj.get("subtype"))
         return None
 
 

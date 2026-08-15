@@ -11,10 +11,15 @@ POLICY_MODE = {
     "plan": "plan",
 }
 
-# bypass 档工具级兜底（bypass 下 permissions.deny 生效性未实测，TRD §8 要求叠加）
+# bypass 档工具级兜底（bypass 下 permissions.deny 生效性未实测，TRD §8 要求叠加）。
+# 与 claude/settings.json 的 deny 清单逐项对齐。路径用 // 绝对锚定：官方 permissions
+# 文档规定 Read/Edit 单前导 / 锚定到规则来源目录（--settings <file> → 该文件所在目录，
+# CLI flag → original cwd，且会话 cwd 可被 /cd 切走），不锚定文件系统根；
+# //**/x 匹配文件系统任意位置的同名路径（文档明确记载的形态）。
 BYPASS_DISALLOWED_TOOLS = [
-    "Read(/etc/**)", "Read(~/.ssh/**)", "Read(~/.claude/**)",
-    "Edit(/etc/**)", "Edit(~/.ssh/**)", "Edit(~/.claude/**)", "Edit(./data/**)",
+    "Read(//etc/**)", "Read(~/.ssh/**)", "Read(~/.claude/**)",
+    "Edit(//etc/**)", "Edit(~/.ssh/**)", "Edit(~/.claude/**)",
+    "Edit(//**/data/daoyu.db)", "Bash(rm -rf /*)", "Bash(rm -rf ~)",
 ]
 
 

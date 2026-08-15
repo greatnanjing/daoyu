@@ -14,8 +14,13 @@ _PROGRESS_DETAIL_LIMIT = 60
 _STREAM_LIMIT = 8 * 1024 * 1024
 # 失败诊断里 stderr 尾部的截断长度（字符）
 _STDERR_TAIL_CHARS = 500
+# 失败诊断里 result 文本（claude 印出的失败原因）的截断长度（字符）
+_RESULT_TAIL_CHARS = 500
 # stderr 并发收取时内存里保留的尾部字节数（防子进程刷屏撑大内存）
 _STDERR_TAIL_BYTES = 8192
+# result subtype 中"确定性失败"的前缀：预算/回合耗尽重试无意义（每次调用带
+# 全新预算，重跑=再烧一份上限，违背 NFR-5 每任务上限语义）→ 直接死信不回队
+_NO_RETRY_SUBTYPES = ("error_max_turns", "error_max_budget_usd")
 
 
 class TrackedProcess:
@@ -98,6 +103,8 @@ class TaskRunner:
             pending.clear()
 
         result_text = ""
+        result_subtype: str | None = None
+        result_is_error = False
         try:
             # prompt 经 stdin 原样传入（不走 argv，无 shell 转义）；cwd = 会话绑定目录
             try:
@@ -131,6 +138,8 @@ class TaskRunner:
                     pass  # 增量文本不推（微信端不可编辑，等最终版）
                 elif ev.type == "result":
                     result_text = ev.text
+                    result_subtype = ev.subtype
+                    result_is_error = ev.is_error
                     if ev.cost_usd is not None:
                         self._db.audit("cost", json.dumps({"task_id": task.id, "usd": ev.cost_usd}))
             await proc.wait()
@@ -156,8 +165,26 @@ class TaskRunner:
             self._push(task, session.wechat_user, "已取消。")
             return
 
+        # I-3：预算/回合耗尽（result subtype 明示）是确定性失败——重试只会带
+        # 全新预算再烧一遍 → 不重试，直接死信。失败原因印在 result 文本里
+        # （stderr 可能为空），必须并入错误消息，否则排障信息全丢。
+        if result_subtype and result_subtype.startswith(_NO_RETRY_SUBTYPES):
+            await self._dead(task, session.wechat_user,
+                             f"预算/回合上限（{result_subtype}）: "
+                             f"{result_text[:_RESULT_TAIL_CHARS]}")
+            return
+
         if proc.returncode != 0:
+            if result_is_error and result_subtype and result_subtype.startswith("error_"):
+                # 其余运行内错误（error_during_execution 等）：同为确定性失败，
+                # 不重试（官方文档：运行内失败印在 result 且非零退出）
+                await self._dead(task, session.wechat_user,
+                                 f"claude 运行错误（{result_subtype}）: "
+                                 f"{result_text[:_RESULT_TAIL_CHARS]}")
+                return
             err = f"claude 退出码 {proc.returncode}"
+            if result_text:
+                err += f": {result_text[:_RESULT_TAIL_CHARS]}"
             if stderr_tail:
                 err += f": {stderr_tail[-_STDERR_TAIL_CHARS:]}"
             await self._fail(task, session.wechat_user, err)
@@ -191,3 +218,10 @@ class TaskRunner:
         self._db.finish_task(task.id, "failed")   # 未耗尽重试次数 → 回 pending 由 db 决定
         self._db.audit("task_failed", f"task={task.id} err={err}")
         self._push(task, to_user, f"❌ 任务失败：{err}")
+
+    async def _dead(self, task, to_user: str, err: str) -> None:
+        """确定性失败（预算/回合耗尽等）：直接死信不回队。finish_task 传 "dead"
+        而非 "failed"，天然绕过未耗尽→pending 的重试回退（无需 db 加参数）。"""
+        self._db.finish_task(task.id, "dead")
+        self._db.audit("task_failed", f"task={task.id} err={err}")
+        self._push(task, to_user, f"❌ 任务失败（不重试）：{err}")

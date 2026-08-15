@@ -80,10 +80,13 @@ async def test_tasks_listing(db):
 
 
 async def test_status(db):
-    db.enqueue(None, "u", "x")
+    # 真造一个 pending task（此前版本插 outbox 行——对 queue_depth 显示毫无影响，
+    # "排队" 字样恒在回复模板里，断言恒真）
+    s = db.get_or_create_session("u@im.wechat", "/repo")
+    db.create_task(None, s.id, "/review", kind="command")
     reply = await execute_bridge(db, FakePool([]), _route("status"),
                                  "u@im.wechat", FakeCfg())
-    assert "排队" in reply and "死信" in reply
+    assert "队列：1 排队" in reply and "死信：0" in reply
 
 
 async def test_cancel(db):
@@ -103,6 +106,7 @@ def test_help_merges_three_layers(db):
     text = build_help(db)
     assert "/cancel" in text          # 桥命令层
     assert "/time" in text            # iLink 运维层
+    assert "/help" in text            # /help 自身也在列（Minor #8：曾缺失）
     assert "/review" in text          # headless 转发层
 
 

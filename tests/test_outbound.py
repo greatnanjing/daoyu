@@ -194,3 +194,29 @@ async def test_daily_limit_circuit_breaker_audits_once(db):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+async def test_empty_bot_token_window_keeps_pending_then_delivers(db):
+    # I-1 回归：token 失效（401/403 清空）→ 重连扫码窗（最长 600s）内不得 claim
+    # outbox——空 token 发送必败，5 次尝试会在几十秒内烧光 → 全部死信（M1 无
+    # re-drive）。守卫须保 outbox pending、attempts 不空耗；token 原子换回
+    # （_swap_token 原位改写共享 dict）后自动续投送达。
+    il = FakeILink()
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    token_ref = {"token": "", "base_url": ""}     # 空窗期：token 已清空，待扫码
+    loop = OutboundLoop(db, il, FakeCfg(), token_ref, {})
+    db.enqueue(None, "u@im.wechat", "m")
+    task = asyncio.create_task(loop.run_forever())
+    try:
+        await asyncio.sleep(1.0)                   # 跨 ~2 轮 drain（0.5s 兜底轮询）
+        assert db.get_outbox(1).state == "pending"  # 未被 claim、attempts 未空耗
+        assert db.get_outbox(1).attempts == 0
+        assert il.calls == 0
+        token_ref["token"] = "T"                   # 重连成功：token 原子替换回填
+        loop.notify()                              # 重连/入站方唤醒出站循环
+        assert await wait_until(lambda: db.get_outbox(1).state == "sent")
+        assert il.sent == [("u@im.wechat", "CTX", "m")]
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

@@ -13,6 +13,7 @@ BRIDGE_HELP = {
 ILINK_HELP = {
     "time": "/time — 连接剩余时间",
     "重新连接": "/重新连接 — 立即重新扫码连接",
+    "help": "/help — 本帮助",
 }
 POLICIES = ("auto", "strict", "bypass", "plan")
 

@@ -18,7 +18,8 @@ class Route:
 
 
 def _closest(name: str, candidates: set[str]) -> str | None:
-    matches = difflib.get_close_matches(name, candidates, n=1, cutoff=0.6)
+    # sorted：平分候选时结果确定（set 迭代序受 PYTHONHASHSEED 影响，跨进程会漂移）
+    matches = difflib.get_close_matches(name, sorted(candidates), n=1, cutoff=0.6)
     return matches[0] if matches else None
 
 

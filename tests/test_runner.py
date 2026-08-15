@@ -197,3 +197,55 @@ async def test_result_line_over_stream_limit_fails_gracefully(db, cfg, tmp_path)
     assert not registry
     err = [x for x in _outbox_texts(db) if x.startswith("❌")]
     assert err and "输出流读取/解析异常" in err[0]               # 用户有反馈
+
+
+async def test_budget_exhausted_dead_no_retry(db, cfg, tmp_path):
+    # I-3 回归：--max-budget-usd 耗尽 → result subtype=error_max_budget_usd、
+    # 进程非零退出。预算闸是每次调用的上限，重试=带全新预算再烧一遍（违背
+    # NFR-5 每任务上限）→ 必须直接 dead 不回 pending，且 result 文本（claude
+    # 印出的失败原因，stderr 可能为空）要进错误消息与 audit。
+    result_line = json.dumps({"type": "result", "subtype": "error_max_budget_usd",
+                              "result": "Budget limit of $1.00 exceeded",
+                              "total_cost_usd": 1.0, "is_error": True})
+    budget_claude = tmp_path / "budget_claude.py"
+    budget_claude.write_text("import sys\nsys.stdin.read()\n"
+                             "sys.stderr.write('max budget exceeded\\n')\n"
+                             f"print({result_line!r}, flush=True)\n"
+                             "sys.exit(1)\n", encoding="utf-8")
+    cfg.claude_bin = [sys.executable, str(budget_claude)]
+    s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+    t = db.create_task(None, s.id, "big job")
+    claimed = db.claim_next_pending({s.id})           # 生产路径：pool 领取后执行
+    assert claimed.id == t and claimed.attempts == 1
+    runner = TaskRunner(db, cfg, process_registry={})
+    await runner.run(db.get_task(t), s)
+
+    row = db.get_task(t)
+    assert row.state == "dead"                        # 非 pending（未回队重试）
+    assert row.attempts == 1                          # 没有第二次领取/重跑
+    err = [x for x in _outbox_texts(db) if x.startswith("❌")]
+    assert err and "Budget limit" in err[0]
+    assert "error_max_budget_usd" in err[0] and "预算/回合上限" in err[0]
+    audit = db._conn.execute(
+        "SELECT detail FROM audit_log WHERE kind='task_failed'").fetchall()
+    assert audit and "Budget limit" in audit[-1]["detail"]
+
+
+async def test_fail_error_message_includes_result_text(db, cfg, tmp_path):
+    # I-3：普通失败路径（无 error_* subtype）的错误消息并入 result 文本——
+    # 失败原因印在 result 里时 stderr 可能为空，只给 "claude 退出码 N" 会丢排障信息
+    result_line = json.dumps({"type": "result", "result": "API 抖动，请稍后重试",
+                              "total_cost_usd": 0.0, "is_error": False})
+    quitter = tmp_path / "quiet_fail_claude.py"
+    quitter.write_text("import sys\nsys.stdin.read()\n"
+                       f"print({result_line!r}, flush=True)\n"
+                       "sys.exit(3)\n", encoding="utf-8")
+    cfg.claude_bin = [sys.executable, str(quitter)]
+    s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+    t = db.create_task(None, s.id, "hello")
+    runner = TaskRunner(db, cfg, process_registry={})
+    await runner.run(db.get_task(t), s)
+
+    assert db.get_task(t).state == "pending"          # 普通失败：attempts<3 回 pending
+    err = [x for x in _outbox_texts(db) if x.startswith("❌")]
+    assert err and "退出码 3" in err[0] and "API 抖动" in err[0]

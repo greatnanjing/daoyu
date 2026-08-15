@@ -35,6 +35,7 @@ def test_result_event():
     r = parse_all()[-1]
     assert r.type == "result" and r.text == "审查完成：3 个问题。"
     assert r.cost_usd == 0.21 and r.is_error is False
+    assert r.subtype == "success"     # I-3：subtype（error_max_* 等）必须解析到位
 
 
 def test_malformed_line_ignored():
