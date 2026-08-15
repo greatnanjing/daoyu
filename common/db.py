@@ -96,13 +96,14 @@ class Database:
         self._conn.commit()
 
     def today_cost_usd(self) -> float:
-        day_start = int(time.time()) - int(time.time()) % 86400
+        lt = time.localtime()
+        day_start = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
         total = 0.0
         for row in self._conn.execute(
                 "SELECT detail FROM audit_log WHERE kind='cost' AND ts>=?", (day_start,)):
             try:
                 total += float(json.loads(row["detail"]).get("usd", 0))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 pass
         return total
 

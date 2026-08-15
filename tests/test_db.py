@@ -1,8 +1,7 @@
 import json
+import time
 
 import pytest
-
-from common.db import Database  # noqa: F401（conftest 的 db fixture 依赖）
 
 
 def test_ensure_schema_idempotent(db, tmp_path):
@@ -30,3 +29,17 @@ def test_audit_and_cost(db):
     assert db.today_cost_usd() == pytest.approx(0.42)
     db.audit("cost", json.dumps({"task_id": 2, "usd": 0.08}))
     assert db.today_cost_usd() == pytest.approx(0.50)
+
+
+def test_queue_depth(db):
+    assert db.queue_depth() == 0
+    # session/create_task 接口在后续任务实现，这里直接走 SQL 造数
+    now = int(time.time())
+    cur = db._conn.execute(
+        "INSERT INTO sessions(wechat_user, cwd, claude_uuid, created_at, last_active_at) "
+        "VALUES(?,?,?,?,?)", ("u@im.wechat", "/repo", "uuid-x", now, now))
+    db._conn.execute(
+        "INSERT INTO tasks(session_id, prompt, created_at, updated_at) VALUES(?,?,?,?)",
+        (cur.lastrowid, "x", now, now))
+    db._conn.commit()
+    assert db.queue_depth() == 1

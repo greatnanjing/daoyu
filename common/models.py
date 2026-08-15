@@ -9,6 +9,7 @@ class InboundMessage:
     text: str
     context_token: str
     received_at: int
+    state: str = "received"  # received / queued
     id: int | None = None
 
 
@@ -35,6 +36,7 @@ class Task:
     max_attempts: int
     created_at: int
     updated_at: int
+    claude_bg_id: str | None = None  # --bg 任务 id（M2 长任务）
 
 
 @dataclass
