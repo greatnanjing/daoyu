@@ -7,3 +7,4 @@ claude/secrets.env
 .pytest_cache/
 qrcode.*
 .superpowers/
+*.egg-info/
