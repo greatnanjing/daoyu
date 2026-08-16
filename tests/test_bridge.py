@@ -133,6 +133,68 @@ async def test_cancel_non_numeric(db):
     assert "用法" in reply
 
 
+async def test_sessions_lists_multiple_sessions(db):
+    """多会话列表：序号 + cwd + 相对时间 + 最后任务摘要 + 当前 ▶ 标记。"""
+    s1 = db.get_or_create_session("u@im.wechat", "/repo")
+    s2 = db.get_or_create_session("u@im.wechat", "/other")
+    db.create_task(None, s1.id, "修复登录 bug")
+    db.create_task(None, s2.id, "部署到测试环境", kind="bg")
+    db.set_active_cwd("u@im.wechat", "/repo")
+    reply = await execute_bridge(db, FakePool([]), _route("sessions"),
+                                 "u@im.wechat", FakeCfg())
+    assert "/repo" in reply and "/other" in reply
+    assert "修复登录 bug" in reply                       # 普通任务摘要
+    assert "[bg] 部署到测试环境" in reply                # bg 任务带前缀
+    assert reply.count("#1") == 1 and reply.count("#2") == 1  # 序号
+    assert "▶" in reply
+    marked = [ln for ln in reply.splitlines() if "▶" in ln]
+    assert len(marked) == 1 and "/repo" in marked[0]     # 当前目录被标记且仅一个
+
+
+async def test_cd_by_index_switches(db):
+    """#n 按 /sessions 列表序号切换（last_active_at DESC，#2 = 倒数第二个）。"""
+    s1 = db.get_or_create_session("u@im.wechat", "/repo")
+    s2 = db.get_or_create_session("u@im.wechat", "/other")
+    # 直接钉死 last_active_at（同秒创建无法靠时序区分）：s2 最新排 #1，s1 排 #2
+    db._conn.execute("UPDATE sessions SET last_active_at=? WHERE id=?", (200, s2.id))
+    db._conn.execute("UPDATE sessions SET last_active_at=? WHERE id=?", (100, s1.id))
+    db._conn.commit()
+    reply = await execute_bridge(db, FakePool([]), _route("cd", "#2"),
+                                 "u@im.wechat", FakeCfg())
+    assert "已切换" in reply and "/repo" in reply
+    assert db.get_active_cwd("u@im.wechat", "/d") == "/repo"
+    # 切回既有目录 = 绑定回既有会话（不新建）
+    assert db.get_or_create_session("u@im.wechat", "/repo").id == s1.id
+
+
+async def test_cd_index_out_of_range(db):
+    db.get_or_create_session("u@im.wechat", "/repo")
+    db.get_or_create_session("u@im.wechat", "/other")
+    reply = await execute_bridge(db, FakePool([]), _route("cd", "#5"),
+                                 "u@im.wechat", FakeCfg())
+    assert "序号超出范围" in reply and "共 2 个会话" in reply
+    assert db.get_active_cwd("u@im.wechat", "/d") == "/d"  # 未切换
+
+
+async def test_sessions_no_task_shows_placeholder(db):
+    db.get_or_create_session("u@im.wechat", "/repo")
+    reply = await execute_bridge(db, FakePool([]), _route("sessions"),
+                                 "u@im.wechat", FakeCfg())
+    assert "（无任务）" in reply
+
+
+async def test_cd_no_args_shows_sessions_hint(db):
+    db.get_or_create_session("u@im.wechat", "/repo")
+    reply = await execute_bridge(db, FakePool([]), _route("cd", ""),
+                                 "u@im.wechat", FakeCfg())
+    assert "/sessions" in reply and "/cd #n" in reply
+
+
+def test_sessions_routed_as_bridge():
+    from gateway.router import route
+    assert route("/sessions", set()).kind == "bridge"
+
+
 def test_help_merges_three_layers(db):
     db.set_state("slash_commands", json.dumps(["review", "model"]))
     text = build_help(db)

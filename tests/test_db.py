@@ -171,3 +171,15 @@ def test_retry_failed_outbox_recovers_failed_state(db):
     assert db.retry_failed_outbox() == 1
     assert db.get_outbox(oid).state == "pending"
     assert db.retry_failed_outbox() == 0  # 无 failed 可恢复
+
+
+def test_last_task_summary(db):
+    s = db.get_or_create_session("u@im.wechat", "/repo")
+    assert db.last_task_summary(s.id) is None            # 无任务
+    db.create_task(None, s.id, "第一个任务")
+    db.create_task(None, s.id, "x" * 40)                 # 最新一条，40 字截 30
+    assert db.last_task_summary(s.id) == "x" * 30
+    db.create_task(None, s.id, "后台长任务", kind="bg")   # 再新一条 → bg 前缀
+    assert db.last_task_summary(s.id) == "[bg] 后台长任务"
+    other = db.get_or_create_session("u@im.wechat", "/other")
+    assert db.last_task_summary(other.id) is None        # 会话间不串

@@ -183,6 +183,16 @@ class Database:
             (wechat_user,)).fetchall()
         return [SessionBinding(**dict(r)) for r in rows]
 
+    def last_task_summary(self, session_id: int) -> str | None:
+        """/sessions 摘要：该会话最后一条任务的 prompt 截 30 字；bg 加前缀；无任务 None。"""
+        row = self._conn.execute(
+            "SELECT prompt, kind FROM tasks WHERE session_id=? ORDER BY id DESC LIMIT 1",
+            (session_id,)).fetchone()
+        if row is None:
+            return None
+        prompt = row["prompt"][:30]
+        return f"[bg] {prompt}" if row["kind"] == "bg" else prompt
+
     # ---- 每用户当前 cwd 指针（state KV）----
     def set_active_cwd(self, wechat_user: str, cwd: str) -> None:
         self.set_state(f"cwd:{wechat_user}", cwd)

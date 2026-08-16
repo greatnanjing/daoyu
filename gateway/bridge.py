@@ -7,7 +7,8 @@ BRIDGE_HELP = {
     "cancel": "/cancel <任务号> — 取消任务",
     "tasks": "/tasks — 查看 running/pending 任务",
     "status": "/status — 队列深度、死信数、当日费用、连接剩余",
-    "cd": "/cd <目录> — 切换工作目录（=切换 Claude 会话）",
+    "cd": "/cd <目录|#序号> — 切换工作目录（=切换 Claude 会话）",
+    "sessions": "/sessions — 列出会话（/cd #n 快速切换）",
     "policy": "/policy <auto|strict|bypass|plan> — 权限档位",
     "bg": "/bg <任务描述> — 转入后台长任务（claude --bg，完成自动回报结果）",
 }
@@ -63,12 +64,33 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
             sessions = db.list_sessions(from_user)
             lines = [f"当前目录：{cwd}", "历史会话："]
             lines += [f"  · {s.cwd}" for s in sessions[:10]]
+            lines.append("提示：/sessions 查看全部会话，/cd #n 快速切换")
             return "\n".join(lines)
+        if path.startswith("#") and path[1:].isdigit():
+            # /sessions 序号切换：列表按 last_active_at DESC 排，#n 即第 n 个
+            sessions = db.list_sessions(from_user)
+            n = int(path[1:])
+            if not 1 <= n <= len(sessions):
+                return f"序号超出范围（共 {len(sessions)} 个会话）"
+            target = sessions[n - 1]
+            db.set_active_cwd(from_user, target.cwd)
+            return f"已切换到 {target.cwd}（/sessions 序号 #{n}）"
         if not os.path.isdir(path):
             return f"目录不存在：{path}"
         db.set_active_cwd(from_user, path)
         db.get_or_create_session(from_user, path)
         return f"已切换到 {path}（新目录 = 新 Claude 会话）"
+    if cmd == "sessions":
+        cwd = db.get_active_cwd(from_user, config.default_cwd)
+        sessions = db.list_sessions(from_user)
+        if not sessions:
+            return "当前没有会话。"
+        lines = []
+        for i, s in enumerate(sessions, 1):
+            mark = "▶" if s.cwd == cwd else "  "
+            summary = db.last_task_summary(s.id) or "（无任务）"
+            lines.append(f"{mark} #{i} {s.cwd}（{_rel_time(s.last_active_at)}）{summary}")
+        return "\n".join(lines)
     if cmd == "policy":
         arg = route.args.strip().lower()
         if not arg:
@@ -90,6 +112,18 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
         await pool.submit_check()
         return f"已转后台（任务 #{tid}），/tasks 查进度、/cancel 取消。"
     return f"未知桥命令 {cmd}"
+
+
+def _rel_time(ts: int) -> str:
+    """/sessions 相对活跃时间：<1分钟 / 约N分钟 / 约N小时 / N天前。"""
+    delta = max(0, time.time() - ts)
+    if delta < 60:
+        return "<1分钟"
+    if delta < 3600:
+        return f"约{int(delta // 60)}分钟"
+    if delta < 86400:
+        return f"约{int(delta // 3600)}小时"
+    return f"{int(delta // 86400)}天前"
 
 
 def _remain_text(db, config) -> str:

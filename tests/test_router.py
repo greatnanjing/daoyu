@@ -7,7 +7,8 @@ def test_plain_text_is_chat():
 
 
 def test_bridge_commands():
-    for cmd, args in [("cancel", ""), ("tasks", ""), ("/status", ""), ("cd", "/repo"), ("policy", "strict")]:
+    for cmd, args in [("cancel", ""), ("tasks", ""), ("/status", ""), ("cd", "/repo"),
+                      ("policy", "strict"), ("sessions", "")]:
         text = cmd if cmd.startswith("/") else f"/{cmd} {args}".strip()
         r = route(text, set())
         assert r.kind == "bridge", text
