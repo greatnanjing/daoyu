@@ -11,18 +11,29 @@ PERMISSIONS_USAGE = ("用法：/permissions deny add <规则> | "
 _SCOPES = ("deny", "allow")
 
 
+class NotJsonObjectError(ValueError):
+    """文件是合法 JSON 但顶层不是对象（数组/字符串等）。str(e) 为文件路径。"""
+
+
 async def execute_proxy(db, route, config) -> str:
     cmd = route.command
     if cmd == "permissions":
         try:
             return _permissions(db, config, route.args.strip())
+        except NotJsonObjectError as e:
+            return f"配置文件格式异常（顶层不是对象）：{e}"
         except ValueError as e:
             return f"claude/settings.json 解析失败：{e}"
     if cmd == "mcp":
-        return _mcp(config)
+        try:
+            return _mcp(config)
+        except NotJsonObjectError as e:
+            return f"配置文件格式异常（顶层不是对象）：{e}"
     if cmd == "config":
         try:
             return _config(config)
+        except NotJsonObjectError as e:
+            return f"配置文件格式异常（顶层不是对象）：{e}"
         except ValueError as e:
             return f"gateway/config.json 解析失败：{e}"
     return f"/{cmd} 的微信代理版暂未提供。"
@@ -41,7 +52,7 @@ def _load_settings(config):
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("顶层不是 JSON 对象")
+        raise NotJsonObjectError(path)
     return data
 
 
@@ -105,7 +116,7 @@ def _permissions(db, config, args: str) -> str:
     # del <序号>（1-based，与列表显示一致）
     if data is None:
         return "未找到 claude/settings.json。"
-    if not rest.isdigit():
+    if not (rest.isascii() and rest.isdigit()):   # isdigit 会放行 int() 拒绝的字符（如 ²）
         return PERMISSIONS_USAGE
     n = int(rest)
     rules = _perm_lists(data)[scope]
@@ -124,9 +135,12 @@ def _mcp(config) -> str:
     if not path.is_file():
         return "未找到 claude/mcp.json。"
     try:
-        servers = json.loads(path.read_text(encoding="utf-8")).get("mcpServers") or {}
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as e:
         return f"claude/mcp.json 解析失败：{e}"
+    if not isinstance(raw, dict):
+        raise NotJsonObjectError(path)
+    servers = raw.get("mcpServers") or {}
     if not servers:
         return "claude/mcp.json 中没有配置 MCP server。"
     lines = ["🔌 mcpServers（claude/mcp.json，只读；启停 M3 提供）："]
@@ -165,6 +179,8 @@ def _config(config) -> str:
     if not path.is_file():
         return "未找到 gateway/config.json。"
     raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise NotJsonObjectError(path)
     throttle = raw.get("throttle") or {}
     thr = " · ".join(f"{label} {throttle.get(key, '默认')}"
                      for key, label in _THROTTLE_LABELS)
@@ -175,7 +191,7 @@ def _config(config) -> str:
     return "\n".join([
         "🛠 gateway/config.json（只读，改文件后重启生效）：",
         f"白名单：{len(raw.get('whitelist') or [])} 个账号",
-        f"默认目录：{raw.get('default_cwd', str(config.repo_root))}",
+        f"默认目录：{raw.get('default_cwd') or str(config.repo_root)}",
         f"预算：max_turns={budget.get('max_turns', '未设置')} / "
         f"max_usd=${budget.get('max_usd', '未设置')}",
         f"节流：{thr}",

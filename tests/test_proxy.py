@@ -72,6 +72,15 @@ async def test_permissions_bad_json(db, tmp_path):
     assert "解析失败" in reply
 
 
+async def test_settings_top_level_not_object(db, tmp_path):
+    # 顶层为合法非对象 JSON（数组）：回复格式异常提示而非 AttributeError 逃逸
+    (tmp_path / "claude").mkdir()
+    (tmp_path / "claude" / "settings.json").write_text("[]", encoding="utf-8")
+    reply = await execute_proxy(db, _route("permissions"), FakeCfg(tmp_path))
+    assert "配置文件格式异常" in reply and "顶层不是对象" in reply
+    assert "settings.json" in reply
+
+
 # ---- /permissions deny add / allow add ----
 
 async def test_permissions_deny_add_roundtrip(db, tmp_path):
@@ -173,6 +182,13 @@ async def test_mcp_missing_file(db, tmp_path):
     assert "未找到 claude/mcp.json" in reply
 
 
+async def test_mcp_top_level_not_object(db, tmp_path):
+    (tmp_path / "claude").mkdir()
+    (tmp_path / "claude" / "mcp.json").write_text("[]", encoding="utf-8")
+    reply = await execute_proxy(db, _route("mcp"), FakeCfg(tmp_path))
+    assert "配置文件格式异常" in reply and "mcp.json" in reply
+
+
 # ---- /config 只读脱敏 ----
 
 def _write_gateway_config(root):
@@ -206,6 +222,23 @@ async def test_config_overview_redacts_secrets(db, tmp_path):
 async def test_config_missing_file(db, tmp_path):
     reply = await execute_proxy(db, _route("config"), FakeCfg(tmp_path))
     assert "未找到 gateway/config.json" in reply
+
+
+async def test_config_top_level_not_object(db, tmp_path):
+    (tmp_path / "gateway").mkdir()
+    (tmp_path / "gateway" / "config.json").write_text("[]", encoding="utf-8")
+    reply = await execute_proxy(db, _route("config"), FakeCfg(tmp_path))
+    assert "配置文件格式异常" in reply and "config.json" in reply
+
+
+async def test_config_default_cwd_null_falls_back(db, tmp_path):
+    # default_cwd 显式为 null 时回退 repo_root，而不是打印 "None"
+    (tmp_path / "gateway").mkdir()
+    (tmp_path / "gateway" / "config.json").write_text(
+        '{"default_cwd": null}', encoding="utf-8")
+    reply = await execute_proxy(db, _route("config"), FakeCfg(tmp_path))
+    assert "None" not in reply
+    assert str(tmp_path) in reply
 
 
 # ---- 其余 proxy 命令 ----
