@@ -65,12 +65,24 @@ CREATE TABLE IF NOT EXISTS state (
   value TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS approvals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  to_user TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  input_json TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT 'pending',
+  created_at INTEGER NOT NULL,
+  decided_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_state ON approvals(state, id);
 """
 
 
 class Database:
     def __init__(self, path: str | Path):
-        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self.path = str(path)
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
 
     def ensure_schema(self) -> None:
@@ -295,3 +307,31 @@ class Database:
         cur = self._conn.execute("UPDATE outbox SET state='pending' WHERE state='failed'")
         self._conn.commit()
         return cur.rowcount
+
+    # ---- approvals（审批，M2）----
+    def create_approval(self, task_id: int, to_user: str, tool_name: str,
+                        input_json: str) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO approvals(task_id, to_user, tool_name, input_json, created_at) "
+            "VALUES(?,?,?,?,?)",
+            (task_id, to_user, tool_name, input_json, int(time.time())))
+        self._conn.commit()
+        return cur.lastrowid
+
+    def decide_approval(self, approval_id: int, state: str) -> bool:
+        """仅 pending 可改 approved/denied/expired；返回是否生效。"""
+        cur = self._conn.execute(
+            "UPDATE approvals SET state=?, decided_at=? "
+            "WHERE id=? AND state='pending'",
+            (state, int(time.time()), approval_id))
+        self._conn.commit()
+        return bool(cur.rowcount)
+
+    def pending_approval(self, to_user: str):
+        return self._conn.execute(
+            "SELECT * FROM approvals WHERE to_user=? AND state='pending' "
+            "ORDER BY id LIMIT 1", (to_user,)).fetchone()
+
+    def get_approval(self, approval_id: int):
+        return self._conn.execute(
+            "SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
