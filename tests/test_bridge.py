@@ -95,6 +95,38 @@ async def test_cancel(db):
     assert "3" in reply
 
 
+async def test_cancel_without_args_cancels_latest_running(db):
+    """PRD FR-2: /cancel 替代 Ctrl+C —— 无参数应取消当前会话最新运行中任务。"""
+    s = db.get_or_create_session("u@im.wechat", "/repo")
+    db.set_active_cwd("u@im.wechat", "/repo")
+    db.create_task(None, s.id, "long-job")          # id=1
+    db.claim_next_pending({s.id})                    # → running
+
+    class PoolWithCancel(FakePool):
+        def __init__(self, tasks):
+            super().__init__(tasks)
+            self.cancelled = None
+
+        async def cancel(self, task_id):
+            self.cancelled = task_id
+            return f"已取消任务 #{task_id}。"
+
+    pool = PoolWithCancel(db.active_tasks())
+    reply = await execute_bridge(db, pool, _route("cancel", ""), "u@im.wechat", FakeCfg())
+    assert pool.cancelled == 1                       # 取消了 running 的 #1
+    assert "1" in reply
+
+
+async def test_cancel_without_args_no_running(db):
+    """无参数且当前会话无 running 任务 → 用法提示。"""
+    s = db.get_or_create_session("u@im.wechat", "/repo")
+    db.set_active_cwd("u@im.wechat", "/repo")
+    db.create_task(None, s.id, "queued")             # pending 未领取
+    reply = await execute_bridge(db, FakePool(db.active_tasks()),
+                                 _route("cancel", ""), "u@im.wechat", FakeCfg())
+    assert "用法" in reply
+
+
 async def test_cancel_non_numeric(db):
     reply = await execute_bridge(db, FakePool([]), _route("cancel", "abc"),
                                  "u@im.wechat", FakeCfg())

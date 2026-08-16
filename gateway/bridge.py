@@ -26,9 +26,19 @@ def _active_session(db, from_user: str, default_cwd: str):
 async def execute_bridge(db, pool, route, from_user: str, config) -> str:
     cmd = route.command
     if cmd == "cancel":
-        if not route.args.strip().isdigit():
-            return "用法：/cancel <任务号>（/tasks 查看）"
-        return await pool.cancel(int(route.args.strip()))
+        arg = route.args.strip()
+        if arg.isdigit():
+            return await pool.cancel(int(arg))
+        if not arg:
+            # Ctrl+C 语义（PRD FR-2）：无参数 = 取消当前会话最新运行中任务
+            cwd = db.get_active_cwd(from_user, config.default_cwd)
+            sid = db.get_or_create_session(from_user, cwd).id
+            running = [t for t in pool.snapshot()
+                       if t.session_id == sid and t.state == "running"]
+            if running:
+                return await pool.cancel(running[-1].id)
+            return "当前会话没有运行中的任务。用法：/cancel <任务号>（/tasks 查看）"
+        return "用法：/cancel <任务号>（/tasks 查看）"
     if cmd == "tasks":
         rows = pool.snapshot()
         if not rows:
