@@ -73,8 +73,10 @@ async def test_full_pipeline_chat_and_command(tmp_path, monkeypatch):
     await handle_inbound(db, cfg, pool, None, inbound(1, "你好"))
     assert any("收到" in t for t in _texts(db))
     # 2) /review → 转发为 command 任务（slash_commands 预置：生产中由首次 init
-    #    事件同步，此处显式落 state 使路由确定、不与任务执行竞态）
-    db.set_state("slash_commands", json.dumps(["review", "model"], ensure_ascii=False))
+    #    事件同步，此处显式落 state 使路由确定、不与任务执行竞态）。config/mcp
+    #    与真实 init 清单一致（I1 防回归：代理必须赢过转发层）
+    db.set_state("slash_commands",
+                 json.dumps(["review", "model", "config", "mcp"], ensure_ascii=False))
     await handle_inbound(db, cfg, pool, None, inbound(2, "/review"))
     n_msgs, n_tasks = _count(db, "messages"), _count(db, "tasks")
     assert n_tasks == 2
@@ -187,14 +189,16 @@ async def test_full_pipeline_strict_approval_roundtrip(tmp_path, monkeypatch):
             assert row["task_id"] == int(entry["env"]["DAOYU_TASK_ID"])
             assert any("🔐" in t and "审批请求" in t for t in _texts(db))
 
-            # 段3：微信回 Y → gateway 拦截 decide → server 2s 轮询收终态回 approved
+            # 段3：微信回 Y → gateway 拦截 decide → server 2s 轮询收终态回 behavior JSON
             await handle_inbound(db, cfg, pool, None, inbound(3, "Y"))
             assert db.get_approval(row["id"])["state"] == "approved"
             assert any("已允许" in t for t in _texts(db))
             assert db.queue_depth() == 0         # Y/N 拦截本地秒回，不入队
             resp = await recv()
             assert resp["id"] == 2
-            assert resp["result"]["content"][0]["text"] == "approved"
+            verdict = json.loads(resp["result"]["content"][0]["text"])
+            assert verdict["behavior"] == "allow"          # C1：behavior JSON 契约
+            assert verdict["updatedInput"] == {"command": "echo hi"}
         finally:
             p.terminate()
             await p.wait()
@@ -246,9 +250,11 @@ async def test_full_pipeline_bg_smoke(tmp_path, monkeypatch):
                 break
             await asyncio.sleep(0.05)
         assert any(t.startswith("🚀") and "ab12cd34" in t for t in _texts(db))
-        # 启动命令形态：--bg <prompt>，prompt 走 argv（非 stdin）
+        # 启动命令形态：--bg <prompt>，prompt 走 argv（非 stdin）；--settings
+        # 使硬 deny 清单与 -p 一致生效（I3）
         argv = json.loads(cfg.args_log.read_text(encoding="utf-8"))["argv"]
         assert "--bg" in argv and argv[-1] == "写总结"
+        assert "--settings" in argv
 
         await handle_inbound(db, cfg, pool, None, inbound(2, "/tasks"))
         assert any("[bg]" in t and "写总结" in t for t in _texts(db))

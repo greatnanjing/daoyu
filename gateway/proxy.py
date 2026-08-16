@@ -1,10 +1,13 @@
 """代理命令（TUI 交互专属命令的微信文字版，M2 Task 5）。
 
-/permissions 读写 claude/settings.json（--bare 隔离宿主，改的是刀鱼专属配置），
-/mcp 与 /config 只读脱敏；其余 proxy 命令提示暂未提供。全部 gateway 本地秒回，
-不经 Claude。写回统一 ensure_ascii=False, indent=2，效果等价 TUI、天然可版本化。
+/permissions 读写 claude/settings.json（刀鱼专属配置——宿主 ~/.claude 已由
+CLAUDE_CONFIG_DIR 机制隔离，改的就是刀鱼这份），/mcp 与 /config 只读脱敏；
+其余 proxy 命令提示暂未提供。全部 gateway 本地秒回，不经 Claude。写回统一
+ensure_ascii=False, indent=2 + 临时文件原子替换，效果等价 TUI、天然可版本化。
 """
 import json
+import os
+import tempfile
 
 PERMISSIONS_USAGE = ("用法：/permissions deny add <规则> | "
                      "/permissions deny del <序号> | /permissions allow add <规则>")
@@ -68,10 +71,21 @@ def _perm_lists(data) -> dict:
 
 
 def _save_settings(config, data) -> None:
+    """原子写：先写同目录临时文件再 os.replace。截断式 write_text 中途崩溃
+    会留半写文件，下次 claude 调用读 settings 失败。"""
     path = _settings_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8")
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _fmt_rules(name: str, rules: list) -> str:

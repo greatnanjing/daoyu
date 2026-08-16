@@ -25,7 +25,9 @@ def test_policy_mode_mapping():
                           budget=Budget(), mcp_config=None, settings=None)
         return argv[argv.index("--permission-mode") + 1]
     assert mode_for("auto") == "acceptEdits"
-    assert mode_for("strict") == "acceptEdits"
+    # C2：实测（m2-final-review 探针 6）acceptEdits 下不触发 permission-prompt-tool
+    # （Bash 直接放行），default 档才触发——strict 必须用 default。
+    assert mode_for("strict") == "default"
     assert mode_for("bypass") == "bypassPermissions"
     assert mode_for("plan") == "plan"
 

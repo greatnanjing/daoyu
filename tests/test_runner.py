@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -60,6 +61,41 @@ async def test_run_task_success(db, cfg):
     # 进度（工具事件）也推过
     progress = [o for o in sent if "Bash" in o.text]
     assert progress
+
+
+async def test_subprocess_env_redirects_claude_config_dir(db, cfg, tmp_path, monkeypatch):
+    """C3：机制化隔离宿主 ~/.claude——子进程 env 必须带 CLAUDE_CONFIG_DIR 指向
+    <repo_root>/data/claude-home/（--bare/--settings 实测均不能隔离宿主配置）。"""
+    args_log = tmp_path / "args.log"
+    monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
+    s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+    t = db.create_task(None, s.id, "hi")
+    runner = TaskRunner(db, cfg, process_registry={})
+    await runner.run(db.get_task(t), s)
+
+    log = json.loads(args_log.read_text(encoding="utf-8"))
+    expected = str(cfg.repo_root / "data" / "claude-home")
+    assert log["claude_config_dir"] == expected       # 子进程 env 已注入
+    assert (cfg.repo_root / "data" / "claude-home").is_dir()   # 目录已自动创建
+
+
+def test_runner_init_cleans_stale_mcp_temp_files(db, cfg):
+    """遗留#4：主进程被 kill 时临时 mcp config 残留（finally 不执行）——
+    新 runner 启动时按 daoyu-mcp- 前缀清扫。"""
+    stale = Path(tempfile.gettempdir()) / "daoyu-mcp-stale-cleanup-test.json"
+    keep = Path(tempfile.gettempdir()) / "unrelated-not-daoyu.json"
+    stale.write_text("{}", encoding="utf-8")
+    keep.write_text("{}", encoding="utf-8")
+    try:
+        TaskRunner(db, cfg, process_registry={})
+        assert not stale.exists()            # 同前缀残留被清扫
+        assert keep.exists()                 # 其他文件绝不碰
+    finally:
+        for p in (stale, keep):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
 
 
 async def test_run_task_subprocess_fail(db, cfg):

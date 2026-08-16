@@ -120,11 +120,45 @@ async def test_runner_bg_launch_returns_immediately(db, cfg_bg):
     # 回执入 outbox（含任务号）
     assert any("后台" in x and f"#{t}" in x for x in _texts(db)), _texts(db)
     # prompt 走 argv 参数（--bg <prompt>），无 stdin 需求
-    argv = json.loads(cfg_bg.args_log.read_text(encoding="utf-8"))["argv"]
+    log = json.loads(cfg_bg.args_log.read_text(encoding="utf-8"))
+    argv = log["argv"]
     assert "--bg" in argv and argv[-1] == "跑个大活"
-    # 保守 flag 集：--bare + 预算 + 权限档（无 -p 全量 flag）
+    # flag 集：--bare + 预算 + 权限档 + --settings（I3：硬 deny 清单与 -p 同样生效）
     assert "--bare" in argv and "--max-turns" in argv and "--max-budget-usd" in argv
     assert "--permission-mode" in argv
+    assert argv[argv.index("--settings") + 1] == \
+        str(cfg_bg.repo_root / "claude" / "settings.json")
+    assert "--disallowedTools" not in argv        # 非 bypass 档不加
+    # C3：bg 子进程同样注入 CLAUDE_CONFIG_DIR 隔离宿主 ~/.claude
+    assert log["claude_config_dir"] == str(cfg_bg.repo_root / "data" / "claude-home")
+    assert (cfg_bg.repo_root / "data" / "claude-home").is_dir()
+
+
+async def test_runner_bg_bypass_adds_disallowed_tools(db, cfg_bg):
+    """I3：bypass 档 bg 带 --disallowedTools 工具级兜底（与 -p 同源常量）。"""
+    s = db.get_or_create_session("u@im.wechat", str(cfg_bg.repo_root))
+    db.set_policy(s.id, "bypass")
+    s = db.get_session(s.id)
+    t = db.create_task(None, s.id, "跑个大活", kind="bg")
+    db.claim_next_pending({s.id})
+    runner = TaskRunner(db, cfg_bg, process_registry={})
+    await asyncio.wait_for(runner.run(db.get_task(t), s), timeout=10)
+    argv = json.loads(cfg_bg.args_log.read_text(encoding="utf-8"))["argv"]
+    tools = argv[argv.index("--disallowedTools") + 1]
+    assert "Read(//etc/**)" in tools and "Bash(rm -rf ~)" in tools
+
+
+async def test_runner_bg_prompt_leading_dash_gets_space(db, cfg_bg):
+    """M2：bg prompt 走 argv，以 "-" 开头会被 CLI 解析成 flag → 前置空格防误读。"""
+    s = db.get_or_create_session("u@im.wechat", str(cfg_bg.repo_root))
+    t = db.create_task(None, s.id, "-flag-like-prompt", kind="bg")
+    db.claim_next_pending({s.id})
+    runner = TaskRunner(db, cfg_bg, process_registry={})
+    await asyncio.wait_for(runner.run(db.get_task(t), s), timeout=10)
+    assert db.get_task(t).claude_bg_id == "ab12cd34"   # 正常启动未被当 flag
+    argv = json.loads(cfg_bg.args_log.read_text(encoding="utf-8"))["argv"]
+    assert argv[-1] == " -flag-like-prompt"
+    assert argv[argv.index("--bg") + 1] == " -flag-like-prompt"
 
 
 async def test_runner_bg_launch_nonzero_exit_fails(db, cfg_bg, monkeypatch):

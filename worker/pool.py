@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import common.models as M
 from common.models import Budget
 from common.text import split_text
-from worker.cli_builder import build_argv
+from worker.cli_builder import build_argv, claude_config_dir
 from worker.stream import StreamParser
 
 if TYPE_CHECKING:
@@ -312,7 +312,11 @@ class WorkerPool:
 
     def _claude_env(self) -> dict:
         env = os.environ.copy()
-        env.update(self._cfg.secrets)
+        if self._cfg is not None:
+            env.update(self._cfg.secrets)
+            # 与 runner 一致：机制化隔离宿主 ~/.claude（agents/stop/resume 子进程
+            # 也是 claude CLI，同样受宿主配置穿透影响）
+            env["CLAUDE_CONFIG_DIR"] = claude_config_dir(self._cfg.repo_root)
         return env
 
     def _agents_json(self) -> "list[dict] | None":

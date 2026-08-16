@@ -17,6 +17,13 @@ ILINK_HELP = {
     "重新连接": "/重新连接 — 立即重新扫码连接",
     "help": "/help — 本帮助",
 }
+# 配置代理层（gateway/proxy.py 已实现的三个；hooks/plugins/login 等未提供，
+# 不列——/help 只列当前实际可用命令）
+PROXY_HELP = {
+    "permissions": "/permissions — 查看权限规则；deny add/del、allow add 读写",
+    "mcp": "/mcp — 列出已装 MCP server（只读）",
+    "config": "/config — 查看 gateway 配置概要（脱敏，只读）",
+}
 POLICIES = ("auto", "strict", "bypass", "plan")
 
 
@@ -142,6 +149,7 @@ def build_help(db) -> str:
     lines = ["刀鱼可用命令（与 Claude Code CLI 同一套语法）：", ""]
     lines += [f"  {d}" for d in BRIDGE_HELP.values()]
     lines += [f"  {d}" for d in ILINK_HELP.values()]
+    lines += [f"  {d}" for d in PROXY_HELP.values()]
     if forwarded:
         lines.append(f"  可转发给 Claude：{' '.join('/' + c for c in forwarded)}")
     lines.append("")

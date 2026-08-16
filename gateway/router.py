@@ -1,4 +1,7 @@
-"""统一命令总线路由（TRD §5）。顺序：桥命令 → iLink 运维 → 转发（headless 可用集）→ 代理 → 未知。"""
+"""统一命令总线路由（TRD §5）。顺序：桥命令 → iLink 运维 → 代理 → 转发（headless
+可用集）→ 未知。代理必须先于转发：实测 claude 2.1.233 的 init `slash_commands`
+含 config/mcp——若转发优先，代理命令会被截走原样发给 headless claude（TUI 命令在
+headless 下非预期行为），永远到不了 proxy 实现。"""
 import difflib
 from dataclasses import dataclass
 
@@ -40,10 +43,11 @@ def route(text: str, slash_commands: set[str]) -> Route:
         return Route(kind="bridge", command=name, args=args, detail={})
     if name in ILINK_COMMANDS:
         return Route(kind="ilink", command=name, args=args, detail={})
-    if name in slash_commands:
-        return Route(kind="forward", command=name, args=args, detail={})
+    # 代理先于 slash_commands 判定（见模块 docstring：config/mcp 会在真实清单里）
     if name in PROXY_COMMANDS:
         return Route(kind="proxy", command=name, args=args, detail={})
+    if name in slash_commands:
+        return Route(kind="forward", command=name, args=args, detail={})
 
     pool = BRIDGE_COMMANDS | ILINK_COMMANDS | PROXY_COMMANDS | set(slash_commands)
     suggestion = _closest(name, pool)

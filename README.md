@@ -108,7 +108,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 回复 Y 允许 / N 拒绝
 ```
 
-回 **Y** 允许（Claude 继续执行）、回 **N** 拒绝（Claude 收到拒绝后自行调整）；**5 分钟不回自动拒绝**（fail-safe）。一次只审最早的一条，其余文本不拦截、照常当聊天处理。注意：`/bg` 后台任务不走微信审批（`--bg` 与审批 flag 组合未实测，保守不传），回执会明示。
+回 **Y** 允许（Claude 继续执行）、回 **N** 拒绝（Claude 收到拒绝后自行调整）；**5 分钟不回自动拒绝**（fail-safe）。一次只审最早的一条（超过 5.5 分钟的陈旧请求不再劫持回复），其余文本不拦截、照常当聊天处理。注意：`/bg` 后台任务不走微信审批（`--bg` 与审批 flag 组合未实测，保守不传），但 deny 清单（`--settings`）仍生效，回执会明示。
 
 ### 监控告警（M2）
 
@@ -128,7 +128,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 ## 开发
 
 ```bash
-python -m pytest                        # 全量测试（175 个）
+python -m pytest                        # 全量测试（184 个）
 python -m pytest tests/test_e2e.py -v   # E2E：fake iLink + fake claude 子进程全链路
 python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```
@@ -147,8 +147,8 @@ python -m gateway.app                   # 前台调试运行（不进 systemd）
 
 ## M2 边界（当前版本不包含，勿过度期待）
 
-- **strict 档 `/bg` 不走审批**：`--bg` 与 `--permission-prompt-tool` 的组合未实测，runner 对 bg 用保守 flag 集（不传审批工具），strict 档发 `/bg` 回执会明示「不走微信审批，等同 auto 档」。长任务要审批就先 `-p` 同步跑。
-- **bypass 档 `/bg` 无工具级兜底**：同上保守 flag 集也不带 `--disallowedTools`（bypass 下 deny 清单是否生效本就待实测）；bg 任务建议配 auto/plan 档 + 预算闸。
+- **strict 档 `/bg` 不走审批**：`--bg` 与 `--permission-prompt-tool` 的组合未实测，不传审批工具；deny 清单经 `--settings` 照常生效（与 `-p` 一致）。strict 档发 `/bg` 回执会明示「不走微信审批，deny 清单仍生效」。长任务要审批就先 `-p` 同步跑。
+- **bypass 档 `/bg` 带 `--disallowedTools` 工具级兜底**（与 `-p` 同源常量）；`--bg` 与 `--settings`/`--disallowedTools` 的实际组合行为待真机确认（当前如实传入）。
 - **OCR / 视觉 MCP**（tesseract-ocr / ai-vision）：M3 再评估选型接入；当前已装 chrome-devtools / context7 / web-reader 三台。
 - **`/mcp`、`/config` 只读**：启停单个 MCP server、运行时改 gateway 配置 M3 提供（改文件 + 重启即生效）。
 - **媒体收发**（图片/语音）：M3。

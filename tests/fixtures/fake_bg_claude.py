@@ -19,7 +19,9 @@ def main():
     args_log = os.environ.get("FAKE_BG_ARGS_LOG")
     if args_log:
         with open(args_log, "w", encoding="utf-8") as f:
-            json.dump({"argv": sys.argv[1:]}, f, ensure_ascii=False)
+            json.dump({"argv": sys.argv[1:],
+                       "claude_config_dir": os.environ.get("CLAUDE_CONFIG_DIR")},
+                      f, ensure_ascii=False)
     delay_ms = os.environ.get("FAKE_BG_DELAY_MS")
     if delay_ms:
         time.sleep(int(delay_ms) / 1000.0)

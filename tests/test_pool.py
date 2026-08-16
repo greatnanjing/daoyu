@@ -151,6 +151,18 @@ async def test_runner_crash_does_not_kill_pool(db):
     await asyncio.gather(loop_task, return_exceptions=True)
 
 
+def test_claude_env_redirects_config_dir(db, fake_runner, tmp_path):
+    """C3：agents/stop/resume 子进程（也是 claude CLI）的 env 同样注入
+    CLAUDE_CONFIG_DIR 隔离宿主 ~/.claude，且目录自动创建。"""
+    cfg = SimpleNamespace(repo_root=tmp_path, secrets={"ANTHROPIC_API_KEY": "sk"},
+                          worker={})
+    pool = WorkerPool(db, config=cfg, runner=fake_runner, poll_interval_s=30)
+    env = pool._claude_env()
+    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "data" / "claude-home")
+    assert (tmp_path / "data" / "claude-home").is_dir()
+    assert env["ANTHROPIC_API_KEY"] == "sk"       # secrets 照常注入
+
+
 async def test_cancel_via_injected_real_runner(db, tmp_path):
     # 生产接线回归（Task 13 方式）：外部构造真实 TaskRunner 注入 pool，/cancel
     # 必须经 runner 公开 procs 注册表拿到句柄 kill 运行中任务——若接线断裂则

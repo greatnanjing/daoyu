@@ -77,6 +77,8 @@ async def test_strict_task_temp_merged_mcp_config_and_cleanup(db, tmp_path, monk
     j = argv.index("--mcp-config")
     tmp_cfg_path = argv[j + 1]
     assert tmp_cfg_path != str(tmp_path / "claude" / "mcp.json")
+    # 遗留#4：临时文件带 daoyu-mcp- 前缀（kill 残留靠启动时按前缀清扫）
+    assert os.path.basename(tmp_cfg_path).startswith("daoyu-mcp-")
     # 子进程存活期快照的临时 config 内容：静态清单完整合并 + daoyu 审批条目
     servers = log["mcp_config"]["mcpServers"]
     assert servers["chrome-devtools"] == static["chrome-devtools"]
@@ -232,7 +234,10 @@ async def test_temp_config_entry_boots_real_approval_server(db, tmp_path, monkey
         assert db.decide_approval(row["id"], "approved") is True
         resp = await recv()
         assert resp["id"] == 2
-        assert resp["result"]["content"][0]["text"] == "approved"
+        # C1：返回必须是 behavior JSON（纯文本会被 claude 判 invalid permission result）
+        verdict = json.loads(resp["result"]["content"][0]["text"])
+        assert verdict["behavior"] == "allow"
+        assert verdict["updatedInput"] == {"command": "rm -rf /tmp/x"}
     finally:
         p.terminate()
         await p.wait()

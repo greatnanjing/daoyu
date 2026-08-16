@@ -204,6 +204,16 @@ def test_help_merges_three_layers(db):
     assert "/review" in text          # headless 转发层
 
 
+def test_help_includes_implemented_proxy_commands(db):
+    """I2：/help 必须列出已实现的 proxy 命令（PRD：与实际能力一致）。"""
+    text = build_help(db)
+    assert "/permissions" in text and "deny add" in text
+    assert "/mcp" in text
+    assert "/config" in text
+    # 未实现的 proxy 命令不列（只列当前实际可用）
+    assert "/hooks" not in text and "/login" not in text
+
+
 async def test_ilink_ops(db):
     cfg = FakeCfg()
     help_text = await execute_ilink_op(db, _route("help", kind="ilink"),

@@ -33,10 +33,13 @@ def test_proxy_tui_commands():
         assert r.kind == "proxy", c
 
 
-def test_forward_beats_proxy_when_in_slash_commands():
-    # /mcp 若 headless 实际可用（出现在 slash_commands），优先转发
-    r = route("/mcp", {"mcp"})
-    assert r.kind == "forward"
+def test_proxy_beats_forward_when_in_slash_commands():
+    # I1：实测 claude 2.1.233 的 init slash_commands 含 config/mcp——代理必须
+    # 先于转发判定，否则 /mcp /config 被截走原样发给 headless claude，proxy
+    # 实现生产不可达。
+    for c in ("config", "mcp"):
+        r = route(f"/{c}", {"config", "mcp", "review"})
+        assert r.kind == "proxy", c
 
 
 def test_unknown_gets_suggestion():

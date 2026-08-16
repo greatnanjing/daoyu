@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**M2 已实现**（2026-08-16），175 个测试全绿（`python -m pytest`）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
+**M2 已实现**（2026-08-16），184 个测试全绿（`python -m pytest`）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
 
 - [docs/PRD.md](docs/PRD.md) — 产品需求（功能 FR-1~10、非功能需求、里程碑 M1/M2/M3、范围外）
 - [docs/TRD.md](docs/TRD.md) — 技术设计（架构、SQLite 数据模型、claude CLI 调用规范、命令路由、安全设计、测试策略）
@@ -26,15 +26,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 组件清单（入口文件）：
 
 - **入口**：`daoyu` console script → [gateway/app.py](gateway/app.py) `start()`（读 `gateway/config.json` + `claude/secrets.env`，崩溃恢复后常驻 poll / outbound / reconnect / worker-pool 四协程）；`daoyu-login` → [gateway/login.py](gateway/login.py)（终端扫码，token 写 DB state 后退出）。
-- **gateway**：[gateway/ilink.py](gateway/ilink.py)（iLink 协议封装）、[gateway/router.py](gateway/router.py)（命令总线路由）、[gateway/bridge.py](gateway/bridge.py)（桥命令 + 三层 /help）、[gateway/proxy.py](gateway/proxy.py)（TUI 配置命令微信代理）、[gateway/outbound.py](gateway/outbound.py)（outbox 投递/重试/死信/节流/typing）、[gateway/reconnect.py](gateway/reconnect.py)（24h 连接过期守护）。
+- **gateway**：[gateway/ilink.py](gateway/ilink.py)（iLink 协议封装）、[gateway/router.py](gateway/router.py)（命令总线路由）、[gateway/bridge.py](gateway/bridge.py)（桥命令 + /help 多层合并）、[gateway/proxy.py](gateway/proxy.py)（TUI 配置命令微信代理）、[gateway/outbound.py](gateway/outbound.py)（outbox 投递/重试/死信/节流/typing）、[gateway/reconnect.py](gateway/reconnect.py)（24h 连接过期守护）。
 - **worker**：[worker/pool.py](worker/pool.py)（按 session 串行调度池 + bg 后台监视 watcher）、[worker/cli_builder.py](worker/cli_builder.py)（claude argv 组装）、[worker/runner.py](worker/runner.py)（子进程执行/流式进度/费用记账/bg 启动分支）、[worker/stream.py](worker/stream.py)（stream-json 解析 + 节流器）、[worker/approval_mcp.py](worker/approval_mcp.py)（审批 MCP server）。
 - **common**：[common/db.py](common/db.py)（SQLite 五表 + approvals + state KV）、[common/config.py](common/config.py)（配置加载契约）、[common/models.py](common/models.py)、[common/text.py](common/text.py)（长文本分页）。
-- **配置**：`gateway/config.example.json`（实例 config.json 进 gitignore）；`claude/settings.json` + `claude/mcp.json`（进 git，`--bare` 隔离宿主配置）；`claude/secrets.env`（gitignore）；`deploy/daoyu.service`（systemd 单元）。
+- **配置**：`gateway/config.example.json`（实例 config.json 进 gitignore）；`claude/settings.json` + `claude/mcp.json`（进 git，宿主隔离靠 CLAUDE_CONFIG_DIR，见硬性约束）；`claude/secrets.env`（gitignore）；`deploy/daoyu.service`（systemd 单元）。
 
 ## 常用命令
 
 ```bash
-python -m pytest                        # 全量测试（175 个）
+python -m pytest                        # 全量测试（184 个）
 python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程；M2 含审批往返/bg 冒烟）
 daoyu-login                             # 终端扫码登录（token 落盘后退出）
 python -m gateway.app                   # 前台调试运行（不进 systemd）
@@ -58,23 +58,23 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 - **同一 Claude 会话（同 session UUID）的任务必须串行**（`--resume` 同会话并发会冲突）；不同会话可并行。任务队列按 session 分组串行。
 - **resume 必须在同一 cwd**（Claude 按 cwd + git worktree 作用域）；`/cd` 切目录 = 换绑另一会话。
 - **用户 prompt 经 stdin 传入** `claude -p`，避免 shell 转义问题；子进程 cwd = 会话绑定的工作目录。
-- **strict 审批 flag 语义**：strict = `--permission-mode acceptEdits` + `--permission-prompt-tool mcp__daoyu__approve`；审批 server 条目经**临时合并 mcp config**（静态 mcp.json + daoyu 条目，含任务级 env）传入，任务结束（成功/失败/取消）即删。server 键 `daoyu` 与工具引用必须严格一致（不一致 = Claude 找不到审批工具 = 该次工具调用被 deny，fail-safe）。
-- **`--bg` 与审批/兜底 flag 组合未实测**：bg 启动只用保守 flag 集（`--bare` + 预算 + `--permission-mode`），不传 `--permission-prompt-tool`、不传 `--disallowedTools`——strict 档 `/bg` 不走审批（回执明示等同 auto）、bypass 档 `/bg` 无工具级兜底，均待真机实测后收紧。
+- **strict 审批 flag 语义**：strict = `--permission-mode default` + `--permission-prompt-tool mcp__daoyu__approve`（实测 acceptEdits 下不触发 prompt-tool、default 才触发，TRD §4.1 "strict=acceptEdits" 假设已被实测推翻）；审批 server 条目经**临时合并 mcp config**（静态 mcp.json + daoyu 条目，含任务级 env，`daoyu-mcp-` 前缀）传入，任务结束（成功/失败/取消）即删、启动时清扫 kill 残留。server 键 `daoyu` 与工具引用必须严格一致（不一致 = Claude 找不到审批工具 = 该次工具调用被 deny，fail-safe）。**审批工具的返回必须是 behavior JSON**（`{"behavior":"allow","updatedInput":{...}}` / `{"behavior":"deny","message":...}`）——纯文本会被 claude 判 invalid permission result，决策从未生效。
+- **`--bg` flag 集（与审批工具组合待真机实测）**：`--bare` + 预算 + `--permission-mode` + `--settings`（硬 deny 清单与 `-p` 一致生效）+ bypass 档 `--disallowedTools`（与 `-p` 同源常量）；不传 `--permission-prompt-tool`——strict 档 `/bg` 不走审批（回执明示「不走微信审批，deny 清单仍生效」）；prompt 以 `-` 开头时前置空格防 flag 解析。
 - **长任务必须走 `claude --bg` + `claude agents --json` 轮询**（实测当前 CLI 无 `claude logs` 子命令，后台任务管理是 `claude agents`；停止是 `claude stop <id>`）：`-p` 结束 5s 会杀后台 bash，subagent 默认上限 10min。
 - **`context_token` 只使用当前会话最新入站消息的**，绝不复用历史值（复用旧 token 会 HTTP 200 但静默不投递）。
 - **入站按 `msg_id` 幂等去重**（iLink 重连后消息会重投）；出站走 outbox 发件箱，失败重试，至少 5 次后才进死信并告警。
-- **`--bare` 隔离宿主配置**：刀鱼 Claude 实例的持久配置在 `claude/settings.json` 与 `claude/mcp.json`（进 git），而非用户 `~/.claude`。代理命令（/permissions /config /mcp 等）改的是刀鱼专属配置文件，效果等价、天然版本化。
+- **宿主配置隔离靠 `CLAUDE_CONFIG_DIR`（机制化）**：实测 `--bare`/`--settings` 均不能隔离宿主 `~/.claude`（宿主 defaultMode/allow/trustAllFiles/插件全部穿透生效，直接架空 strict 审批与硬 deny 清单）；runner 与 pool 给每个 claude 子进程注入 `CLAUDE_CONFIG_DIR=<repo>/data/claude-home/`（调用即 mkdir，`--bare` 仅为减载）。凭据不受影响：仍经 secrets env 注入（ANTHROPIC_API_KEY 等）；MCP 清单经 `--mcp-config` 显式传。刀鱼持久配置在 `claude/settings.json` 与 `claude/mcp.json`（进 git），代理命令（/permissions /config /mcp）改的就是这些文件。
 
 ## 统一命令总线（产品核心）
 
 微信命令与 Claude Code CLI **同一套语法、同一个命名空间**，不发明第二套命令体系。路由顺序：
 
 1. **桥命令**（`/cancel` `/tasks` `/status` `/cd` `/sessions` `/policy` `/bg`）→ gateway 本地执行，秒回。另有 iLink 运维命令 `/time` `/重新连接`（管连接本身，与 Claude 无关）。
-2. **转发**：headless 可用命令集（启动时从 `system/init` 事件的 `slash_commands` 同步）→ 原样作为 prompt 传给 claude。
-3. **代理**：TUI 交互专属命令（静态维护清单：/permissions /hooks /plugins /login /config /mcp 等）→ 拦截后以相同命令名与参数格式操作同一底层配置，输出文字版。已实现 /permissions（读写）、/mcp、/config（只读）；其余提示暂未提供。
+2. **代理**：TUI 交互专属命令（静态维护清单：/permissions /hooks /plugins /login /config /mcp /vim /terminal-setup）→ 拦截后以相同命令名与参数格式操作同一底层配置，输出文字版。已实现 /permissions（读写）、/mcp、/config（只读）；其余提示暂未提供。**代理先于转发判定**——实测 init `slash_commands` 含 `config`/`mcp`，若转发优先会把代理命令截走原样发给 headless claude。
+3. **转发**：headless 可用命令集（启动时从 `system/init` 事件的 `slash_commands` 同步）→ 原样作为 prompt 传给 claude。
 4. 都不是 → 未知命令提示 + 最接近命令建议。
 
-`/help` 由三层合并动态生成，永远与实际能力一致。
+`/help` 由桥/运维/代理（已实现项）/转发多层合并动态生成，永远与实际能力一致。
 
 ## 计划目录结构（TRD §7）
 
@@ -94,7 +94,7 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 
 - **硬 deny 清单**（`//etc/**`、`~/.ssh/**`、`~/.claude/**`、`//**/data/daoyu.db` 等；注意官方 permissions 语义：单前导 `/` 锚定 settings 来源目录而非绝对路径，**绝对路径必须 `//`**）：auto/strict/plan 档恒生效；bypass 档下 deny 是否被尊重以实测为准，无论结果如何都叠加 `--disallowedTools` 工具级兜底。
 - **预算闸**（`--max-turns` + `--max-budget-usd`）与权限档位独立、恒生效，bypass 下仍限费；预算/回合耗尽的失败**不重试**（直接死信，防 3× 上限放大）。
-- `/policy` 四档：auto（默认全放）/ strict（acceptEdits + 审批 MCP：需批准的工具调用推微信 Y/N，5 分钟超时视为拒绝；`/bg` 任务不走审批、回执明示）/ bypass / plan。
+- `/policy` 四档：auto（默认全放）/ strict（default + 审批 MCP：需批准的工具调用推微信 Y/N，5 分钟超时视为拒绝；`/bg` 任务不走审批、deny 清单仍生效）/ bypass / plan。
 - secret 只放 `claude/secrets.env`（gitignore）+ 环境变量注入，日志脱敏。
 - gateway 仅响应白名单微信账号，白名单外一律不响应。
 
@@ -109,5 +109,5 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 TRD §11 登记的未决项：`/init` 在 headless 下的确切行为、bypass 档下 `permissions.deny` 是否生效、微信文本单条长度上限（分页阈值依据）、Claude Code 版本漂移（对策：固定版本 + 升级前跑 E2E 回归）。M2 新登记（均待真机验收）：
 
 - **bg completed 条目字段名未采样**：`claude agents --json` 完成条目自带输出/cost 的键名未实测（pool 按 result/output/lastMessage/text/summary 扫描候选，全未命中走 `--resume` 兜底总结）。
-- **`--bg` + `--disallowedTools`（及 + `--permission-prompt-tool`）组合未实测**：bg 保守 flag 集两者都不传，bypass 档 bg 无工具级兜底、strict 档 bg 无审批（回执明示）；真机验证组合可用后收紧。
+- **`--bg` 与 `--permission-prompt-tool` 组合未实测**：bg 不传审批工具（strict 档 `/bg` 无审批，回执明示）；`--settings`/bypass 档 `--disallowedTools` 已如实传入但 `--bg` 下的实际行为待真机确认。
 - **bg 停机竞态**：`claude stop <id>` 与 daemon 状态推进的竞态窗口（已按"先落终态者胜"处理 cancel/watcher 双向，真机确认 `claude stop` 对 running 条目的实际时延）。

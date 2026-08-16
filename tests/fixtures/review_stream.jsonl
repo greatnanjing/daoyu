@@ -1,4 +1,4 @@
-{"type":"system","subtype":"init","session_id":"abc-123","slash_commands":["review","model","compact","help","usage"]}
+{"type": "system", "subtype": "init", "session_id": "abc-123", "slash_commands": ["review", "model", "compact", "help", "usage", "config", "mcp"]}
 {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}
 {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"我来审查这个仓库。"}}}
 {"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"Bash"}}}

@@ -362,9 +362,13 @@ class Database:
         return bool(cur.rowcount)
 
     def pending_approval(self, to_user: str):
+        """最早一条 pending 审批。created_at 超 330s（300s 审批超时 + 30s 轮询
+        余量）的 stale 行不返回：主进程被 cgroup 整组杀死时 approval server 孙
+        进程来不及自置 expired，永久 pending 行会一直劫持用户的 Y/N 拦截。"""
         return self._conn.execute(
             "SELECT * FROM approvals WHERE to_user=? AND state='pending' "
-            "ORDER BY id LIMIT 1", (to_user,)).fetchone()
+            "AND created_at > ? ORDER BY id LIMIT 1",
+            (to_user, int(time.time()) - 330)).fetchone()
 
     def get_approval(self, approval_id: int):
         return self._conn.execute(

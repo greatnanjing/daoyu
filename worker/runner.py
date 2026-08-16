@@ -1,5 +1,6 @@
 """单任务执行：组装 argv → 子进程 → 实时逐行解析流 → 节流推进度 → 最终回复入 outbox。"""
 import asyncio
+import glob
 import json
 import os
 import re
@@ -8,7 +9,8 @@ import tempfile
 from pathlib import Path
 
 from common.text import split_text
-from worker.cli_builder import APPROVAL_MCP_SERVER, POLICY_MODE, build_argv
+from worker.cli_builder import (APPROVAL_MCP_SERVER, BYPASS_DISALLOWED_TOOLS,
+                                POLICY_MODE, build_argv, claude_config_dir)
 from worker.stream import StreamParser, Throttle
 
 # 进度推送里工具命令 JSON 的截断长度（够认出在跑什么即可）
@@ -29,6 +31,18 @@ _NO_RETRY_SUBTYPES = ("error_max_turns", "error_max_budget_usd")
 # 形如 "backgrounded → <8hex>"；Windows cp936 管道下箭头会乱码，故只锚
 # "backgrounded" 后按 UTF-8 errors=replace 解码再抓 ≥6 位 hex id。
 _BG_ID_RE = re.compile(r"backgrounded.*?([0-9a-f]{6,})")
+# 临时 mcp config 前缀：主进程被 kill 时 finally 不执行会残留，启动时按前缀清扫
+_MCP_TMP_PREFIX = "daoyu-mcp-"
+
+
+def _cleanup_stale_mcp_configs() -> None:
+    """清扫上次进程被 kill 时残留的临时 mcp config（正常路径每次任务结束即删）。
+    只认 daoyu-mcp-*.json 前缀，绝不碰 tempdir 其他文件。"""
+    for p in glob.glob(os.path.join(tempfile.gettempdir(), _MCP_TMP_PREFIX + "*.json")):
+        try:
+            os.unlink(p)
+        except OSError:
+            pass   # 竞态下已被他人删除/占用——幂等
 
 
 class TrackedProcess:
@@ -52,6 +66,8 @@ class TaskRunner:
         self._db = db
         self._cfg = config
         self._procs = process_registry
+        # kill 残留的临时 mcp config 只能靠启动清扫（finally 在 kill 路径不执行）
+        _cleanup_stale_mcp_configs()
 
     @property
     def procs(self):
@@ -87,6 +103,9 @@ class TaskRunner:
             prefix = bin_ if isinstance(bin_, list) else [bin_]
             env = os.environ.copy()
             env.update(self._cfg.secrets)
+            # 机制化隔离宿主 ~/.claude（--bare/--settings 实测均不能隔离）：刀鱼
+            # Claude 实例的 config 目录重定向到自管 data/claude-home（自动创建）
+            env["CLAUDE_CONFIG_DIR"] = claude_config_dir(self._cfg.repo_root)
 
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -232,20 +251,27 @@ class TaskRunner:
         → stdout 解析后台 id 落盘 → 回执 → 立即返回。任务保持 running，由
         pool._bg_watcher 轮询 agents --json 接管，此处绝不 finish_task。
 
-        flag 取舍（--bg 与各 flag 的组合实测结论未定，保守可跑集）：只传 --bare +
-        预算两 flag + --permission-mode（沿用 POLICY_MODE）。不传
-        --permission-prompt-tool —— strict 档审批 MCP 在 bg 下暂不支持，bg 任务
-        建议用 auto/bypass/plan 档；也不带 -p 全量 flag（--session-id/--resume 等
-        会话由后台守护进程自管，sessionId 事后可从 agents 条目拿）。"""
+        flag 集：--bare + 预算 + --permission-mode + --settings（硬 deny 清单与
+        -p 同样生效）+ bypass 档 --disallowedTools（与 -p 同源常量）。不传
+        --permission-prompt-tool —— strict 档审批 MCP 在 bg 下暂不支持，回执明示；
+        也不带 -p 全量 flag（--session-id/--resume 等会话由后台守护进程自管，
+        sessionId 事后可从 agents 条目拿）。--bg 与上述 flag 的组合行为待真机实测。"""
         env = os.environ.copy()
         env.update(self._cfg.secrets)
+        env["CLAUDE_CONFIG_DIR"] = claude_config_dir(self._cfg.repo_root)
         bin_ = self._cfg.claude_bin
         prefix = bin_ if isinstance(bin_, list) else [bin_]
+        # prompt 以 "-" 开头会被 CLI 解析成 flag → 前置空格防误读（单用户自伤
+        # 场景，预算闸兜底，一行防御即可）
+        prompt = task.prompt if not task.prompt.startswith("-") else " " + task.prompt
         argv = ["--bare",
+                "--settings", str(self._cfg.repo_root / "claude" / "settings.json"),
                 "--max-turns", str(self._cfg.budget.max_turns),
                 "--max-budget-usd", str(self._cfg.budget.max_usd),
-                "--permission-mode", POLICY_MODE[session.policy],
-                "--bg", task.prompt]
+                "--permission-mode", POLICY_MODE[session.policy]]
+        if session.policy == "bypass":
+            argv += ["--disallowedTools", ",".join(BYPASS_DISALLOWED_TOOLS)]
+        argv += ["--bg", prompt]
         try:
             proc = await asyncio.create_subprocess_exec(
                 *prefix, *argv,
@@ -283,8 +309,9 @@ class TaskRunner:
                    f"完成后自动推送结果，/tasks 查进度、/cancel 取消。")
         if session.policy == "strict":
             # strict 档 bg 不传审批 MCP（--bg 组合保守集）——必须明示用户，
-            # 静默降档违背"选 strict = 要审批"的预期（M5）
-            receipt += "（注：后台任务不走微信审批，等同 auto 档）"
+            # 静默降档违背"选 strict = 要审批"的预期（M5）。deny 清单经
+            # --settings 照常生效（I3：与 -p 一致）。
+            receipt += "（注：后台任务不走微信审批，deny 清单仍生效）"
         self._push(task, session.wechat_user, receipt)
 
     def _write_approval_mcp_config(self, task, session, static_path: Path) -> str:
@@ -292,7 +319,8 @@ class TaskRunner:
         server 条目。审批 server 是 claude 拉起的孙进程，env 经 config 条目注入
         （claude 子进程 env 无需感知）；command 用 sys.executable（runner 与
         server 同解释器，Windows 下为 venv python 绝对路径，可靠无 PATH 依赖）。
-        返回临时文件路径（NamedTemporaryFile delete=False，调用方负责删除）。"""
+        返回临时文件路径（NamedTemporaryFile 前缀 daoyu-mcp-、delete=False，
+        调用方负责删除；kill 残留由 runner 启动时按前缀清扫）。"""
         static = json.loads(static_path.read_text(encoding="utf-8"))
         merged = {"mcpServers": {
             **static.get("mcpServers", {}),
@@ -307,7 +335,8 @@ class TaskRunner:
                 },
             },
         }}
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False,
+        with tempfile.NamedTemporaryFile(prefix=_MCP_TMP_PREFIX, suffix=".json",
+                                         delete=False,
                                          mode="w", encoding="utf-8") as f:
             json.dump(merged, f, ensure_ascii=False, indent=2)
             return f.name

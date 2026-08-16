@@ -25,6 +25,8 @@ def main():
     if args_log:
         rest = sys.argv[1:]
         info: dict = {"argv": rest}
+        # env 注入断言用（C3：CLAUDE_CONFIG_DIR 隔离宿主 ~/.claude）
+        info["claude_config_dir"] = os.environ.get("CLAUDE_CONFIG_DIR")
         if "--mcp-config" in rest:
             i = rest.index("--mcp-config")
             try:

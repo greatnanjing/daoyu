@@ -120,6 +120,17 @@ async def test_permissions_add_creates_missing_file(db, tmp_path):
     assert _read_settings(tmp_path)["permissions"]["deny"] == ["Bash(curl:*)"]
 
 
+async def test_permissions_add_atomic_no_tmp_leftover(db, tmp_path):
+    """M4：写 settings.json 走临时文件 + os.replace——目录里不留 .tmp 残留，
+    且目标文件内容完整（无半写窗口）。"""
+    _write_settings(tmp_path, {"deny": [], "allow": [], "ask": []})
+    reply = await execute_proxy(db, _route("permissions", "deny add Edit(//tmp/**)"),
+                                FakeCfg(tmp_path))
+    assert "已添加" in reply
+    assert list((tmp_path / "claude").glob("*.tmp")) == []       # 无临时残留
+    assert _read_settings(tmp_path)["permissions"]["deny"] == ["Edit(//tmp/**)"]
+
+
 async def test_permissions_add_empty_rule_shows_usage(db, tmp_path):
     _write_settings(tmp_path, PERMS)
     for args in ("deny add", "deny add   ", "allow add"):

@@ -6,10 +6,26 @@ from common.models import Budget
 
 POLICY_MODE = {
     "auto": "acceptEdits",
-    "strict": "acceptEdits",        # strict = acceptEdits + 审批 MCP（--permission-prompt-tool）
+    # strict = default + 审批 MCP（--permission-prompt-tool）。实测（claude 2.1.233，
+    # 干净 CLAUDE_CONFIG_DIR 环境）：acceptEdits 下 Bash 等直接放行、不触发
+    # prompt-tool，default 档才触发审批——TRD §4.1 "strict=acceptEdits" 假设已被推翻。
+    "strict": "default",
     "bypass": "bypassPermissions",
     "plan": "plan",
 }
+
+
+def claude_config_dir(repo_root) -> str:
+    """刀鱼 Claude 实例的 CLAUDE_CONFIG_DIR（自建即 mkdir，幂等）。
+
+    实测（m2-final-review 探针 1-5）：--bare 与 --settings 均不能隔离宿主 ~/.claude
+    （宿主 defaultMode/allow/trustAllFiles/插件全部穿透生效，直接架空 strict 审批与
+    硬 deny 清单）；只有重定向 config 目录才是机制化隔离。凭据不受影响：仍经
+    secrets env 注入（ANTHROPIC_API_KEY 等）；MCP 清单经 --mcp-config 显式传。"""
+    d = Path(repo_root) / "data" / "claude-home"
+    d.mkdir(parents=True, exist_ok=True)
+    return str(d)
+
 
 # strict 档审批 server 键（runner 临时 mcp config 的 mcpServers 键）与工具引用。
 # 引用格式 mcp__<server 键>__<工具名>，键名原样透传：键与引用不一致时 Claude 找不到
