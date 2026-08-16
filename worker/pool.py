@@ -315,8 +315,10 @@ class WorkerPool:
         if self._cfg is not None:
             env.update(self._cfg.secrets)
             # 与 runner 一致：机制化隔离宿主 ~/.claude（agents/stop/resume 子进程
-            # 也是 claude CLI，同样受宿主配置穿透影响）
-            env["CLAUDE_CONFIG_DIR"] = claude_config_dir(self._cfg.repo_root)
+            # 也是 claude CLI，同样受宿主配置穿透影响）。开关语义同 runner 的
+            # isolate_claude_config（默认关，见 runner 注释）。
+            if getattr(self._cfg, "worker", {}).get("isolate_claude_config", False):
+                env["CLAUDE_CONFIG_DIR"] = claude_config_dir(self._cfg.repo_root)
         return env
 
     def _agents_json(self) -> "list[dict] | None":

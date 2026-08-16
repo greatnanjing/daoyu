@@ -64,10 +64,12 @@ async def test_run_task_success(db, cfg):
 
 
 async def test_subprocess_env_redirects_claude_config_dir(db, cfg, tmp_path, monkeypatch):
-    """C3：机制化隔离宿主 ~/.claude——子进程 env 必须带 CLAUDE_CONFIG_DIR 指向
-    <repo_root>/data/claude-home/（--bare/--settings 实测均不能隔离宿主配置）。"""
+    """C3：机制化隔离宿主 ~/.claude——isolate_claude_config 开关开启时子进程 env
+    带 CLAUDE_CONFIG_DIR 指向 <repo_root>/data/claude-home/；默认关（本机 Windows
+    代理环境实测该重定向致 claude 启动挂死，Linux 部署实测后再开）。"""
     args_log = tmp_path / "args.log"
     monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
+    cfg.worker = {"isolate_claude_config": True}          # 开关开 → 注入
     s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
     t = db.create_task(None, s.id, "hi")
     runner = TaskRunner(db, cfg, process_registry={})
@@ -77,6 +79,19 @@ async def test_subprocess_env_redirects_claude_config_dir(db, cfg, tmp_path, mon
     expected = str(cfg.repo_root / "data" / "claude-home")
     assert log["claude_config_dir"] == expected       # 子进程 env 已注入
     assert (cfg.repo_root / "data" / "claude-home").is_dir()   # 目录已自动创建
+
+
+async def test_subprocess_env_no_config_dir_by_default(db, cfg, tmp_path, monkeypatch):
+    """开关默认关 → 不注入 CLAUDE_CONFIG_DIR（本机环境该重定向挂死，见 m2-final-review）。"""
+    args_log = tmp_path / "args.log2"
+    monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
+    s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+    t = db.create_task(None, s.id, "hi")
+    runner = TaskRunner(db, cfg, process_registry={})
+    await runner.run(db.get_task(t), s)
+
+    log = json.loads(args_log.read_text(encoding="utf-8"))
+    assert not log.get("claude_config_dir")           # 未注入
 
 
 def test_runner_init_cleans_stale_mcp_temp_files(db, cfg):

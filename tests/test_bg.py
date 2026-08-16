@@ -97,7 +97,7 @@ class BgConfig:
         self.repo_root = tmp_path
         self.throttle = {"progress_window_s": 0.0, "page_char_limit": 2000}
         self.budget = Budget(max_turns=10, max_usd=1.0)
-        self.worker = {}
+        self.worker = {"isolate_claude_config": True}
         self.args_log = tmp_path / "bg_args.log"
         monkeypatch.setenv("FAKE_BG_ARGS_LOG", str(self.args_log))
 
@@ -129,7 +129,7 @@ async def test_runner_bg_launch_returns_immediately(db, cfg_bg):
     assert argv[argv.index("--settings") + 1] == \
         str(cfg_bg.repo_root / "claude" / "settings.json")
     assert "--disallowedTools" not in argv        # 非 bypass 档不加
-    # C3：bg 子进程同样注入 CLAUDE_CONFIG_DIR 隔离宿主 ~/.claude
+    # C3：bg 子进程在 isolate_claude_config 开关开启时同样注入（默认关，见 runner）
     assert log["claude_config_dir"] == str(cfg_bg.repo_root / "data" / "claude-home")
     assert (cfg_bg.repo_root / "data" / "claude-home").is_dir()
 

@@ -152,15 +152,21 @@ async def test_runner_crash_does_not_kill_pool(db):
 
 
 def test_claude_env_redirects_config_dir(db, fake_runner, tmp_path):
-    """C3：agents/stop/resume 子进程（也是 claude CLI）的 env 同样注入
-    CLAUDE_CONFIG_DIR 隔离宿主 ~/.claude，且目录自动创建。"""
+    """C3：agents/stop/resume 子进程（也是 claude CLI）在 isolate_claude_config
+    开关开启时同样注入 CLAUDE_CONFIG_DIR 隔离宿主 ~/.claude，且目录自动创建。"""
     cfg = SimpleNamespace(repo_root=tmp_path, secrets={"ANTHROPIC_API_KEY": "sk"},
-                          worker={})
+                          worker={"isolate_claude_config": True})
     pool = WorkerPool(db, config=cfg, runner=fake_runner, poll_interval_s=30)
     env = pool._claude_env()
     assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "data" / "claude-home")
     assert (tmp_path / "data" / "claude-home").is_dir()
     assert env["ANTHROPIC_API_KEY"] == "sk"       # secrets 照常注入
+
+    # 默认关 → 不注入（本机 Windows 代理环境实测该重定向致挂死，Linux 部署再开）
+    cfg2 = SimpleNamespace(repo_root=tmp_path, secrets={"ANTHROPIC_API_KEY": "sk"},
+                           worker={})
+    pool2 = WorkerPool(db, config=cfg2, runner=fake_runner, poll_interval_s=30)
+    assert "CLAUDE_CONFIG_DIR" not in pool2._claude_env()
 
 
 async def test_cancel_via_injected_real_runner(db, tmp_path):

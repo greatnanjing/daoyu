@@ -103,9 +103,13 @@ class TaskRunner:
             prefix = bin_ if isinstance(bin_, list) else [bin_]
             env = os.environ.copy()
             env.update(self._cfg.secrets)
-            # 机制化隔离宿主 ~/.claude（--bare/--settings 实测均不能隔离）：刀鱼
-            # Claude 实例的 config 目录重定向到自管 data/claude-home（自动创建）
-            env["CLAUDE_CONFIG_DIR"] = claude_config_dir(self._cfg.repo_root)
+            # 机制化隔离宿主 ~/.claude（--bare/--settings 实测均不能隔离）。
+            # ⚠️ 开关默认关：2026-08-16 本机（Windows+代理环境）实测 CLAUDE_CONFIG_DIR
+            # 重定向后 claude 启动挂死（连上 API 后等响应、CPU 零增长；宿主形态正常）。
+            # Linux 服务器部署时置 true 并实测；关闭时 strict 审批会被宿主 allow
+            # 规则穿透（C3 已知代价，见 m2-final-review.md）。
+            if getattr(self._cfg, "worker", {}).get("isolate_claude_config", False):
+                env["CLAUDE_CONFIG_DIR"] = claude_config_dir(self._cfg.repo_root)
 
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -258,7 +262,8 @@ class TaskRunner:
         sessionId 事后可从 agents 条目拿）。--bg 与上述 flag 的组合行为待真机实测。"""
         env = os.environ.copy()
         env.update(self._cfg.secrets)
-        env["CLAUDE_CONFIG_DIR"] = claude_config_dir(self._cfg.repo_root)
+        if getattr(self._cfg, "worker", {}).get("isolate_claude_config", False):
+            env["CLAUDE_CONFIG_DIR"] = claude_config_dir(self._cfg.repo_root)
         bin_ = self._cfg.claude_bin
         prefix = bin_ if isinstance(bin_, list) else [bin_]
         # prompt 以 "-" 开头会被 CLI 解析成 flag → 前置空格防误读（单用户自伤
