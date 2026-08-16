@@ -193,7 +193,7 @@ async def test_runner_bg_strict_receipt_notes_no_approval(db, cfg_bg):
     runner = TaskRunner(db, cfg_bg, process_registry={})
     await asyncio.wait_for(runner.run(db.get_task(t), s), timeout=10)
     assert db.get_task(t).state == "running"
-    assert any("后台" in x and "不走微信审批" in x for x in _texts(db))
+    assert any("后台" in x and "不走微信审批" in x for x in _texts(db))  # 回执含如实提示
 
 
 # ---------------- Step 3: bg watcher ----------------

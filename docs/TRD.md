@@ -251,3 +251,13 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 1. **M1**：SQLite schema → gateway 收发+落盘去重 → worker 调 `claude -p`（会话绑定、stream 解析、节流推送）→ 命令总线（转发/代理/桥命令）→ 崩溃恢复 → E2E。
 2. **M2**：审批 MCP → `--bg` 长任务 → MCP 装载（chrome-devtools/OCR/AI 视觉/web-reader/context7）→ 配置代理命令全套 → `/policy` 四档完整 → 监控告警。
 3. **M3（二期）**：媒体收发。
+
+---
+
+## 13. 实测勘误（2026-08-16，M2 实现期探针证实）
+
+以下三处本文件原假设被真实 claude 2.1.233 实测推翻，实现以勘误为准（原文保留供追溯）：
+
+1. **§4.1 "strict档: acceptEdits+审批MCP"** —— acceptEdits 权限模式下 `--permission-prompt-tool` **不触发**（需批准工具直接放行）；**default 模式才触发审批**。实现：`POLICY_MODE["strict"] = "default"`。另：审批工具必须返回 `{behavior: "allow", updatedInput?}` / `{behavior: "deny", message}` JSON（纯文本被判 invalid，决策不生效）。
+2. **§5 路由顺序"转发（2）先于代理（3）"** —— 实测 `system/init` 的 `slash_commands` 含 `config`/`mcp`，若转发在前则代理命令永不可达。实现顺序改为：桥 → iLink 运维 → **代理 → 转发**。
+3. **§7/§8 "--bare 隔离宿主配置"** —— 实测 `--bare` 与 `--settings` 均**不能**隔离宿主 `~/.claude`（宿主 defaultMode/allow/trustAllFiles 穿透生效，可架空审批与硬 deny）。实现：env 注入 `CLAUDE_CONFIG_DIR=<repo>/data/claude-home/` 机制化隔离（凭据仍经 secrets env 注入）。

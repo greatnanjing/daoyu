@@ -59,7 +59,7 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 - **resume 必须在同一 cwd**（Claude 按 cwd + git worktree 作用域）；`/cd` 切目录 = 换绑另一会话。
 - **用户 prompt 经 stdin 传入** `claude -p`，避免 shell 转义问题；子进程 cwd = 会话绑定的工作目录。
 - **strict 审批 flag 语义**：strict = `--permission-mode default` + `--permission-prompt-tool mcp__daoyu__approve`（实测 acceptEdits 下不触发 prompt-tool、default 才触发，TRD §4.1 "strict=acceptEdits" 假设已被实测推翻）；审批 server 条目经**临时合并 mcp config**（静态 mcp.json + daoyu 条目，含任务级 env，`daoyu-mcp-` 前缀）传入，任务结束（成功/失败/取消）即删、启动时清扫 kill 残留。server 键 `daoyu` 与工具引用必须严格一致（不一致 = Claude 找不到审批工具 = 该次工具调用被 deny，fail-safe）。**审批工具的返回必须是 behavior JSON**（`{"behavior":"allow","updatedInput":{...}}` / `{"behavior":"deny","message":...}`）——纯文本会被 claude 判 invalid permission result，决策从未生效。
-- **`--bg` flag 集（与审批工具组合待真机实测）**：`--bare` + 预算 + `--permission-mode` + `--settings`（硬 deny 清单与 `-p` 一致生效）+ bypass 档 `--disallowedTools`（与 `-p` 同源常量）；不传 `--permission-prompt-tool`——strict 档 `/bg` 不走审批（回执明示「不走微信审批，deny 清单仍生效」）；prompt 以 `-` 开头时前置空格防 flag 解析。
+- **`--bg` flag 集（与审批工具组合待真机实测）**：`--bare` + 预算 + `--permission-mode` + `--settings`（硬 deny 清单与 `-p` 一致生效）+ bypass 档 `--disallowedTools`（与 `-p` 同源常量）；不传 `--permission-prompt-tool`——strict 档 `/bg` 在 default 模式下需审批的工具（Bash/写文件）被直接拒绝（fail-safe，仅适合只读任务），回执/文档已如实明示；prompt 以 `-` 开头时前置空格防 flag 解析。
 - **长任务必须走 `claude --bg` + `claude agents --json` 轮询**（实测当前 CLI 无 `claude logs` 子命令，后台任务管理是 `claude agents`；停止是 `claude stop <id>`）：`-p` 结束 5s 会杀后台 bash，subagent 默认上限 10min。
 - **`context_token` 只使用当前会话最新入站消息的**，绝不复用历史值（复用旧 token 会 HTTP 200 但静默不投递）。
 - **入站按 `msg_id` 幂等去重**（iLink 重连后消息会重投）；出站走 outbox 发件箱，失败重试，至少 5 次后才进死信并告警。
@@ -94,7 +94,7 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 
 - **硬 deny 清单**（`//etc/**`、`~/.ssh/**`、`~/.claude/**`、`//**/data/daoyu.db` 等；注意官方 permissions 语义：单前导 `/` 锚定 settings 来源目录而非绝对路径，**绝对路径必须 `//`**）：auto/strict/plan 档恒生效；bypass 档下 deny 是否被尊重以实测为准，无论结果如何都叠加 `--disallowedTools` 工具级兜底。
 - **预算闸**（`--max-turns` + `--max-budget-usd`）与权限档位独立、恒生效，bypass 下仍限费；预算/回合耗尽的失败**不重试**（直接死信，防 3× 上限放大）。
-- `/policy` 四档：auto（默认全放）/ strict（default + 审批 MCP：需批准的工具调用推微信 Y/N，5 分钟超时视为拒绝；`/bg` 任务不走审批、deny 清单仍生效）/ bypass / plan。
+- `/policy` 四档：auto（默认全放）/ strict（default + 审批 MCP：需批准的工具调用推微信 Y/N，5 分钟超时视为拒绝；`/bg` 任务无审批通道、需审批工具被直接拒绝，仅适合只读）/ bypass / plan。
 - secret 只放 `claude/secrets.env`（gitignore）+ 环境变量注入，日志脱敏。
 - gateway 仅响应白名单微信账号，白名单外一律不响应。
 

@@ -311,7 +311,9 @@ class TaskRunner:
             # strict 档 bg 不传审批 MCP（--bg 组合保守集）——必须明示用户，
             # 静默降档违背"选 strict = 要审批"的预期（M5）。deny 清单经
             # --settings 照常生效（I3：与 -p 一致）。
-            receipt += "（注：后台任务不走微信审批，deny 清单仍生效）"
+            receipt += ("（注：后台任务不走微信审批；strict 档下需审批的工具"
+                        "（Bash/写文件）会被直接拒绝，仅适合只读任务，"
+                        "要执行操作请同步跑）")
         self._push(task, session.wechat_user, receipt)
 
     def _write_approval_mcp_config(self, task, session, static_path: Path) -> str:
