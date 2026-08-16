@@ -189,9 +189,11 @@ class TaskRunner:
             # 全新预算再烧一遍 → 不重试，直接死信。失败原因印在 result 文本里
             # （stderr 可能为空），必须并入错误消息，否则排障信息全丢。
             if result_subtype and result_subtype.startswith(_NO_RETRY_SUBTYPES):
-                await self._dead(task, session.wechat_user,
-                                 f"预算/回合上限（{result_subtype}）: "
-                                 f"{result_text[:_RESULT_TAIL_CHARS]}")
+                err = (f"预算/回合上限（{result_subtype}）: "
+                       f"{result_text[:_RESULT_TAIL_CHARS]}")
+                await self._dead(task, session.wechat_user, err)
+                self._alert_all(f"⚠️ 任务 #{task.id} 预算/回合耗尽死信"
+                                f"（{result_subtype}）：{result_text[:100]}")
                 return
 
             if proc.returncode != 0:
@@ -324,6 +326,13 @@ class TaskRunner:
 
     def _push(self, task, to_user: str, text: str) -> None:
         self._db.enqueue(task.id, to_user, text)
+
+    def _alert_all(self, text: str) -> None:
+        """监控告警（M2）：复用出站通道推全部白名单用户（outbox 循环 ≤0.5s
+        取走）。enqueue 是同步 DB 写，不会抛出破坏任务主路径；cfg 无
+        whitelist 属性（测试 FakeConfig）时静默跳过。"""
+        for user in sorted(getattr(self._cfg, "whitelist", None) or ()):
+            self._db.enqueue(None, user, text)
 
     async def _fail(self, task, to_user: str, err: str) -> None:
         self._db.finish_task(task.id, "failed")   # 未耗尽重试次数 → 回 pending 由 db 决定

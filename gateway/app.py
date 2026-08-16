@@ -127,6 +127,14 @@ async def poll_loop(db, cfg, ilink, pool, outbound, token_ref) -> None:
                     log.error("连续 %d 次 401/403：bot_token 已失效，清空等待重新登录", fails)
                     db.set_state("bot_token", "")
                     token_ref["token"] = ""
+                    # 监控告警（M2）：连接失效推全部白名单用户（自动重连随
+                    # ReconnectTimer 的空 token 兜底启动；enqueue 同步 DB 写安全）
+                    for user in sorted(getattr(cfg, "whitelist", None) or ()):
+                        db.enqueue(None, user,
+                                   "⚠️ 微信连接已失效，正在自动重连——"
+                                   "可能需要重新扫码（终端/二维码见服务器）")
+                    if outbound:
+                        outbound.notify()
             await asyncio.sleep(5)
             continue
         fails = 0

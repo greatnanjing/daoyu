@@ -45,6 +45,13 @@ class OutboundLoop:
         """有新消息入 outbox / 重连成功时唤醒（入站管道调用入口）。"""
         self._wake.set()
 
+    def _alert_all(self, text: str) -> None:
+        """监控告警（M2）：复用出站通道推全部白名单用户。enqueue 是同步 DB 写，
+        不涉及网络、不会抛出破坏调用方主路径；cfg 无 whitelist 属性（测试
+        FakeCfg）时静默跳过。"""
+        for user in sorted(getattr(self._cfg, "whitelist", None) or ()):
+            self._db.enqueue(None, user, text)
+
     async def _drain_once(self) -> None:
         if not self._token_ref["token"]:
             # I-1 守卫：token 空窗期（401/403 清空 → 重连扫码窗最长 600s）绝不
@@ -63,6 +70,9 @@ class OutboundLoop:
                                f"limit={self._cfg.throttle['daily_send_limit']} "
                                f"出站熔断至明日")
                 self._limit_audited_day = today
+                self._alert_all(f"⚠️ 今日出站已达上限（sent={self._sent_today} "
+                                f"limit={self._cfg.throttle['daily_send_limit']}），"
+                                f"已熔断至明日")
             return  # 熔断：超每日上限暂停出站（/status 可见，明日自动恢复）
 
         for item in self._db.next_outbox_batch(limit=_BATCH):
@@ -81,6 +91,11 @@ class OutboundLoop:
                 if self._db.get_outbox(item.id).state == "dead":
                     self._db.audit("dead_letter",
                                    f"count={self._db.dead_letter_count()} id={item.id}")
+                    if not item.text.startswith("⚠️"):
+                        # 只告警普通消息：系统性发送故障下告警自身也会死信，
+                        # 再对告警告警会 ⚠️→死信→⚠️ 无限自激刷爆 outbox/audit。
+                        self._alert_all(f"⚠️ 出站死信（id={item.id}）："
+                                        f"{item.text[:60]}…")
 
     async def _send(self, to_user: str, text: str) -> str | None:
         """发送单页。成功返回 None；失败返回原因（直传 mark_send_failed 的 last_error）。"""
