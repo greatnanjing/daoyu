@@ -129,6 +129,10 @@ async def poll_loop(db, cfg, ilink, pool, outbound, token_ref) -> None:
 
 
 async def main_async() -> None:
+    import sys
+    for stream in (sys.stdout, sys.stderr):   # Windows 管道默认 cp936，中文日志会乱码
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
     cfg = load_config()
