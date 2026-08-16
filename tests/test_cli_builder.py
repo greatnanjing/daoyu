@@ -55,6 +55,24 @@ def test_budget_and_stream_flags_always_present():
         assert "--strict-mcp-config" in argv
 
 
+def test_strict_adds_approval_prompt_tool():
+    # 三方向：strict+approval_mcp=True 加 flag；非 strict 不加；strict 但
+    # approval_mcp=False（无审批 server 场景）不加。
+    argv = build_argv(session_uuid="U", resume=True, policy="strict",
+                      budget=Budget(), mcp_config=None, settings=None,
+                      approval_mcp=True)
+    i = argv.index("--permission-prompt-tool")
+    assert argv[i + 1] == "mcp__daoyu__approve"
+    argv2 = build_argv(session_uuid="U", resume=True, policy="auto",
+                       budget=Budget(), mcp_config=None, settings=None,
+                       approval_mcp=True)
+    assert "--permission-prompt-tool" not in argv2
+    argv3 = build_argv(session_uuid="U", resume=True, policy="strict",
+                       budget=Budget(), mcp_config=None, settings=None,
+                       approval_mcp=False)
+    assert "--permission-prompt-tool" not in argv3
+
+
 def test_bypass_disallowed_tools_use_absolute_anchor():
     # I-2 回归：--disallowedTools 是 CLI flag，官方 permissions 文档规定 Read/Edit
     # 单前导 / 锚定 original cwd（会话目录可被 /cd 切走）→ 系统路径必须 // 绝对

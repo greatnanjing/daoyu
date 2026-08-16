@@ -59,6 +59,19 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict) -> None:
             outbound.notify()
         return
 
+    # 审批 Y/N 拦截（strict 档 approval MCP 推来的请求）：排在重连拦截之后、
+    # 正常路由之前。只认 Y/N 单字，其余文本不拦截照常入队/路由。
+    if text.strip().upper() in ("Y", "N"):
+        appr = db.pending_approval(from_user)
+        if appr is not None:
+            allow = text.strip().upper() == "Y"
+            db.decide_approval(appr["id"], "approved" if allow else "denied")
+            db.enqueue(None, from_user,
+                       "✅ 已允许，Claude 继续" if allow else "🚫 已拒绝")
+            if outbound:
+                outbound.notify()   # 回执即时送达（approval server 2s 轮询收终态）
+            return
+
     try:
         slash = set(json.loads(db.get_state("slash_commands") or "[]"))
     except ValueError:
