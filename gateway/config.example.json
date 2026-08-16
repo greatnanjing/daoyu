@@ -4,6 +4,6 @@
   "claude_bin": "claude",
   "throttle": {"min_send_interval_s": 1.0, "progress_window_s": 2.5, "page_char_limit": 2000, "daily_send_limit": 500},
   "budget": {"max_turns": 50, "max_usd": 5.0},
-  "worker": {"concurrency": 3, "poll_interval_s": 0.5},
+  "worker": {"concurrency": 3, "poll_interval_s": 0.5, "bg_poll_s": 10, "bg_blocked_timeout_s": 1800},
   "reconnect": {"session_duration_s": 86400, "warning_before_s": 7200, "reminder_interval_s": 1800, "force_before_s": 1800, "qrcode_scan_timeout_s": 600}
 }

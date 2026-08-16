@@ -14,7 +14,8 @@ from common.models import Budget
 # 实例 config.json 缺键也不至于运行期 KeyError。
 _DEFAULT_THROTTLE = {"min_send_interval_s": 1.0, "progress_window_s": 2.5,
                      "page_char_limit": 2000, "daily_send_limit": 500}
-_DEFAULT_WORKER = {"concurrency": 3, "poll_interval_s": 0.5}
+_DEFAULT_WORKER = {"concurrency": 3, "poll_interval_s": 0.5,
+                   "bg_poll_s": 10, "bg_blocked_timeout_s": 1800}
 _DEFAULT_RECONNECT = {"session_duration_s": 86400, "warning_before_s": 7200,
                       "reminder_interval_s": 1800, "force_before_s": 1800,
                       "qrcode_scan_timeout_s": 600}

@@ -2,12 +2,13 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
 
 from common.text import split_text
-from worker.cli_builder import APPROVAL_MCP_SERVER, build_argv
+from worker.cli_builder import APPROVAL_MCP_SERVER, POLICY_MODE, build_argv
 from worker.stream import StreamParser, Throttle
 
 # 进度推送里工具命令 JSON 的截断长度（够认出在跑什么即可）
@@ -24,6 +25,10 @@ _STDERR_TAIL_BYTES = 8192
 # result subtype 中"确定性失败"的前缀：预算/回合耗尽重试无意义（每次调用带
 # 全新预算，重跑=再烧一份上限，违背 NFR-5 每任务上限语义）→ 直接死信不回队
 _NO_RETRY_SUBTYPES = ("error_max_turns", "error_max_budget_usd")
+# claude --bg stdout 首行的后台任务 id。实测（2026-08-16，claude 2.1.233）首行
+# 形如 "backgrounded → <8hex>"；Windows cp936 管道下箭头会乱码，故只锚
+# "backgrounded" 后按 UTF-8 errors=replace 解码再抓 ≥6 位 hex id。
+_BG_ID_RE = re.compile(r"backgrounded.*?([0-9a-f]{6,})")
 
 
 class TrackedProcess:
@@ -54,6 +59,8 @@ class TaskRunner:
         return self._procs
 
     async def run(self, task, session) -> None:
+        if task.kind == "bg":
+            return await self._run_bg(task, session)
         static_mcp = self._cfg.repo_root / "claude" / "mcp.json"
         # strict 档：临时合并 mcp config（静态清单 + daoyu 审批 server 条目，含
         # 本机绝对路径与任务级 env——不能进 git 的静态 mcp.json）。run 的每条出口
@@ -217,6 +224,51 @@ class TaskRunner:
                     os.unlink(tmp_mcp)
                 except FileNotFoundError:
                     pass   # 已被清理（如测试快照后的极端竞态）——幂等
+
+    async def _run_bg(self, task, session) -> None:
+        """bg 任务启动分支：claude --bg <prompt>（prompt 走 argv 参数，无 stdin）
+        → stdout 解析后台 id 落盘 → 回执 → 立即返回。任务保持 running，由
+        pool._bg_watcher 轮询 agents --json 接管，此处绝不 finish_task。
+
+        flag 取舍（--bg 与各 flag 的组合实测结论未定，保守可跑集）：只传 --bare +
+        预算两 flag + --permission-mode（沿用 POLICY_MODE）。不传
+        --permission-prompt-tool —— strict 档审批 MCP 在 bg 下暂不支持，bg 任务
+        建议用 auto/bypass/plan 档；也不带 -p 全量 flag（--session-id/--resume 等
+        会话由后台守护进程自管，sessionId 事后可从 agents 条目拿）。"""
+        env = os.environ.copy()
+        env.update(self._cfg.secrets)
+        bin_ = self._cfg.claude_bin
+        prefix = bin_ if isinstance(bin_, list) else [bin_]
+        argv = ["--bare",
+                "--max-turns", str(self._cfg.budget.max_turns),
+                "--max-budget-usd", str(self._cfg.budget.max_usd),
+                "--permission-mode", POLICY_MODE[session.policy],
+                "--bg", task.prompt]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *prefix, *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=_STREAM_LIMIT,
+                cwd=session.cwd, env=env)
+        except OSError as e:
+            await self._fail(task, session.wechat_user, f"无法启动 claude 后台子进程: {e}")
+            return
+        stdout, stderr = await proc.communicate()   # 两条管道并发收，无死锁风险
+        out = stdout.decode("utf-8", "replace")
+        m = _BG_ID_RE.search(out)
+        if proc.returncode != 0 or m is None:
+            err = f"后台启动失败（rc={proc.returncode}）: {out[-_RESULT_TAIL_CHARS:]}"
+            tail = stderr.decode("utf-8", "replace").strip()
+            if tail:
+                err += f": {tail[-_STDERR_TAIL_CHARS:]}"
+            await self._fail(task, session.wechat_user, err)
+            return
+        bg_id = m.group(1)
+        self._db.set_bg_id(task.id, bg_id)
+        self._push(task, session.wechat_user,
+                   f"🚀 已在后台启动（任务 #{task.id}，后台 id {bg_id}）。"
+                   f"完成后自动推送结果，/tasks 查进度、/cancel 取消。")
 
     def _write_approval_mcp_config(self, task, session, static_path: Path) -> str:
         """strict 档临时 mcp config：静态 mcp.json 的 mcpServers 合并 daoyu 审批

@@ -1,13 +1,52 @@
 """任务调度池：按 session 分组串行、跨 session 并行、并发上限、取消。
 同一 Claude 会话（同 UUID）任务必须串行（--resume 并发会冲突）——TRD 硬约束。
-同 session 串行依赖本进程内存状态，单实例假设——勿起第二个池实例。"""
+同 session 串行依赖本进程内存状态，单实例假设——勿起第二个池实例。
+
+bg 长任务另有两条通道（M2）：启动走 runner 的 --bg 分支（run() 立即返回），
+完结走本模块 _bg_watcher——每 bg_poll_s 轮询 claude agents --json --all，
+按条目状态推进（completed → 取结果完结 / blocked 超时 → 失败 / 消失 → 取消）。
+"""
 import asyncio
+import json
+import os
+import subprocess
+import time
 from typing import TYPE_CHECKING
 
 import common.models as M
+from common.models import Budget
+from common.text import split_text
+from worker.cli_builder import build_argv
+from worker.stream import StreamParser
 
 if TYPE_CHECKING:
     from worker.runner import TrackedProcess
+
+# bg_id 刚落盘时 agents 列表可能尚未见到该条目（守护进程注册竞态），宽限期内
+# 条目缺失不算"被外部停止"（updated_at 由 set_bg_id 刷新，作 bg_id 写入时间用）
+_BG_MISSING_GRACE_S = 60.0
+# completed 条目自带输出/cost 字段的键名未实测采样：扫常见候选，取首个命中。
+# 全部未命中 → resume 兜底要总结 / 不记 cost。
+_BG_RESULT_KEYS = ("result", "output", "lastMessage", "text", "summary")
+_BG_COST_KEYS = ("costUsd", "cost_usd", "total_cost_usd", "costUSD")
+# 结果兜底 prompt（TRD：回原会话要一份 ≤500 字总结，--max-turns 2 限定回合）
+_BG_SUMMARY_PROMPT = "用不超过500字总结你的最终结果"
+
+
+def _extract_bg_result(entry: dict) -> str | None:
+    for k in _BG_RESULT_KEYS:
+        v = entry.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    return None
+
+
+def _extract_bg_cost(entry: dict) -> float | None:
+    for k in _BG_COST_KEYS:
+        v = entry.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+    return None
 
 
 class WorkerPool:
@@ -26,6 +65,9 @@ class WorkerPool:
         self._runner = runner
         self._concurrency = concurrency
         self._interval = poll_interval_s
+        worker_cfg = getattr(config, "worker", None) or {}
+        self._bg_poll_s = float(worker_cfg.get("bg_poll_s", 10))
+        self._bg_blocked_timeout_s = float(worker_cfg.get("bg_blocked_timeout_s", 1800))
         self._running_sessions: set[int] = set()
         # 裸 create_task 的事件循环只持弱引用：不存强引用则任务可能在执行中被
         # GC 回收 → finally 不执行 → _running_sessions 永不 discard → 该 session
@@ -34,21 +76,32 @@ class WorkerPool:
         self._wake = asyncio.Event()
 
     async def run_forever(self) -> None:
-        while True:
+        # bg 监视协程随调度循环常驻（存强引用防 GC，同 _live 约定）
+        watch = asyncio.create_task(self._bg_watcher(), name="bg-watcher")
+        self._live.add(watch)
+        watch.add_done_callback(self._live.discard)
+        try:
+            while True:
+                try:
+                    made = self._claim_one_round()
+                except Exception as e:   # claim 循环自身不许拖垮调度（_run_one 另有兜底）
+                    made = False
+                    try:
+                        self._db.audit("pool_claim_error", repr(e))
+                    except Exception:
+                        pass
+                if not made:
+                    try:
+                        await asyncio.wait_for(self._wake.wait(), timeout=self._interval)
+                    except asyncio.TimeoutError:
+                        pass
+                    self._wake.clear()
+        finally:
+            watch.cancel()
             try:
-                made = self._claim_one_round()
-            except Exception as e:   # claim 循环自身不许拖垮调度（_run_one 另有兜底）
-                made = False
-                try:
-                    self._db.audit("pool_claim_error", repr(e))
-                except Exception:
-                    pass
-            if not made:
-                try:
-                    await asyncio.wait_for(self._wake.wait(), timeout=self._interval)
-                except asyncio.TimeoutError:
-                    pass
-                self._wake.clear()
+                await watch
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def submit_check(self) -> None:
         """有新任务入队时唤醒一次扫描（不等下一个轮询周期）。"""
@@ -82,6 +135,9 @@ class WorkerPool:
             self._db.finish_task(task.id, "failed")
             self._db.audit("runner_crash", f"task={task.id} err={e!r}")
         finally:
+            # bg 的 run() 启动后即返回：session 槽位随 finally 照常释放——bg 本体在
+            # 后台守护进程里且用独立 claude 会话，与本会话 -p 任务无 --resume
+            # 串行冲突；完结进度由 _bg_watcher 按 tasks 表追踪，不占调度槽。
             self._running_sessions.discard(task.session_id)
             self._wake.set()
 
@@ -99,6 +155,21 @@ class WorkerPool:
             self._db.cancel_task(task_id)
             return f"已取消任务 #{task_id}。"
         if task.state == "running":
+            if task.kind == "bg" and task.claude_bg_id:
+                # bg：本体在后台守护进程里，本地无句柄 → claude stop <bg_id>。
+                # 无论 stop 结果如何本地都落终态（stop 对已完成条目本就无效）。
+                note = ""
+                try:
+                    await asyncio.to_thread(self._stop_bg, task.claude_bg_id)
+                except Exception as e:
+                    self._db.audit("bg_stop_error", f"task={task_id} err={e!r}")
+                    note = "（停止指令发送失败，请稍后用 /tasks 确认）"
+                self._db.finish_task(task_id, "canceled")
+                session = self._db.get_session(task.session_id)
+                if session:
+                    self._db.enqueue(task_id, session.wechat_user,
+                                     f"已取消后台任务 #{task_id}。{note}")
+                return f"已取消后台任务 #{task_id}。{note}"
             proc = self._procs.get(task_id)
             if proc is None:
                 return f"任务 #{task_id} 正在运行但进程句柄未注册，稍后再试。"
@@ -109,3 +180,140 @@ class WorkerPool:
                 pass
             return f"已取消任务 #{task_id}，进程已终止。"
         return f"任务 #{task_id} 状态为 {task.state}，无需取消。"
+
+    # ---- bg watcher（M2 /bg 长任务）----
+
+    async def _bg_watcher(self) -> None:
+        """常驻轮询：每 bg_poll_s 一轮，异常只审计不打断（下一轮重试）。"""
+        while True:
+            try:
+                await self._bg_watch_round()
+            except Exception as e:
+                try:
+                    self._db.audit("bg_watcher_error", repr(e))
+                except Exception:
+                    pass
+            await asyncio.sleep(self._bg_poll_s)
+
+    async def _bg_watch_round(self) -> None:
+        tasks = self._db.running_bg_tasks()
+        if not tasks:
+            return   # 无 bg 任务时不碰 claude CLI（也兼容 config 缺省的测试形态）
+        try:
+            agents = await asyncio.to_thread(self._agents_json)
+        except Exception as e:   # agents 调用失败 → log 跳过本轮，不崩 watcher
+            self._db.audit("bg_agents_error", repr(e))
+            return
+        now = time.time()
+        for t in tasks:
+            try:
+                await self._bg_advance(t, agents, now)
+            except Exception as e:
+                self._db.audit("bg_task_error", f"task={t.id} err={e!r}")
+
+    async def _bg_advance(self, t: M.Task, agents: list, now: float) -> None:
+        entry = next((a for a in agents if str(a.get("id")) == t.claude_bg_id), None)
+        session = self._db.get_session(t.session_id)
+        to_user = session.wechat_user if session else ""
+        if entry is None:
+            if now - t.updated_at >= _BG_MISSING_GRACE_S:
+                self._db.finish_task(t.id, "canceled")
+                self._db.audit("bg_missing", f"task={t.id} bg_id={t.claude_bg_id}")
+                self._db.enqueue(t.id, to_user,
+                                 f"⚠️ 后台任务 #{t.id} 已不在后台运行列表"
+                                 f"（可能被外部停止），标记为已取消。")
+            return
+        state = entry.get("state")
+        if state == "completed":
+            result = _extract_bg_result(entry)
+            if result is None:
+                cwd = session.cwd if session else os.getcwd()
+                result = await asyncio.to_thread(
+                    self._resume_summary, cwd, entry.get("sessionId") or "")
+            cost = _extract_bg_cost(entry)
+            if cost is not None:
+                self._db.audit("cost", json.dumps({"task_id": t.id, "usd": cost}))
+            header = f"✅ 后台任务 #{t.id} 完成：\n"
+            for page in split_text(header + (result or "(结果摘要为空)"),
+                                   self._page_limit()):
+                self._db.enqueue(t.id, to_user, page)
+            self._db.finish_task(t.id, "done")
+            if session:
+                self._db.touch_session(session.id)
+        elif state == "blocked":
+            started = entry.get("startedAt")   # ms epoch
+            if isinstance(started, (int, float)) and \
+                    now - started / 1000.0 >= self._bg_blocked_timeout_s:
+                # 宿主旧后台会话可能占位排队 → blocked 超 30min 按失败处理
+                # （沿用 finish failed 的可重试语义）
+                self._db.finish_task(t.id, "failed")
+                self._db.audit("bg_blocked_timeout", f"task={t.id} bg_id={t.claude_bg_id}")
+                self._db.enqueue(t.id, to_user,
+                                 f"❌ 后台任务 #{t.id} 已阻塞超过 "
+                                 f"{int(self._bg_blocked_timeout_s // 60)} 分钟，标记失败。")
+        # working：仍在跑，下一轮再看
+
+    def _page_limit(self) -> int:
+        if self._cfg is None:
+            return 2000
+        return int((self._cfg.throttle or {}).get("page_char_limit", 2000))
+
+    def _claude_prefix(self) -> list[str]:
+        bin_ = self._cfg.claude_bin
+        return list(bin_) if isinstance(bin_, list) else [bin_]
+
+    def _claude_env(self) -> dict:
+        env = os.environ.copy()
+        env.update(self._cfg.secrets)
+        return env
+
+    def _agents_json(self) -> list[dict]:
+        """同步跑 claude agents --json --all（watcher 经 to_thread 调）。
+        任何异常 → 空列表（本轮跳过，不打断 watcher）。"""
+        try:
+            cp = subprocess.run([*self._claude_prefix(), "agents", "--json", "--all"],
+                                capture_output=True, timeout=30, env=self._claude_env())
+            data = json.loads(cp.stdout.decode("utf-8", "replace"))
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            try:
+                self._db.audit("bg_agents_error", repr(e))
+            except Exception:
+                pass
+            return []
+
+    def _stop_bg(self, bg_id: str) -> str:
+        """同步跑 claude stop <id>（cancel 经 to_thread 调）。返回输出文本（诊断用）。"""
+        cp = subprocess.run([*self._claude_prefix(), "stop", bg_id],
+                            capture_output=True, timeout=30, env=self._claude_env())
+        return (cp.stdout + b"\n" + cp.stderr).decode("utf-8", "replace").strip()
+
+    def _resume_summary(self, cwd: str, claude_uuid: str) -> str:
+        """结果兜底：completed 条目无输出字段时，回原 Claude 会话（--resume，
+        cwd 同会话绑定目录）要一份 ≤500 字总结。同步 subprocess（watcher 经
+        to_thread 调）；异常/空 → ""（调用方以占位文案完结，避免每轮无限重试）。
+        policy 固定 auto：只读回总结，不带审批 MCP（bg 档不传审批工具）。"""
+        try:
+            argv = build_argv(
+                session_uuid=claude_uuid, resume=True, policy="auto",
+                # --max-turns 2（TRD 兜底规范）：总结一次即答，防兜底自己跑飞
+                budget=Budget(max_turns=2, max_usd=self._cfg.budget.max_usd),
+                mcp_config=self._cfg.repo_root / "claude" / "mcp.json",
+                settings=self._cfg.repo_root / "claude" / "settings.json")
+            cp = subprocess.run([*self._claude_prefix(), *argv],
+                                input=_BG_SUMMARY_PROMPT.encode("utf-8"),
+                                capture_output=True, timeout=300,
+                                cwd=cwd, env=self._claude_env())
+            parser = StreamParser()
+            result = ""
+            for line in cp.stdout.decode("utf-8", "replace").splitlines():
+                ev = parser.feed_line(line)
+                if ev is not None and ev.type == "result":
+                    result = ev.text
+            return result
+        except Exception as e:
+            try:
+                self._db.audit("bg_resume_error", repr(e))
+            except Exception:
+                pass
+            return ""

@@ -240,9 +240,28 @@ class Database:
             (state, int(time.time()), task_id))
         self._conn.commit()
 
+    def set_bg_id(self, task_id: int, bg_id: str) -> None:
+        """--bg 启动成功后落盘后台任务 id（watcher 按 id 匹配 agents 条目）。"""
+        self._conn.execute(
+            "UPDATE tasks SET claude_bg_id=?, updated_at=? WHERE id=?",
+            (bg_id, int(time.time()), task_id))
+        self._conn.commit()
+
+    def running_bg_tasks(self) -> list[Task]:
+        """bg watcher 的监视对象：已启动（有 bg id）且仍在 running 的后台任务。"""
+        rows = self._conn.execute(
+            "SELECT * FROM tasks WHERE kind='bg' AND state='running' "
+            "AND claude_bg_id IS NOT NULL ORDER BY id").fetchall()
+        return [self._task_row(r) for r in rows]
+
     def reset_running_tasks(self) -> int:
+        """崩溃恢复：running → pending 重跑。例外：已有 claude_bg_id 的 bg 任务
+        保持 running——它的本体在 claude 后台守护进程里，网关重启不代表任务死了，
+        重跑 = 重复烧预算；改由 bg watcher 按 agents 列表接管（条目消失 → canceled）。
+        尚无 bg_id 的 bg 任务（启动途中崩溃）照常重置。"""
         cur = self._conn.execute(
-            "UPDATE tasks SET state='pending', updated_at=? WHERE state='running'",
+            "UPDATE tasks SET state='pending', updated_at=? WHERE state='running' "
+            "AND NOT (kind='bg' AND claude_bg_id IS NOT NULL)",
             (int(time.time()),))
         self._conn.commit()
         return cur.rowcount

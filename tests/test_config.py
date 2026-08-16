@@ -43,7 +43,8 @@ def test_load_config_maps_fields(tmp_path):
     assert cfg.throttle == {"min_send_interval_s": 2.0, "progress_window_s": 3.0,
                             "page_char_limit": 1500, "daily_send_limit": 300}
     assert cfg.budget == Budget(max_turns=30, max_usd=2.5)
-    assert cfg.worker == {"concurrency": 2, "poll_interval_s": 0.2}
+    assert cfg.worker == {"concurrency": 2, "poll_interval_s": 0.2,
+                          "bg_poll_s": 10, "bg_blocked_timeout_s": 1800}
     assert cfg.reconnect["session_duration_s"] == 43200
     assert cfg.reconnect["warning_before_s"] == 3600
     assert cfg.secrets == {"ANTHROPIC_API_KEY": "sk-test", "EMPTY_VALUE": "",

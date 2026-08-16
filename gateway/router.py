@@ -2,7 +2,7 @@
 import difflib
 from dataclasses import dataclass
 
-BRIDGE_COMMANDS = {"cancel", "tasks", "status", "cd", "policy"}
+BRIDGE_COMMANDS = {"cancel", "tasks", "status", "cd", "policy", "bg"}
 ILINK_COMMANDS = {"time", "重新连接", "help"}
 # TUI 交互专属（静态维护，官方 commands 文档），M2 提供完整代理实现
 PROXY_COMMANDS = {"permissions", "hooks", "plugins", "login", "config", "mcp",

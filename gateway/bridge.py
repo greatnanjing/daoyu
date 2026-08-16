@@ -9,6 +9,7 @@ BRIDGE_HELP = {
     "status": "/status — 队列深度、死信数、当日费用、连接剩余",
     "cd": "/cd <目录> — 切换工作目录（=切换 Claude 会话）",
     "policy": "/policy <auto|strict|bypass|plan> — 权限档位",
+    "bg": "/bg <任务描述> — 转入后台长任务（claude --bg，完成自动回报结果）",
 }
 ILINK_HELP = {
     "time": "/time — 连接剩余时间",
@@ -79,6 +80,15 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
         db.set_policy(s.id, arg)
         db.audit("policy", f"user={from_user} session={s.id} → {arg}")
         return f"权限档位已切换为 {arg}（下一条消息生效）。"
+    if cmd == "bg":
+        prompt = route.args.strip()
+        if not prompt:
+            return "用法：/bg <任务描述> — 转入后台执行长任务（/tasks 查进度、/cancel 取消）"
+        cwd = db.get_active_cwd(from_user, config.default_cwd)
+        s = db.get_or_create_session(from_user, cwd)
+        tid = db.create_task(None, s.id, prompt, kind="bg")
+        await pool.submit_check()
+        return f"已转后台（任务 #{tid}），/tasks 查进度、/cancel 取消。"
     return f"未知桥命令 {cmd}"
 
 
