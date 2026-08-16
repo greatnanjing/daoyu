@@ -149,6 +149,19 @@ async def test_runner_bg_no_id_in_stdout_fails(db, cfg_bg, monkeypatch):
     assert db.get_task(t).claude_bg_id is None
 
 
+async def test_runner_bg_strict_receipt_notes_no_approval(db, cfg_bg):
+    """M5：strict 档下 /bg 无审批通道，回执必须明示（不静默降档）。"""
+    s = db.get_or_create_session("u@im.wechat", str(cfg_bg.repo_root))
+    db.set_policy(s.id, "strict")
+    s = db.get_session(s.id)                      # 重取（set_policy 不回写旧对象）
+    t = db.create_task(None, s.id, "跑个大活", kind="bg")
+    db.claim_next_pending({s.id})
+    runner = TaskRunner(db, cfg_bg, process_registry={})
+    await asyncio.wait_for(runner.run(db.get_task(t), s), timeout=10)
+    assert db.get_task(t).state == "running"
+    assert any("后台" in x and "不走微信审批" in x for x in _texts(db))
+
+
 # ---------------- Step 3: bg watcher ----------------
 
 def _make_bg_task(db, cwd="/repo", bg_id="ab12cd34"):
@@ -220,13 +233,19 @@ async def test_watcher_result_paginated(db):
 
 
 async def test_watcher_blocked_timeout_fails(db):
+    """blocked 超时（以"首次观察到 blocked"计时，I2）→ 失败可重试；且先
+    claude stop 旧条目再 finish（M2，不留 daemon 孤儿）。"""
     t = _make_bg_task(db)
     pool = make_watch_pool(db)                    # bg_blocked_timeout_s=1800
-    old = NOW_MS() - 31 * 60 * 1000
-    pool._agents_json = lambda: [_entry(state="blocked", started_ms=old)]
+    stopped = []
+    pool._stop_bg = lambda bg_id: stopped.append(bg_id) or ""
+    pool._agents_json = lambda: [_entry(state="blocked")]
+    # 预置首次观察到 blocked 在 31 分钟前（此后持续 blocked 未恢复）
+    db.set_state(f"bg_blocked_since:{t}", str(time.time() - 31 * 60))
 
     await pool._bg_watch_round()
     assert db.get_task(t).state in ("failed", "pending")   # finish failed（可重试语义）
+    assert stopped == ["ab12cd34"]
     assert any("阻塞" in x for x in _texts(db))
 
 
@@ -235,6 +254,52 @@ async def test_watcher_blocked_fresh_keeps_running(db):
     pool = make_watch_pool(db)
     pool._agents_json = lambda: [_entry(state="blocked")]   # 刚开始 blocked
     await pool._bg_watch_round()
+    assert db.get_task(t).state == "running"
+
+
+async def test_watcher_blocked_timer_counts_from_first_sight(db):
+    """I2：长任务（startedAt 40 分钟前）刚进 blocked 不得立即误杀——计时从
+    首次观察到 blocked 的本地时刻起算，持续 blocked 满 timeout 下一轮才杀。"""
+    t = _make_bg_task(db)
+    pool = make_watch_pool(db)                    # bg_blocked_timeout_s=1800
+    stopped = []
+    pool._stop_bg = lambda bg_id: stopped.append(bg_id) or ""
+    old = NOW_MS() - 40 * 60 * 1000               # 任务 40 分钟前启动（主用例形态）
+    states = [_entry(state="blocked", started_ms=old)]
+    pool._agents_json = lambda: states
+
+    await pool._bg_watch_round()                  # 刚进 blocked：只记时刻，不杀
+    assert db.get_task(t).state == "running"
+    assert db.get_state(f"bg_blocked_since:{t}") is not None
+    assert stopped == []
+
+    # 模拟又过了 timeout：把首次观察时刻拨回 31 分钟前 → 下一轮才杀
+    db.set_state(f"bg_blocked_since:{t}", str(time.time() - 31 * 60))
+    await pool._bg_watch_round()
+    assert db.get_task(t).state in ("failed", "pending")
+    assert stopped == ["ab12cd34"]
+    assert any("阻塞" in x for x in _texts(db))
+
+
+async def test_watcher_blocked_timer_resets_on_recovery(db):
+    """I2：blocked→working 恢复清计时；再进 blocked 从零重计，不累计旧值。"""
+    t = _make_bg_task(db)
+    pool = make_watch_pool(db)
+    states = [_entry(state="blocked")]
+    pool._agents_json = lambda: states
+
+    await pool._bg_watch_round()                  # 首次观察 → 记时刻
+    assert db.get_state(f"bg_blocked_since:{t}") is not None
+
+    db.set_state(f"bg_blocked_since:{t}", str(time.time() - 31 * 60))  # 计时已老化
+    states[0] = _entry(state="working")
+    await pool._bg_watch_round()                  # 恢复 working → 清计时，不杀
+    assert db.get_state(f"bg_blocked_since:{t}") is None
+    assert db.get_task(t).state == "running"
+
+    states[0] = _entry(state="blocked")
+    await pool._bg_watch_round()                  # 再进 blocked → 重新计时（非超时）
+    assert db.get_state(f"bg_blocked_since:{t}") is not None
     assert db.get_task(t).state == "running"
 
 
@@ -264,6 +329,23 @@ async def test_watcher_agents_error_skips_round(db):
     pool._agents_json = boom
     await pool._bg_watch_round()                  # 异常吞掉，本轮跳过
     assert db.get_task(t).state == "running"
+    kinds = [r["kind"] for r in db._conn.execute(
+        "SELECT kind FROM audit_log").fetchall()]
+    assert "bg_agents_error" in kinds
+
+
+async def test_watcher_agents_none_skips_round(db):
+    """C1：轮询失败返回 None（真实 _agents_json 失败的形态，不抛异常）≠ 空列表
+    ——整轮跳过；哪怕任务早已过消失宽限期也不得误进消失判定集体误杀。"""
+    t = _make_bg_task(db)
+    pool = make_watch_pool(db)
+    pool._agents_json = lambda: None
+    db._conn.execute("UPDATE tasks SET updated_at=? WHERE id=?",
+                     (int(time.time()) - 3600, t))   # 早已过 60s 宽限
+    db._conn.commit()
+
+    await pool._bg_watch_round()                  # 轮询失败 → 整轮跳过
+    assert db.get_task(t).state == "running"      # 若误当空列表会变 canceled
     kinds = [r["kind"] for r in db._conn.execute(
         "SELECT kind FROM audit_log").fetchall()]
     assert "bg_agents_error" in kinds
@@ -317,6 +399,39 @@ async def test_cancel_bg_stops_and_cancels(db):
     assert any("取消" in x for x in _texts(db))   # runner 已返回 → 回执由 cancel 推
 
 
+async def test_cancel_bg_race_watcher_won_keeps_done(db):
+    """M3：stop 的 await 窗口里 watcher 已把任务完结 → cancel 不翻写终态。"""
+    t = _make_bg_task(db)
+    pool = make_watch_pool(db)
+
+    def slow_stop(bg_id):
+        db.finish_task(t, "done")                 # 模拟窗口内 watcher 先完结
+        return "stopped"
+
+    pool._stop_bg = slow_stop
+    reply = await pool.cancel(t)
+    assert "已由后台监视完结" in reply
+    assert db.get_task(t).state == "done"         # 不被翻成 canceled
+    assert not any("取消" in x for x in _texts(db))
+
+
+async def test_watcher_completed_race_cancel_won_keeps_canceled(db):
+    """M3：resume 兜底的 await 窗口里 /cancel 先落 canceled → watcher 不推
+    结果、不翻写终态（先落者胜）。"""
+    t = _make_bg_task(db)
+
+    def slow_resume(cwd, sid):
+        db.finish_task(t, "canceled")             # 模拟窗口内 cancel 先落终态
+        return "总结"
+
+    pool = make_watch_pool(db)
+    pool._resume_summary = slow_resume
+    pool._agents_json = lambda: [_entry(state="completed")]   # 无输出字段 → 走兜底
+    await pool._bg_watch_round()
+    assert db.get_task(t).state == "canceled"     # 不被翻成 done
+    assert not any("总结" in x for x in _texts(db))   # 取消后不推结果
+
+
 async def test_cancel_bg_without_bg_id_falls_back(db):
     """running 但 bg_id 尚未写入（启动竞态）：走原进程句柄路径的提示。"""
     s = db.get_or_create_session("u@im.wechat", "/repo")
@@ -325,6 +440,30 @@ async def test_cancel_bg_without_bg_id_falls_back(db):
     pool = make_watch_pool(db)
     reply = await pool.cancel(t)
     assert "稍后再试" in reply                     # 无句柄可 kill 的既有语义
+
+
+async def test_cancel_bg_during_launch_kills_process(db, cfg_bg, monkeypatch):
+    """M4：launch 阶段（bg_id 未落盘）进程已注册 → /cancel 走 kill 路径，
+    任务落 canceled 且不被 _fail 翻成 pending 重试。"""
+    monkeypatch.setenv("FAKE_BG_DELAY_MS", "3000")
+    s = db.get_or_create_session("u@im.wechat", str(cfg_bg.repo_root))
+    t = db.create_task(None, s.id, "长活", kind="bg")
+    db.claim_next_pending({s.id})
+    runner = TaskRunner(db, cfg_bg, process_registry={})
+    pool = WorkerPool(db, config=cfg_bg, runner=runner, poll_interval_s=30)
+
+    run_t = asyncio.create_task(runner.run(db.get_task(t), s))
+    for _ in range(200):                          # 等 launch 进程注册（≤4s）
+        if t in runner.procs:
+            break
+        await asyncio.sleep(0.02)
+    assert t in runner.procs                      # 已注册 → cancel 可拿到句柄
+
+    reply = await pool.cancel(t)
+    assert "取消" in reply and "稍后再试" not in reply
+    await asyncio.wait_for(run_t, timeout=10)     # kill → communicate 返回
+    assert db.get_task(t).state == "canceled"     # 不走 failed→pending 重试
+    assert t not in runner.procs                  # finally 已注销
 
 
 # ---------------- /tasks 显示 ----------------

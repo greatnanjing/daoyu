@@ -6,10 +6,12 @@ FAKE_BG_ARGS_LOG：把收到的 argv 写盘供断言（prompt 必须在 argv 里
 FAKE_BG_ID：backgrounded 行里的 id（默认 ab12cd34）。
 FAKE_BG_NO_ID=1：不输出 backgrounded 行（模拟 stdout 无 id 可解析）。
 FAKE_BG_EXIT_CODE：输出后以该码退出（模拟启动失败）。
+FAKE_BG_DELAY_MS：启动后先睡这么久再输出（模拟 daemon 慢，launch 期可被 /cancel）。
 """
 import json
 import os
 import sys
+import time
 
 
 def main():
@@ -18,6 +20,9 @@ def main():
     if args_log:
         with open(args_log, "w", encoding="utf-8") as f:
             json.dump({"argv": sys.argv[1:]}, f, ensure_ascii=False)
+    delay_ms = os.environ.get("FAKE_BG_DELAY_MS")
+    if delay_ms:
+        time.sleep(int(delay_ms) / 1000.0)
     bg_id = os.environ.get("FAKE_BG_ID", "ab12cd34")
     if not os.environ.get("FAKE_BG_NO_ID"):
         print(f"backgrounded → {bg_id}", flush=True)

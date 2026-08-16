@@ -254,9 +254,20 @@ class TaskRunner:
         except OSError as e:
             await self._fail(task, session.wechat_user, f"无法启动 claude 后台子进程: {e}")
             return
-        stdout, stderr = await proc.communicate()   # 两条管道并发收，无死锁风险
+        # 注册进程句柄（M4）：launch 阶段（bg_id 尚未落盘）CLI 若悬挂，/cancel
+        # 才能走既有 kill 路径，而不是"稍后再试"干等、session 槽位被占到重启。
+        entry = TrackedProcess(proc)
+        self._procs[task.id] = entry
+        try:
+            stdout, stderr = await proc.communicate()   # 两条管道并发收，无死锁风险
+        finally:
+            self._procs.pop(task.id, None)
         out = stdout.decode("utf-8", "replace")
         m = _BG_ID_RE.search(out)
+        if entry.killed or self._db.get_task(task.id).state == "canceled":
+            # launch 被用户取消：canceled 终态已由 cancel 落盘，绝不走 _fail
+            # （failed→pending 的重试会把用户刚取消的任务再发一遍）
+            return
         if proc.returncode != 0 or m is None:
             err = f"后台启动失败（rc={proc.returncode}）: {out[-_RESULT_TAIL_CHARS:]}"
             tail = stderr.decode("utf-8", "replace").strip()
@@ -266,9 +277,13 @@ class TaskRunner:
             return
         bg_id = m.group(1)
         self._db.set_bg_id(task.id, bg_id)
-        self._push(task, session.wechat_user,
-                   f"🚀 已在后台启动（任务 #{task.id}，后台 id {bg_id}）。"
+        receipt = (f"🚀 已在后台启动（任务 #{task.id}，后台 id {bg_id}）。"
                    f"完成后自动推送结果，/tasks 查进度、/cancel 取消。")
+        if session.policy == "strict":
+            # strict 档 bg 不传审批 MCP（--bg 组合保守集）——必须明示用户，
+            # 静默降档违背"选 strict = 要审批"的预期（M5）
+            receipt += "（注：后台任务不走微信审批，等同 auto 档）"
+        self._push(task, session.wechat_user, receipt)
 
     def _write_approval_mcp_config(self, task, session, static_path: Path) -> str:
         """strict 档临时 mcp config：静态 mcp.json 的 mcpServers 合并 daoyu 审批

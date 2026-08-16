@@ -103,6 +103,11 @@ class Database:
             (key, value, int(time.time())))
         self._conn.commit()
 
+    def delete_state(self, key: str) -> None:
+        """删 KV（幂等，key 不存在也成功）。如 bg_blocked_since:<task_id> 计时。"""
+        self._conn.execute("DELETE FROM state WHERE key=?", (key,))
+        self._conn.commit()
+
     # ---- audit ----
     def audit(self, kind: str, detail: str) -> None:
         self._conn.execute(
