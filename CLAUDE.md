@@ -90,7 +90,7 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 ## 实现顺序（勿颠倒依赖）
 
 - **M1（MVP）**：SQLite schema → gateway 收发+落盘去重 → worker 调 `claude -p`（会话绑定、stream 解析、节流推送）→ 命令总线 → 崩溃恢复 → E2E。
-- **M2**：审批（⚠️ 原 TRD 方案依赖的 `--permission-prompt-tool` 已从当前 CLI 移除，需重选方案——如 `--permission-mode manual` + hooks/MCP 组合）→ `--bg` 长任务（`claude agents --json` 轮询）→ MCP 装载（chrome-devtools/tesseract-ocr/ai-vision/web-reader/context7）→ 配置代理命令全套 → `/policy` strict 档审批 → 监控告警。另移交：kill 需进程组（MCP 孙进程继承管道）、出站按页计数熔断。
+- **M2**：审批（`--permission-prompt-tool` **实测在 2.1.233 仍存在可用**——注意 `--help` 不列全 flag，勿以 help 缺失判断移除）→ `--bg` 长任务（启动 `claude --bg "<prompt>"` 返回任务 id；轮询 `claude agents --json`；停止 `claude stop <id>`；`claude logs` 是 TUI 流不可解析）→ MCP 装载（chrome-devtools/tesseract-ocr/ai-vision/web-reader/context7）→ 配置代理命令全套 → `/policy` strict 档审批 → 监控告警。另移交：kill 需进程组（MCP 孙进程继承管道）、出站按页计数熔断。
 - **M3（二期）**：媒体收发（ClawBot CDN 加密上传）。
 
 ## 开放问题（涉及前先实测，勿凭假设实现）
