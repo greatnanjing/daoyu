@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**M2 已实现**（2026-08-16），196 个测试全绿（`python -m pytest`）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
+**M2 已实现**（2026-08-16），199 个测试全绿（`python -m pytest`）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
 
 - [docs/PRD.md](docs/PRD.md) — 产品需求（功能 FR-1~10、非功能需求、里程碑 M1/M2/M3、范围外）
 - [docs/TRD.md](docs/TRD.md) — 技术设计（架构、SQLite 数据模型、claude CLI 调用规范、命令路由、安全设计、测试策略）
@@ -35,7 +35,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-python -m pytest                        # 全量测试（196 个）
+python -m pytest                        # 全量测试（199 个）
 python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程；M2 含审批往返/bg 冒烟）
 daoyu-login                             # 终端扫码登录（token 落盘后退出）
 python -m gateway.app                   # 前台调试运行（不进 systemd）

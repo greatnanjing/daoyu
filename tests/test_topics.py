@@ -280,3 +280,49 @@ async def test_legacy_no_pointer_first_message_writes_back(db):
     row = db._conn.execute("SELECT * FROM tasks").fetchone()
     assert row["session_id"] == s1.id                               # 落到既有话题（不另建）
     assert db.get_state(f"active_session:{USER}") == str(s1.id)     # 指针已回写
+
+
+# ---------------- 8. 审查修复回归 ----------------
+
+async def test_new_reply_has_no_index(db):
+    """/new 回复不带 #N 序号（防口径回退：#N 专指 /sessions 全局序号，
+    目录内序数会被用户当成全局序号去 /cd #n 错切旧话题）。"""
+    db.get_or_create_session(USER, "/repo")
+    db.create_topic(USER, "/repo")                                  # 同目录已有 2 个话题
+    reply = await execute_bridge(db, FakePool(), _route("new"), USER, FakeCfg())
+    assert "新话题" in reply and "/repo" in reply and "从零" in reply
+    assert "#" not in reply
+
+
+async def test_cd_index_reply_includes_summary(db):
+    """/cd #n 回执附目标话题摘要（同目录多话题时目录名相同，靠摘要确认落点）。"""
+    s1 = db.get_or_create_session(USER, "/repo")
+    s2 = db.create_topic(USER, "/repo")
+    _pin(db, s1.id, 100)          # 全局序：#1=s2、#2=s1
+    _pin(db, s2.id, 200)
+    db.create_task(None, s1.id, "修复登录bug")
+    reply = await execute_bridge(db, FakePool(), _route("cd", "#2"), USER, FakeCfg())
+    assert "已切换到话题 #2" in reply and "修复登录bug" in reply
+
+
+async def test_bg_attaches_to_pointer_topic(db):
+    """指针指向非最新话题时 /bg 挂到指针话题（不偷切该目录最新话题）。"""
+
+    class PoolWithSubmit(FakePool):
+        def __init__(self):
+            self.submitted = False
+
+        async def submit_check(self):
+            self.submitted = True
+
+    s1 = db.get_or_create_session(USER, "/repo")
+    s2 = db.create_topic(USER, "/repo")
+    _pin(db, s1.id, 100)          # s2 为该目录最新话题
+    _pin(db, s2.id, 200)
+    db.set_active_session(USER, s1.id)                             # 指针故意指旧话题
+    pool = PoolWithSubmit()
+    reply = await execute_bridge(db, pool, _route("bg", "长任务"), USER, FakeCfg())
+    assert "已转后台" in reply and pool.submitted
+    row = db._conn.execute("SELECT * FROM tasks WHERE kind='bg'").fetchone()
+    assert row["prompt"] == "长任务"
+    assert row["session_id"] == s1.id                              # 挂到指针话题而非最新 s2

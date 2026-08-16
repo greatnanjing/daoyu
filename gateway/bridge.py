@@ -66,9 +66,10 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
                 f"连接剩余：{remain}")
     if cmd == "new":
         cwd = _active_session(db, from_user, config.default_cwd).cwd
-        s = db.create_topic(from_user, cwd)
-        n = sum(1 for x in db.list_sessions(from_user) if x.cwd == cwd)
-        return f"已开启新话题 #{n}（目录 {cwd}），上下文从零开始"
+        db.create_topic(from_user, cwd)
+        # 回复不带序号：#N 在本产品专指 /sessions 全局序号口径（/cd #n 按此解析），
+        # 目录内序数会诱发错切旧话题
+        return f"已开启新话题（目录 {cwd}），上下文从零开始"
     if cmd == "cd":
         path = route.args.strip()
         if not path:
@@ -92,7 +93,8 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
             target = sessions[n - 1]
             db.set_active_cwd(from_user, target.cwd)   # 旧 cwd 指针同步保持一致
             db.set_active_session(from_user, target.id)
-            return f"已切换到话题 #{n}（目录 {target.cwd}）"
+            return (f"已切换到话题 #{n}（目录 {target.cwd}）："
+                    f"{db.last_task_summary(target.id) or '（无任务）'}")
         if not os.path.isdir(path):
             return f"目录不存在：{path}"
         db.set_active_cwd(from_user, path)
@@ -106,7 +108,7 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
     if cmd == "sessions":
         sessions = db.list_sessions(from_user)
         if not sessions:
-            return "当前没有会话。"
+            return "当前没有话题。"
         active = db.get_active_binding(from_user, config.default_cwd, touch=False)
         # 两级展示：按目录分组（组按组内最新活跃排序），组内各话题带全局序号
         groups: dict[str, list] = {}
