@@ -8,25 +8,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**M1（MVP）已实现**（2026-08-16），94 个测试全绿（`python -m pytest`）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
+**M2 已实现**（2026-08-16），175 个测试全绿（`python -m pytest`）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
 
 - [docs/PRD.md](docs/PRD.md) — 产品需求（功能 FR-1~10、非功能需求、里程碑 M1/M2/M3、范围外）
 - [docs/TRD.md](docs/TRD.md) — 技术设计（架构、SQLite 数据模型、claude CLI 调用规范、命令路由、安全设计、测试策略）
-- [README.md](README.md) — 部署、使用命令表与 M1 边界
+- [README.md](README.md) — 部署、使用命令表与 M2 边界
+
+**M2 功能清单**（M1 收发/任务池/命令总线/崩溃恢复之上新增）：
+
+- **strict 档审批**：`/policy strict` 后任务带 `--permission-prompt-tool mcp__daoyu__approve`；[worker/approval_mcp.py](worker/approval_mcp.py)（stdio JSON-RPC server，经临时合并 mcp config 由 claude 拉起、任务结束即删）写 approvals 行 + outbox 🔐 推微信；gateway `handle_inbound` 拦截 Y/N 单字 decide（300s 超时 = expired = 拒绝）。
+- **`/bg` 长任务**：桥命令建 bg 任务 → runner `claude --bg` 启动分支（bg_id 落盘即回执）→ [worker/pool.py](worker/pool.py) `_bg_watcher` 轮询 `claude agents --json` 推进（completed 取结果/兜底 resume 总结、blocked 超时失败、消失取消）；`/cancel` 走 `claude stop`。
+- **MCP 装载**：`claude/mcp.json` 已装 chrome-devtools / context7 / web-reader 三台（实测 connected；Windows 形态 cmd /c，Linux 部署改直用 npx/uvx + 冷缓存预热）。
+- **配置代理命令**：[gateway/proxy.py](gateway/proxy.py) — `/permissions`（列表 + deny add/del + allow add，写 `claude/settings.json`）、`/mcp`、`/config`（只读脱敏）。
+- **`/sessions`**：会话列表（目录 + 最近任务摘要）与 `/cd #n` 序号切换。
+- **监控告警**：死信 / 日限熔断 / 预算耗尽死信 / 连接失效清 token 四处自动推微信 ⚠️（复用出站通道，发全部白名单）。
 
 组件清单（入口文件）：
 
 - **入口**：`daoyu` console script → [gateway/app.py](gateway/app.py) `start()`（读 `gateway/config.json` + `claude/secrets.env`，崩溃恢复后常驻 poll / outbound / reconnect / worker-pool 四协程）；`daoyu-login` → [gateway/login.py](gateway/login.py)（终端扫码，token 写 DB state 后退出）。
-- **gateway**：[gateway/ilink.py](gateway/ilink.py)（iLink 协议封装）、[gateway/router.py](gateway/router.py)（命令总线路由）、[gateway/bridge.py](gateway/bridge.py)（桥命令 + 三层 /help）、[gateway/outbound.py](gateway/outbound.py)（outbox 投递/重试/死信/节流/typing）、[gateway/reconnect.py](gateway/reconnect.py)（24h 连接过期守护）。
-- **worker**：[worker/pool.py](worker/pool.py)（按 session 串行调度池）、[worker/cli_builder.py](worker/cli_builder.py)（claude argv 组装）、[worker/runner.py](worker/runner.py)（子进程执行/流式进度/费用记账）、[worker/stream.py](worker/stream.py)（stream-json 解析 + 节流器）。
-- **common**：[common/db.py](common/db.py)（SQLite 五表 + state KV）、[common/config.py](common/config.py)（配置加载契约）、[common/models.py](common/models.py)、[common/text.py](common/text.py)（长文本分页）。
+- **gateway**：[gateway/ilink.py](gateway/ilink.py)（iLink 协议封装）、[gateway/router.py](gateway/router.py)（命令总线路由）、[gateway/bridge.py](gateway/bridge.py)（桥命令 + 三层 /help）、[gateway/proxy.py](gateway/proxy.py)（TUI 配置命令微信代理）、[gateway/outbound.py](gateway/outbound.py)（outbox 投递/重试/死信/节流/typing）、[gateway/reconnect.py](gateway/reconnect.py)（24h 连接过期守护）。
+- **worker**：[worker/pool.py](worker/pool.py)（按 session 串行调度池 + bg 后台监视 watcher）、[worker/cli_builder.py](worker/cli_builder.py)（claude argv 组装）、[worker/runner.py](worker/runner.py)（子进程执行/流式进度/费用记账/bg 启动分支）、[worker/stream.py](worker/stream.py)（stream-json 解析 + 节流器）、[worker/approval_mcp.py](worker/approval_mcp.py)（审批 MCP server）。
+- **common**：[common/db.py](common/db.py)（SQLite 五表 + approvals + state KV）、[common/config.py](common/config.py)（配置加载契约）、[common/models.py](common/models.py)、[common/text.py](common/text.py)（长文本分页）。
 - **配置**：`gateway/config.example.json`（实例 config.json 进 gitignore）；`claude/settings.json` + `claude/mcp.json`（进 git，`--bare` 隔离宿主配置）；`claude/secrets.env`（gitignore）；`deploy/daoyu.service`（systemd 单元）。
 
 ## 常用命令
 
 ```bash
-python -m pytest                        # 全量测试（94 个）
-python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程）
+python -m pytest                        # 全量测试（175 个）
+python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程；M2 含审批往返/bg 冒烟）
 daoyu-login                             # 终端扫码登录（token 落盘后退出）
 python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```
@@ -49,7 +58,9 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 - **同一 Claude 会话（同 session UUID）的任务必须串行**（`--resume` 同会话并发会冲突）；不同会话可并行。任务队列按 session 分组串行。
 - **resume 必须在同一 cwd**（Claude 按 cwd + git worktree 作用域）；`/cd` 切目录 = 换绑另一会话。
 - **用户 prompt 经 stdin 传入** `claude -p`，避免 shell 转义问题；子进程 cwd = 会话绑定的工作目录。
-- **长任务必须走 `claude --bg` + `claude agents --json` 轮询**（M2 项；实测当前 CLI 无 `claude logs` 子命令，后台任务管理是 `claude agents`）：`-p` 结束 5s 会杀后台 bash，subagent 默认上限 10min。
+- **strict 审批 flag 语义**：strict = `--permission-mode acceptEdits` + `--permission-prompt-tool mcp__daoyu__approve`；审批 server 条目经**临时合并 mcp config**（静态 mcp.json + daoyu 条目，含任务级 env）传入，任务结束（成功/失败/取消）即删。server 键 `daoyu` 与工具引用必须严格一致（不一致 = Claude 找不到审批工具 = 该次工具调用被 deny，fail-safe）。
+- **`--bg` 与审批/兜底 flag 组合未实测**：bg 启动只用保守 flag 集（`--bare` + 预算 + `--permission-mode`），不传 `--permission-prompt-tool`、不传 `--disallowedTools`——strict 档 `/bg` 不走审批（回执明示等同 auto）、bypass 档 `/bg` 无工具级兜底，均待真机实测后收紧。
+- **长任务必须走 `claude --bg` + `claude agents --json` 轮询**（实测当前 CLI 无 `claude logs` 子命令，后台任务管理是 `claude agents`；停止是 `claude stop <id>`）：`-p` 结束 5s 会杀后台 bash，subagent 默认上限 10min。
 - **`context_token` 只使用当前会话最新入站消息的**，绝不复用历史值（复用旧 token 会 HTTP 200 但静默不投递）。
 - **入站按 `msg_id` 幂等去重**（iLink 重连后消息会重投）；出站走 outbox 发件箱，失败重试，至少 5 次后才进死信并告警。
 - **`--bare` 隔离宿主配置**：刀鱼 Claude 实例的持久配置在 `claude/settings.json` 与 `claude/mcp.json`（进 git），而非用户 `~/.claude`。代理命令（/permissions /config /mcp 等）改的是刀鱼专属配置文件，效果等价、天然版本化。
@@ -58,9 +69,9 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 
 微信命令与 Claude Code CLI **同一套语法、同一个命名空间**，不发明第二套命令体系。路由顺序：
 
-1. **桥命令**（仅 `/cancel` `/tasks` `/status` `/cd` `/policy`）→ gateway 本地执行，秒回。另有 iLink 运维命令 `/time` `/重新连接`（管连接本身，与 Claude 无关）。
+1. **桥命令**（`/cancel` `/tasks` `/status` `/cd` `/sessions` `/policy` `/bg`）→ gateway 本地执行，秒回。另有 iLink 运维命令 `/time` `/重新连接`（管连接本身，与 Claude 无关）。
 2. **转发**：headless 可用命令集（启动时从 `system/init` 事件的 `slash_commands` 同步）→ 原样作为 prompt 传给 claude。
-3. **代理**：TUI 交互专属命令（静态维护清单：/permissions /hooks /plugins /login 等）→ 拦截后以相同命令名与参数格式操作同一底层配置，输出文字版。
+3. **代理**：TUI 交互专属命令（静态维护清单：/permissions /hooks /plugins /login /config /mcp 等）→ 拦截后以相同命令名与参数格式操作同一底层配置，输出文字版。已实现 /permissions（读写）、/mcp、/config（只读）；其余提示暂未提供。
 4. 都不是 → 未知命令提示 + 最接近命令建议。
 
 `/help` 由三层合并动态生成，永远与实际能力一致。
@@ -83,16 +94,20 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 
 - **硬 deny 清单**（`//etc/**`、`~/.ssh/**`、`~/.claude/**`、`//**/data/daoyu.db` 等；注意官方 permissions 语义：单前导 `/` 锚定 settings 来源目录而非绝对路径，**绝对路径必须 `//`**）：auto/strict/plan 档恒生效；bypass 档下 deny 是否被尊重以实测为准，无论结果如何都叠加 `--disallowedTools` 工具级兜底。
 - **预算闸**（`--max-turns` + `--max-budget-usd`）与权限档位独立、恒生效，bypass 下仍限费；预算/回合耗尽的失败**不重试**（直接死信，防 3× 上限放大）。
-- `/policy` 四档：auto（默认全放）/ strict（M1 期与 auto 同基线 acceptEdits，微信 Y/N 审批为 M2 项）/ bypass / plan。
+- `/policy` 四档：auto（默认全放）/ strict（acceptEdits + 审批 MCP：需批准的工具调用推微信 Y/N，5 分钟超时视为拒绝；`/bg` 任务不走审批、回执明示）/ bypass / plan。
 - secret 只放 `claude/secrets.env`（gitignore）+ 环境变量注入，日志脱敏。
 - gateway 仅响应白名单微信账号，白名单外一律不响应。
 
 ## 实现顺序（勿颠倒依赖）
 
-- **M1（MVP）**：SQLite schema → gateway 收发+落盘去重 → worker 调 `claude -p`（会话绑定、stream 解析、节流推送）→ 命令总线 → 崩溃恢复 → E2E。
-- **M2**：审批（`--permission-prompt-tool` **实测在 2.1.233 仍存在可用**——注意 `--help` 不列全 flag，勿以 help 缺失判断移除）→ `--bg` 长任务（启动 `claude --bg "<prompt>"` 返回任务 id；轮询 `claude agents --json`；停止 `claude stop <id>`；`claude logs` 是 TUI 流不可解析）→ MCP 装载（chrome-devtools/tesseract-ocr/ai-vision/web-reader/context7）→ 配置代理命令全套 → `/policy` strict 档审批 → 监控告警。另移交：kill 需进程组（MCP 孙进程继承管道）、出站按页计数熔断。
-- **M3（二期）**：媒体收发（ClawBot CDN 加密上传）。
+- **M1（MVP）✅**：SQLite schema → gateway 收发+落盘去重 → worker 调 `claude -p`（会话绑定、stream 解析、节流推送）→ 命令总线 → 崩溃恢复 → E2E。
+- **M2 ✅**：审批（`--permission-prompt-tool` **实测在 2.1.233 仍存在可用**——注意 `--help` 不列全 flag，勿以 help 缺失判断移除）→ `--bg` 长任务（启动 `claude --bg "<prompt>"` 返回任务 id；轮询 `claude agents --json`；停止 `claude stop <id>`；`claude logs` 是 TUI 流不可解析）→ MCP 装载（chrome-devtools/context7/web-reader；tesseract-ocr/ai-vision 推迟 M3）→ 配置代理命令全套（/permissions 读写、/mcp、/config 只读）→ `/policy` strict 档审批 → `/sessions` → 监控告警。已移交：kill 需进程组（MCP 孙进程继承管道）、出站按页计数熔断。
+- **M3（二期）**：媒体收发（ClawBot CDN 加密上传）；OCR/视觉 MCP 选型；/mcp 启停与 /config 写入。
 
 ## 开放问题（涉及前先实测，勿凭假设实现）
 
-TRD §11 登记的未决项：`/init` 在 headless 下的确切行为、bypass 档下 `permissions.deny` 是否生效、微信文本单条长度上限（分页阈值依据）、OCR MCP 选型、Claude Code 版本漂移（对策：固定版本 + 升级前跑 E2E 回归）。
+TRD §11 登记的未决项：`/init` 在 headless 下的确切行为、bypass 档下 `permissions.deny` 是否生效、微信文本单条长度上限（分页阈值依据）、Claude Code 版本漂移（对策：固定版本 + 升级前跑 E2E 回归）。M2 新登记（均待真机验收）：
+
+- **bg completed 条目字段名未采样**：`claude agents --json` 完成条目自带输出/cost 的键名未实测（pool 按 result/output/lastMessage/text/summary 扫描候选，全未命中走 `--resume` 兜底总结）。
+- **`--bg` + `--disallowedTools`（及 + `--permission-prompt-tool`）组合未实测**：bg 保守 flag 集两者都不传，bypass 档 bg 无工具级兜底、strict 档 bg 无审批（回执明示）；真机验证组合可用后收紧。
+- **bg 停机竞态**：`claude stop <id>` 与 daemon 状态推进的竞态窗口（已按"先落终态者胜"处理 cancel/watcher 双向，真机确认 `claude stop` 对 running 条目的实际时延）。

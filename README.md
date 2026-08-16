@@ -56,6 +56,14 @@ Windows 开发机（Git Bash）仅 venv 内路径不同：`.venv/Scripts/python`
 
 `claude/mcp.json`（MCP server 清单，进 git）内置条目为 Windows 形态（`command: "cmd"` + `args: ["/c", "npx", …]`）；Linux 服务器部署时需把各条目的 `command` 改为 `npx` / `uvx`、`args` 去掉 `/c` 前缀，并确认已装 Node.js（含 npx）与 [uv](https://docs.astral.sh/uv/)（提供 uvx）。
 
+**MCP 冷缓存预热**：Linux 首次调用时 npx/uvx 要现下载包（分钟级，期间 Claude 可能等不到 server 就绪）。部署后先手动各跑一次、等下载完成再 Ctrl+C 中断，即可把包缓存好：
+
+```bash
+npx chrome-devtools-mcp@latest --help
+npx -y @upstash/context7-mcp
+uvx --with "mcp~=1.0" mcp-server-fetch
+```
+
 `gateway/config.json` 主要键：
 
 | 键 | 说明 |
@@ -72,11 +80,16 @@ Windows 开发机（Git Bash）仅 venv 内路径不同：`.venv/Scripts/python`
 
 | 类别 | 命令 | 说明 |
 |---|---|---|
-| 桥命令（本地秒回） | `/tasks` | 查看 running/pending 任务 |
+| 桥命令（本地秒回） | `/tasks` | 查看 running/pending 任务（后台任务带 `[bg]` 标记） |
 | | `/status` | 队列深度、死信数、当日费用、连接剩余时间 |
-| | `/cancel <任务号>` | 取消任务 |
-| | `/cd <目录>` | 切换工作目录（= 换绑另一个 Claude 会话；无参查看当前与历史） |
+| | `/cancel <任务号>` | 取消任务（无参 = 当前会话最新运行中任务；后台任务走 `claude stop`） |
+| | `/bg <任务描述>` | 转入后台长任务（`claude --bg`）：秒回执，完成后自动分页推送结果 |
+| | `/cd <目录\|#序号>` | 切换工作目录（= 换绑另一个 Claude 会话；无参查看当前与历史） |
+| | `/sessions` | 列出全部会话（目录 + 最近任务摘要），`/cd #n` 快速切换 |
 | | `/policy <auto\|strict\|bypass\|plan>` | 查看或切换权限档位 |
+| 配置代理（改刀鱼专属配置，效果同 TUI） | `/permissions` | 查看 deny/allow/ask 列表；`/permissions deny add <规则>`、`/permissions deny del <序号>`、`/permissions allow add <规则>` 读写 `claude/settings.json` |
+| | `/mcp` | 列出 `claude/mcp.json` 已装 MCP server（只读） |
+| | `/config` | 查看 gateway 配置概要（节流/预算/白名单数，secret 只计个数不回显） |
 | iLink 运维 | `/help` | 全部可用命令（按实际能力动态生成） |
 | | `/time` | 连接剩余时间 |
 | | `/重新连接` | 立即重新扫码连接（Y/N 确认） |
@@ -84,6 +97,22 @@ Windows 开发机（Git Bash）仅 venv 内路径不同：`.venv/Scripts/python`
 | 对话 | 任意文本 | 直接作为 prompt 发给当前会话的 Claude |
 
 典型流程：发「你好」→ 秒回「✅ 收到，处理中」→ 工具执行时推送「🔧 工具名」进度 → 最终回复（超长自动分页）。
+
+### strict 档审批（M2）
+
+发 `/policy strict` 后，Claude 遇到需要批准的工具调用时会推微信：
+
+```
+🔐 审批请求 #3：允许执行 Bash？
+{"command":"rm -rf /tmp/x"}
+回复 Y 允许 / N 拒绝
+```
+
+回 **Y** 允许（Claude 继续执行）、回 **N** 拒绝（Claude 收到拒绝后自行调整）；**5 分钟不回自动拒绝**（fail-safe）。一次只审最早的一条，其余文本不拦截、照常当聊天处理。注意：`/bg` 后台任务不走微信审批（`--bg` 与审批 flag 组合未实测，保守不传），回执会明示。
+
+### 监控告警（M2）
+
+以下异常自动推微信 ⚠️（发全部白名单账号，复用出站通道）：出站死信（重试 ≥5 次仍失败）、日发送上限熔断、任务预算/回合耗尽死信、微信连接失效（连续 401/403，自动重连）。
 
 ## 运维
 
@@ -99,27 +128,27 @@ Windows 开发机（Git Bash）仅 venv 内路径不同：`.venv/Scripts/python`
 ## 开发
 
 ```bash
-python -m pytest                        # 全量测试（89 个）
+python -m pytest                        # 全量测试（175 个）
 python -m pytest tests/test_e2e.py -v   # E2E：fake iLink + fake claude 子进程全链路
 python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```
 
 ```
 ├── gateway/   # app 入口 / ilink 协议 / router 命令路由 / bridge 桥命令 /
-│              # outbound 出站节流重试 / reconnect 24h 连接守护 / login 扫码
-├── worker/    # pool 会话串行调度 / cli_builder argv 组装 / runner 子进程执行 / stream 解析
-├── common/    # db（SQLite 五表+state KV）/ config / models / text（分页）
+│              # proxy 配置代理命令 / outbound 出站节流重试 / reconnect 24h 连接守护 / login 扫码
+├── worker/    # pool 会话串行调度+bg 后台监视 / cli_builder argv 组装 / runner 子进程执行 /
+│              # stream 解析 / approval_mcp 审批 MCP server（stdio）
+├── common/    # db（SQLite 五表+approvals+state KV）/ config / models / text（分页）
 ├── claude/    # settings.json + mcp.json（进 git）、secrets.env（gitignore）
-├── tests/     # 单测 + E2E（fixtures/fake_claude.py 模拟 claude 子进程）
+├── tests/     # 单测 + E2E（fixtures/ 模拟 claude 子进程：-p 流回放与 --bg 两种形态）
 ├── deploy/    # daoyu.service（systemd 单元）
 └── docs/      # PRD / TRD
 ```
 
-## M1 边界（当前版本不包含，勿过度期待）
+## M2 边界（当前版本不包含，勿过度期待）
 
-- **strict 档审批推送**：`--permission-prompt-tool` 已从 claude CLI 移除，M2 重选方案；M1 的 strict 与 auto 同为 `acceptEdits` 基线。
-- **`--bg` 长任务**：M2（后台任务管理为 `claude agents --json`）。
-- **MCP server 装载**：`claude/mcp.json` 目前为空清单，M2 接入。
-- **TUI 配置代理命令全套**（/permissions /hooks /plugins /login /config /mcp 等）：M1 仅提示，M2 提供文字版代理。
-- **监控告警渠道**：M2（`/status` 已可查当日费用与死信数）。
+- **strict 档 `/bg` 不走审批**：`--bg` 与 `--permission-prompt-tool` 的组合未实测，runner 对 bg 用保守 flag 集（不传审批工具），strict 档发 `/bg` 回执会明示「不走微信审批，等同 auto 档」。长任务要审批就先 `-p` 同步跑。
+- **bypass 档 `/bg` 无工具级兜底**：同上保守 flag 集也不带 `--disallowedTools`（bypass 下 deny 清单是否生效本就待实测）；bg 任务建议配 auto/plan 档 + 预算闸。
+- **OCR / 视觉 MCP**（tesseract-ocr / ai-vision）：M3 再评估选型接入；当前已装 chrome-devtools / context7 / web-reader 三台。
+- **`/mcp`、`/config` 只读**：启停单个 MCP server、运行时改 gateway 配置 M3 提供（改文件 + 重启即生效）。
 - **媒体收发**（图片/语音）：M3。
