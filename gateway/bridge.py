@@ -7,9 +7,10 @@ BRIDGE_HELP = {
     "cancel": "/cancel <任务号> — 取消任务",
     "tasks": "/tasks — 查看 running/pending 任务",
     "status": "/status — 队列深度、死信数、当日费用、连接剩余",
-    "cd": "/cd <目录|#序号> — 切换工作目录（=切换 Claude 会话）",
-    "sessions": "/sessions — 列出会话（/cd #n 快速切换）",
-    "policy": "/policy <auto|strict|bypass|plan> — 权限档位",
+    "new": "/new — 在当前目录开新话题（新 Claude 会话，上下文从零开始）",
+    "cd": "/cd <目录|#序号> — 切目录或切话题（#序号见 /sessions）",
+    "sessions": "/sessions — 按目录列出全部话题（/cd #n 切换、/new 开新）",
+    "policy": "/policy <auto|strict|bypass|plan> — 当前话题的权限档位",
     "bg": "/bg <任务描述> — 转入后台长任务（claude --bg，完成自动回报结果）",
 }
 ILINK_HELP = {
@@ -28,8 +29,8 @@ POLICIES = ("auto", "strict", "bypass", "plan")
 
 
 def _active_session(db, from_user: str, default_cwd: str):
-    cwd = db.get_active_cwd(from_user, default_cwd)
-    return db.get_or_create_session(from_user, cwd)
+    """当前话题绑定（chat /policy /bg /cancel 共用；get_active_binding 语义）。"""
+    return db.get_active_binding(from_user, default_cwd)
 
 
 async def execute_bridge(db, pool, route, from_user: str, config) -> str:
@@ -40,8 +41,7 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
             return await pool.cancel(int(arg))
         if not arg:
             # Ctrl+C 语义（PRD FR-2）：无参数 = 取消当前会话最新运行中任务
-            cwd = db.get_active_cwd(from_user, config.default_cwd)
-            sid = db.get_or_create_session(from_user, cwd).id
+            sid = _active_session(db, from_user, config.default_cwd).id
             running = [t for t in pool.snapshot()
                        if t.session_id == sid and t.state == "running"]
             if running:
@@ -64,48 +64,70 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
                 f"死信：{db.dead_letter_count()}\n"
                 f"当日费用：${cost:.2f}\n"
                 f"连接剩余：{remain}")
+    if cmd == "new":
+        cwd = _active_session(db, from_user, config.default_cwd).cwd
+        s = db.create_topic(from_user, cwd)
+        n = sum(1 for x in db.list_sessions(from_user) if x.cwd == cwd)
+        return f"已开启新话题 #{n}（目录 {cwd}），上下文从零开始"
     if cmd == "cd":
         path = route.args.strip()
         if not path:
-            cwd = db.get_active_cwd(from_user, config.default_cwd)
             sessions = db.list_sessions(from_user)
-            lines = [f"当前目录：{cwd}", "历史会话："]
-            lines += [f"  · {s.cwd}" for s in sessions[:10]]
-            lines.append("提示：/sessions 查看全部会话，/cd #n 快速切换")
+            active = db.get_active_binding(from_user, config.default_cwd, touch=False)
+            gidx = {s.id: i for i, s in enumerate(sessions, 1)}
+            lines = [f"当前目录：{active.cwd}（话题 #{gidx.get(active.id, '?')}）",
+                     "该目录话题："]
+            for s in (x for x in sessions if x.cwd == active.cwd):
+                mark = "▶" if s.id == active.id else "  "
+                summary = db.last_task_summary(s.id) or "（无任务）"
+                lines.append(f"{mark} #{gidx[s.id]}  {summary}（{_rel_time(s.last_active_at)}）")
+            lines.append("提示：/sessions 查看全部话题，/cd #n 快速切换，/new 开新话题")
             return "\n".join(lines)
         if path.startswith("#") and path[1:].isdigit():
-            # /sessions 序号切换：列表按 last_active_at DESC 排，#n 即第 n 个
+            # 全局序号切话题：序号即 /sessions 显示（last_active_at DESC 全局排序）
             sessions = db.list_sessions(from_user)
             n = int(path[1:])
             if not 1 <= n <= len(sessions):
-                return f"序号超出范围（共 {len(sessions)} 个会话）"
+                return f"序号超出范围（共 {len(sessions)} 个话题）"
             target = sessions[n - 1]
-            db.set_active_cwd(from_user, target.cwd)
-            return f"已切换到 {target.cwd}（/sessions 序号 #{n}）"
+            db.set_active_cwd(from_user, target.cwd)   # 旧 cwd 指针同步保持一致
+            db.set_active_session(from_user, target.id)
+            return f"已切换到话题 #{n}（目录 {target.cwd}）"
         if not os.path.isdir(path):
             return f"目录不存在：{path}"
         db.set_active_cwd(from_user, path)
-        db.get_or_create_session(from_user, path)
-        return f"已切换到 {path}（新目录 = 新 Claude 会话）"
+        latest = db.latest_topic_in(from_user, path)
+        if latest is not None:
+            db.set_active_session(from_user, latest.id)
+            return f"已切换到 {path}（该目录最新话题）"
+        s = db.get_or_create_session(from_user, path)   # 目录无话题 → 自动建
+        db.set_active_session(from_user, s.id)
+        return f"已切换到 {path}（新话题，上下文从零开始）"
     if cmd == "sessions":
-        cwd = db.get_active_cwd(from_user, config.default_cwd)
         sessions = db.list_sessions(from_user)
         if not sessions:
             return "当前没有会话。"
+        active = db.get_active_binding(from_user, config.default_cwd, touch=False)
+        # 两级展示：按目录分组（组按组内最新活跃排序），组内各话题带全局序号
+        groups: dict[str, list] = {}
+        for idx, s in enumerate(sessions, 1):
+            groups.setdefault(s.cwd, []).append((idx, s))
         lines = []
-        for i, s in enumerate(sessions, 1):
-            mark = "▶" if s.cwd == cwd else "  "
-            summary = db.last_task_summary(s.id) or "（无任务）"
-            lines.append(f"{mark} #{i} {s.cwd}（{_rel_time(s.last_active_at)}）{summary}")
+        for cwd, items in groups.items():
+            lines.append(f"📂 {cwd}")
+            for idx, s in items:
+                mark = "▶" if s.id == active.id else "  "
+                summary = db.last_task_summary(s.id) or "（无任务）"
+                lines.append(f"{mark} #{idx}  {summary}  {_rel_time(s.last_active_at)}")
+        lines.append("切换：/cd #序号（话题）或 /cd <目录>；/new 开新话题")
         return "\n".join(lines)
     if cmd == "policy":
         arg = route.args.strip().lower()
+        s = _active_session(db, from_user, config.default_cwd)
         if not arg:
-            s = _active_session(db, from_user, config.default_cwd)
-            return f"当前档位：{s.policy}\n可切换：{'/'.join(POLICIES)}"
+            return f"当前话题档位：{s.policy}\n可切换：{'/'.join(POLICIES)}"
         if arg not in POLICIES:
             return f"无效档位 {arg}。可切换：auto/strict/bypass/plan"
-        s = _active_session(db, from_user, config.default_cwd)
         db.set_policy(s.id, arg)
         db.audit("policy", f"user={from_user} session={s.id} → {arg}")
         return f"权限档位已切换为 {arg}（下一条消息生效）。"
@@ -113,8 +135,7 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
         prompt = route.args.strip()
         if not prompt:
             return "用法：/bg <任务描述> — 转入后台执行长任务（/tasks 查进度、/cancel 取消）"
-        cwd = db.get_active_cwd(from_user, config.default_cwd)
-        s = db.get_or_create_session(from_user, cwd)
+        s = _active_session(db, from_user, config.default_cwd)
         tid = db.create_task(None, s.id, prompt, kind="bg")
         await pool.submit_check()
         return f"已转后台（任务 #{tid}），/tasks 查进度、/cancel 取消。"

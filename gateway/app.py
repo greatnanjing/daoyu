@@ -96,8 +96,7 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict) -> None:
     elif r.kind == "proxy":
         db.enqueue(None, from_user, await execute_proxy(db, r, cfg))
     else:  # chat / forward
-        cwd = db.get_active_cwd(from_user, cfg.default_cwd)
-        session = db.get_or_create_session(from_user, cwd)
+        session = db.get_active_binding(from_user, cfg.default_cwd)   # 当前话题指针
         db.create_task(None, session.id,
                        text if r.kind == "chat" else f"/{r.command} {r.args}".strip(),
                        kind=r.kind)

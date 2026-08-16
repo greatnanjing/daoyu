@@ -16,8 +16,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   policy TEXT NOT NULL DEFAULT 'auto',
   created_at INTEGER NOT NULL,
   last_active_at INTEGER NOT NULL,
-  UNIQUE(wechat_user, cwd)
+  UNIQUE(wechat_user, cwd, claude_uuid)
 );
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(wechat_user, last_active_at);
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   msg_id TEXT UNIQUE NOT NULL,
@@ -87,9 +88,50 @@ class Database:
 
     def ensure_schema(self) -> None:
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._migrate_sessions_table()
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+
+    def _migrate_sessions_table(self) -> None:
+        """旧 sessions 表（UNIQUE(wechat_user, cwd)，一目录一会话）无损迁移为
+        新表（UNIQUE(wechat_user, cwd, claude_uuid)，一目录多话题）。SQLite 不能
+        ALTER 约束：建 sessions_v2 → INSERT SELECT 全部旧行（保留所有字段含 id，
+        tasks.session_id 外键不漂移）→ DROP 旧表 → RENAME。检测 sqlite_master 建表
+        SQL 是否已含新约束来决定是否迁移（幂等）。FK 开关必须在事务外设置
+        （PRAGMA 在事务内是 no-op），DROP 父表期间关 FK 防孤儿检查。"""
+        new_unique = "UNIQUE(wechat_user, cwd, claude_uuid)"
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'"
+        ).fetchone()
+        if row is None or new_unique in (row["sql"] or ""):
+            return   # 新库（_SCHEMA 直接建新约束）/ 已迁移
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self._conn.execute("BEGIN")
+            self._conn.execute(
+                "CREATE TABLE sessions_v2 ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "wechat_user TEXT NOT NULL, "
+                "cwd TEXT NOT NULL, "
+                "claude_uuid TEXT NOT NULL, "
+                "policy TEXT NOT NULL DEFAULT 'auto', "
+                "created_at INTEGER NOT NULL, "
+                "last_active_at INTEGER NOT NULL, "
+                + new_unique + ")")
+            self._conn.execute(
+                "INSERT INTO sessions_v2(id, wechat_user, cwd, claude_uuid, policy, "
+                "created_at, last_active_at) "
+                "SELECT id, wechat_user, cwd, claude_uuid, policy, created_at, "
+                "last_active_at FROM sessions")
+            self._conn.execute("DROP TABLE sessions")
+            self._conn.execute("ALTER TABLE sessions_v2 RENAME TO sessions")
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        finally:
+            self._conn.execute("PRAGMA foreign_keys=ON")
 
     # ---- state KV（bot_token / get_updates_buf / slash_commands / cwd 指针等）----
     def get_state(self, key: str, default: str | None = None) -> str | None:
@@ -146,22 +188,47 @@ class Database:
             "ORDER BY id DESC LIMIT 1", (from_user,)).fetchone()
         return row["context_token"] if row else None
 
-    # ---- sessions ----
+    # ---- sessions（同目录多话题）----
     def get_or_create_session(self, wechat_user: str, cwd: str) -> SessionBinding:
+        """该目录若无话题行则建；已有一行或多行时返回最新（last_active_at DESC，
+        id DESC 决胜）。迁移期兼容既有调用方（单目录单会话假设下行为不变）。"""
         row = self._conn.execute(
-            "SELECT * FROM sessions WHERE wechat_user=? AND cwd=?",
+            "SELECT * FROM sessions WHERE wechat_user=? AND cwd=? "
+            "ORDER BY last_active_at DESC, id DESC LIMIT 1",
             (wechat_user, cwd)).fetchone()
         if row is None:
             now = int(time.time())
-            self._conn.execute(
+            cur = self._conn.execute(
                 "INSERT INTO sessions(wechat_user, cwd, claude_uuid, policy, created_at, last_active_at) "
                 "VALUES(?,?,?,?,?,?)",
                 (wechat_user, cwd, str(uuid.uuid4()), "auto", now, now))
             self._conn.commit()
             row = self._conn.execute(
-                "SELECT * FROM sessions WHERE wechat_user=? AND cwd=?",
-                (wechat_user, cwd)).fetchone()
+                "SELECT * FROM sessions WHERE id=?", (cur.lastrowid,)).fetchone()
         return SessionBinding(**dict(row))
+
+    def create_topic(self, wechat_user: str, cwd: str) -> SessionBinding:
+        """同目录开新话题：总是新建行（新 claude_uuid、policy='auto'），当前话题
+        指针切过去。"""
+        now = int(time.time())
+        cur = self._conn.execute(
+            "INSERT INTO sessions(wechat_user, cwd, claude_uuid, policy, created_at, last_active_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (wechat_user, cwd, str(uuid.uuid4()), "auto", now, now))
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM sessions WHERE id=?", (cur.lastrowid,)).fetchone()
+        binding = SessionBinding(**dict(row))
+        self.set_active_session(wechat_user, binding.id)
+        return binding
+
+    def latest_topic_in(self, wechat_user: str, cwd: str) -> SessionBinding | None:
+        """该目录最新话题行（/cd <路径> 指向用）；目录无话题返回 None。"""
+        row = self._conn.execute(
+            "SELECT * FROM sessions WHERE wechat_user=? AND cwd=? "
+            "ORDER BY last_active_at DESC, id DESC LIMIT 1",
+            (wechat_user, cwd)).fetchone()
+        return SessionBinding(**dict(row)) if row else None
 
     def get_session(self, session_id: int) -> SessionBinding | None:
         row = self._conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
@@ -178,13 +245,16 @@ class Database:
         self._conn.commit()
 
     def list_sessions(self, wechat_user: str) -> list[SessionBinding]:
+        """全部话题，按 last_active_at DESC 全局排序（id DESC 决胜，同秒创建时
+        序号确定）。/sessions 展示与 /cd #n 解析同用此序。"""
         rows = self._conn.execute(
-            "SELECT * FROM sessions WHERE wechat_user=? ORDER BY last_active_at DESC",
+            "SELECT * FROM sessions WHERE wechat_user=? "
+            "ORDER BY last_active_at DESC, id DESC",
             (wechat_user,)).fetchall()
         return [SessionBinding(**dict(r)) for r in rows]
 
     def last_task_summary(self, session_id: int) -> str | None:
-        """/sessions 摘要：该会话最后一条任务的 prompt 截 30 字；bg 加前缀；无任务 None。"""
+        """/sessions 摘要：该话题最后一条任务的 prompt 截 30 字；bg 加前缀；无任务 None。"""
         row = self._conn.execute(
             "SELECT prompt, kind FROM tasks WHERE session_id=? ORDER BY id DESC LIMIT 1",
             (session_id,)).fetchone()
@@ -193,12 +263,38 @@ class Database:
         prompt = row["prompt"][:30]
         return f"[bg] {prompt}" if row["kind"] == "bg" else prompt
 
-    # ---- 每用户当前 cwd 指针（state KV）----
+    # ---- 每用户指针：当前 cwd（旧）+ 当前话题（state KV）----
     def set_active_cwd(self, wechat_user: str, cwd: str) -> None:
         self.set_state(f"cwd:{wechat_user}", cwd)
 
     def get_active_cwd(self, wechat_user: str, default: str) -> str:
         return self.get_state(f"cwd:{wechat_user}", default) or default
+
+    def set_active_session(self, wechat_user: str, session_id: int) -> None:
+        """当前话题指针：state KV active_session:<user> 存 sessions 行 id。"""
+        self.set_state(f"active_session:{wechat_user}", str(session_id))
+
+    def get_active_binding(self, wechat_user: str, default_cwd: str,
+                           touch: bool = True) -> SessionBinding:
+        """用户当前话题。指针有效 → 该行；指针缺失/失效（老库首次、脏数据）→
+        经旧 cwd 指针兼容推导（无则 default_cwd）取/建该目录最新话题并回写指针。
+        touch=True（默认，真实使用路径）顺带 touch_session 维护活跃时间；纯查看
+        （/sessions、/cd 展示）传 touch=False，避免查看本身改变全局序号。"""
+        raw = self.get_state(f"active_session:{wechat_user}")
+        if raw and raw.isdigit():
+            s = self.get_session(int(raw))
+            if s is not None and s.wechat_user == wechat_user:
+                if touch:
+                    self.touch_session(s.id)
+                    s = self.get_session(s.id)
+                return s
+        cwd = self.get_active_cwd(wechat_user, default_cwd)
+        s = self.get_or_create_session(wechat_user, cwd)
+        self.set_active_session(wechat_user, s.id)
+        if touch:
+            self.touch_session(s.id)
+            s = self.get_session(s.id)
+        return s
 
     # ---- tasks ----
     def create_task(self, message_id: int | None, session_id: int, prompt: str,
