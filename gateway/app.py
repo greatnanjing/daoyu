@@ -12,6 +12,7 @@ from common.models import InboundMessage
 from gateway.bridge import execute_bridge, execute_ilink_op
 from gateway.ilink import ILinkClient
 from gateway.outbound import OutboundLoop
+from gateway.proxy import execute_proxy
 from gateway.reconnect import ReconnectTimer
 from gateway.router import route
 from worker.pool import WorkerPool
@@ -93,8 +94,7 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict) -> None:
                 (f"最接近：/{sug}" if sug else "发送 /help 查看可用命令")
             db.enqueue(None, from_user, hint)
     elif r.kind == "proxy":
-        db.enqueue(None, from_user,
-                   f"/{r.command} 是 TUI 交互命令，微信端代理版本将在 M2 提供。")
+        db.enqueue(None, from_user, await execute_proxy(db, r, cfg))
     else:  # chat / forward
         cwd = db.get_active_cwd(from_user, cfg.default_cwd)
         session = db.get_or_create_session(from_user, cwd)
