@@ -52,10 +52,25 @@ async def terminal_login(db, ilink, base_url: str | None = None) -> dict:
 
 
 def _safe_render(content: str) -> None:
+    _save_png(content)
     try:
         _render_qr(content)
     except Exception:   # 渲染失败不影响登录主流程（URL 已打印，链接可开）
         pass
+
+
+def _save_png(content: str) -> None:
+    """二维码存 PNG：终端 ASCII 难扫时直接打开图片；无人值守推送渠道也用它。"""
+    try:
+        from pathlib import Path
+
+        import qrcode
+        path = Path("data") / "qrcode.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        qrcode.make(content).save(path)
+        print(f"二维码图片已保存: {path.resolve()}")
+    except Exception as e:   # 展示性增强，失败不阻断登录
+        print(f"(二维码 PNG 保存失败: {e})")
 
 
 def _render_qr(content: str) -> None:
