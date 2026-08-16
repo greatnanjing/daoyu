@@ -54,6 +54,8 @@ journalctl -u daoyu -f        # 看到「刀鱼已启动（gateway+worker 同进
 
 Windows 开发机（Git Bash）仅 venv 内路径不同：`.venv/Scripts/python`、`.venv/Scripts/daoyu-login`（Linux 生产为 `.venv/bin/…`），其余步骤一致。
 
+`claude/mcp.json`（MCP server 清单，进 git）内置条目为 Windows 形态（`command: "cmd"` + `args: ["/c", "npx", …]`）；Linux 服务器部署时需把各条目的 `command` 改为 `npx` / `uvx`、`args` 去掉 `/c` 前缀，并确认已装 Node.js（含 npx）与 [uv](https://docs.astral.sh/uv/)（提供 uvx）。
+
 `gateway/config.json` 主要键：
 
 | 键 | 说明 |

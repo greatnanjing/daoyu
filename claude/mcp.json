@@ -1,3 +1,22 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "chrome-devtools": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": ["/c", "npx", "chrome-devtools-mcp@latest"],
+      "env": {}
+    },
+    "context7": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@upstash/context7-mcp"],
+      "env": {}
+    },
+    "web-reader": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": ["/c", "uvx", "--with", "mcp~=1.0", "mcp-server-fetch"],
+      "env": {}
+    }
+  }
 }
