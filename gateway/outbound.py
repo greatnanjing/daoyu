@@ -1,10 +1,12 @@
 """出站发送器：outbox → iLink。最小发送间隔节流、失败重试、死信、每日上限熔断、typing 状态。"""
 import asyncio
+import base64
 import logging
 import random
 import time
 
 from common.text import split_text
+from gateway.media import upload_image
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +78,19 @@ class OutboundLoop:
             return  # 熔断：超每日上限暂停出站（/status 可见，明日自动恢复）
 
         for item in self._db.next_outbox_batch(limit=_BATCH):
+            if item.kind == "image":
+                err = await self._send_media(item)
+                if err is None:
+                    self._db.mark_sent(item.id)
+                    self._sent_today += 1
+                else:
+                    self._db.mark_send_failed(item.id, err)
+                    if self._db.get_outbox(item.id).state == "dead":
+                        self._db.audit("dead_letter",
+                                       f"count={self._db.dead_letter_count()} id={item.id}")
+                        self._alert_all(f"⚠️ 出站图片死信（id={item.id}）："
+                                        f"{item.media_path}")
+                continue
             pages = split_text(item.text, self._cfg.throttle["page_char_limit"])
             err = None   # None=全部页送达；str=失败原因（空 token / 未确认 / 异常）
             for page in pages:
@@ -122,6 +137,50 @@ class OutboundLoop:
                 await self._typing_off(to_user)
             except Exception:
                 pass   # typing 收尾失败不影响发送结果判定
+        return None if ok else _UNCONFIRMED_ERR
+
+    async def _send_media(self, item) -> str | None:
+        """图片行投递：上传 →（caption 文本条）→ 图片条。重试语义 = 整行重做
+        （同文本分页的 item 级重试先例：caption 已发出而图失败时，重试会重发
+        caption——单用户自用可接受，换取的是 downloadParam 永不过期缓存问题）。"""
+        ctx = self._db.latest_context_token(item.to_user)
+        if not ctx:
+            return _NO_TOKEN_ERR
+        token = self._token_ref["token"]
+        base = self._token_ref["base_url"] or None
+        try:
+            up = await upload_image(self._ilink, item.media_path or "",
+                                    item.to_user, token, base)
+        except FileNotFoundError:
+            return f"图片文件不存在: {item.media_path}"
+        except Exception as e:
+            return f"CDN 上传失败: {e!r}"
+        caption = (item.caption or "").strip()
+        if caption:
+            await self._respect_interval()
+            err = await self._send(item.to_user, caption)
+            if err:
+                return f"caption 发送失败: {err}"
+        await self._respect_interval()
+        try:
+            try:
+                await self._typing_on(item.to_user, ctx)
+            except Exception as e:
+                log.warning("typing_on 失败（忽略，继续发送）: user=%s err=%r",
+                            item.to_user, e)
+            ok = await self._ilink.send_image_message(
+                item.to_user, ctx,
+                download_param=up.download_param,
+                aes_key_b64=base64.b64encode(up.aes_key).decode(),
+                size_cipher=up.size_cipher, token=token, base_url=base)
+        except Exception as e:
+            log.warning("send_image_message 异常: user=%s err=%r", item.to_user, e)
+            return f"send_image_message 异常: {e!r}"
+        finally:
+            try:
+                await self._typing_off(item.to_user)
+            except Exception:
+                pass
         return None if ok else _UNCONFIRMED_ERR
 
     async def _typing_on(self, user: str, ctx: str) -> None:

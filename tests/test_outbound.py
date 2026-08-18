@@ -196,6 +196,107 @@ async def test_daily_limit_circuit_breaker_audits_once(db):
             await task
 
 
+# ---- M3 媒体出站 ----
+
+import base64
+import secrets as _secrets
+
+from gateway.media import aes_ecb_decrypt, aes_ecb_encrypt
+
+
+class FakeMediaILink:
+    """对齐真实 ILinkClient 媒体签名：文本/图片发送 + CDN 上传三件。"""
+
+    def __init__(self):
+        self.sent_texts: list[str] = []       # (text,)
+        self.sent_images: list[dict] = []
+        self.upload_calls = 0
+        self.uploaded_ct: bytes | None = None
+
+    async def sendmessage(self, to_user, context_token, text,
+                          token=None, base_url=None):
+        self.sent_texts.append(text)
+        return True
+
+    async def send_image_message(self, to_user, context_token, *,
+                                 download_param, aes_key_b64, size_cipher,
+                                 token=None, base_url=None):
+        self.sent_images.append({"download_param": download_param,
+                                 "aes_key_b64": aes_key_b64,
+                                 "size_cipher": size_cipher})
+        return True
+
+    async def getuploadurl(self, **kw):
+        self.upload_calls += 1
+        self.got_upload = kw
+        return {"upload_full_url": "https://cdn/up"}
+
+    async def cdn_upload(self, url, ciphertext):
+        self.uploaded_ct = ciphertext
+        return "DL-PARAM"
+
+    async def getconfig(self, ilink_user_id, context_token,
+                        token=None, base_url=None):
+        return "TICKET" if context_token else ""
+
+    async def sendtyping(self, ilink_user_id, ticket, status,
+                         token=None, base_url=None):
+        return None
+
+
+def _png_bytes():
+    return b"\x89PNG\r\n\x1a\n" + _secrets.token_bytes(32)
+
+
+async def test_drain_image_row_caption_then_image(db, tmp_path):
+    # 注：_png_bytes() 每次调用随机，须先固定一份 raw 再比较（简报原样断言
+    # 二次调用 _png_bytes() 会因随机串不同恒 False）。
+    raw = _png_bytes()
+    img = tmp_path / "out.png"; img.write_bytes(raw)
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    db.enqueue_media(None, "u@im.wechat", str(img), "看这个")
+    fake = FakeMediaILink()
+    loop = OutboundLoop(db, fake, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    await loop._drain_once()
+    assert fake.sent_texts == ["看这个"]            # caption 先发（文本条在前）
+    assert len(fake.sent_images) == 1              # 图片条在后
+    sent = fake.sent_images[0]
+    assert sent["download_param"] == "DL-PARAM"
+    assert sent["size_cipher"] == ((len(raw) + 16) // 16 * 16)
+    key = base64.b64decode(sent["aes_key_b64"])
+    assert len(key) == 16 and aes_ecb_decrypt(fake.uploaded_ct, key) == raw
+    assert db.get_outbox(db._conn.execute(
+        "SELECT id FROM outbox").fetchone()["id"]).state == "sent"
+
+
+async def test_drain_image_upload_failure_leaves_pending(db, tmp_path):
+    img = tmp_path / "out.png"; img.write_bytes(_png_bytes())
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    db.enqueue_media(None, "u@im.wechat", str(img), "")
+    fake = FakeMediaILink()
+    async def boom(url, ciphertext):
+        raise RuntimeError("cdn down")
+    fake.cdn_upload = boom          # 上传异常 → _send_media 捕获 → 整行留 pending
+    loop = OutboundLoop(db, fake, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    await loop._drain_once()
+    row = db._conn.execute("SELECT state, last_error FROM outbox").fetchone()
+    assert row["state"] == "pending" and row["last_error"]
+
+
+async def test_drain_image_missing_file_failure(db):
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    db.enqueue_media(None, "u@im.wechat", "/nonexistent/x.png", "")
+    fake = FakeMediaILink()
+    loop = OutboundLoop(db, fake, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    await loop._drain_once()
+    assert fake.sent_images == []
+    row = db._conn.execute("SELECT state FROM outbox").fetchone()
+    assert row["state"] == "pending"
+
+
 async def test_empty_bot_token_window_keeps_pending_then_delivers(db):
     # I-1 回归：token 失效（401/403 清空）→ 重连扫码窗（最长 600s）内不得 claim
     # outbox——空 token 发送必败，5 次尝试会在几十秒内烧光 → 全部死信（M1 无
