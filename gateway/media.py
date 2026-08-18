@@ -9,10 +9,14 @@ import base64
 import hashlib
 import logging
 import secrets
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
+
+from gateway.ilink import CdnClientError
 
 log = logging.getLogger(__name__)
 
@@ -43,9 +47,9 @@ def aes_ecb_decrypt(ciphertext: bytes, key: bytes) -> bytes:
     if len(key) != 16:
         raise MediaError("AES-128 key 必须是 16 字节")
     dec = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
-    padded = dec.update(ciphertext) + dec.finalize()
     unpadder = PKCS7(128).unpadder()
     try:
+        padded = dec.update(ciphertext) + dec.finalize()
         return unpadder.update(padded) + unpadder.finalize()
     except ValueError as e:
         raise MediaError(f"解密失败（密钥不对或数据损坏）: {e}") from e
@@ -92,3 +96,81 @@ def parse_inbound_aes_key(image_item: dict) -> bytes:
                 except ValueError as e:
                     raise MediaError(f"aes_key hex 形态损坏: {e}") from e
     raise MediaError("aes_key 无法解析为 16 字节密钥（缺字段或形态不符）")
+
+
+# ---- 上传/下载编排（网络细节在 ilink 层，此处只编排协议流程）----
+
+_UPLOAD_RETRIES = 3
+
+
+@dataclass
+class UploadedImage:
+    filekey: str          # hex32（getuploadurl 用）
+    download_param: str   # x-encrypted-param（sendmessage 的 encrypt_query_param）
+    aes_key: bytes        # 原始 16B（sendmessage 时 base64）
+    size_cipher: int      # 密文大小（sendmessage 的 mid_size）
+
+
+def build_cdn_download_url(encrypted_query_param: str) -> str:
+    return f"{CDN_BASE_URL}/download?encrypted_query_param={quote(encrypted_query_param, safe='')}"
+
+
+def build_cdn_upload_url(upload_param: str, filekey: str) -> str:
+    return (f"{CDN_BASE_URL}/upload?encrypted_query_param={quote(upload_param, safe='')}"
+            f"&filekey={quote(filekey, safe='')}")
+
+
+async def upload_image(ilink, path: str, to_user: str,
+                       token: str | None, base_url: str | None) -> UploadedImage:
+    """官方五步流程（spec §2.2）：读文件 → md5/keygen → getuploadurl →
+    POST 密文 → 返回引用。4xx（CdnClientError）立败；5xx/网络重试 ≤3。"""
+    raw = Path(path).read_bytes()
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise MediaError(f"图片超 {MAX_IMAGE_BYTES // 1024 // 1024}MB 上限")
+    filekey = secrets.token_hex(16)
+    aes_key = secrets.token_bytes(16)
+    resp = await ilink.getuploadurl(
+        filekey=filekey, media_type=1, to_user_id=to_user,
+        rawsize=len(raw), rawfilemd5=hashlib.md5(raw).hexdigest(),
+        filesize=pkcs7_padded_size(len(raw)), no_need_thumb=True,
+        aeskey=aes_key.hex(), token=token, base_url=base_url)
+    upload_full = str(resp.get("upload_full_url") or "").strip()
+    upload_param = resp.get("upload_param")
+    if not upload_full and not upload_param:
+        raise MediaError(f"getuploadurl 未返回上传地址: {str(resp)[:200]}")
+    ciphertext = aes_ecb_encrypt(raw, aes_key)
+    url = upload_full or build_cdn_upload_url(str(upload_param), filekey)
+    last_err: Exception | None = None
+    for _ in range(_UPLOAD_RETRIES):
+        try:
+            param = await ilink.cdn_upload(url, ciphertext)
+            return UploadedImage(filekey=filekey, download_param=param,
+                                 aes_key=aes_key, size_cipher=len(ciphertext))
+        except CdnClientError:
+            raise                      # 4xx 客户端错误：立败不重试
+        except Exception as e:         # 5xx / 网络：重试
+            last_err = e
+            log.warning("CDN 上传失败（将重试）: %r", e)
+    raise MediaError(f"CDN 上传重试 {_UPLOAD_RETRIES} 次仍失败: {last_err!r}")
+
+
+async def download_inbound_image(ilink, image_item: dict, dest_dir: Path) -> str:
+    """入站图：full_url 优先否则拼 download URL → GET 密文 → 解密 → sniff 白名单
+    → 随机名落盘。返回绝对路径。"""
+    media = image_item.get("media") or {}
+    full_url = str(media.get("full_url") or "").strip()
+    eq = str(media.get("encrypt_query_param") or "")
+    if not full_url and not eq:
+        raise MediaError("图片消息缺 CDN 引用（无 full_url/encrypt_query_param）")
+    encrypted = await ilink.cdn_download(full_url or build_cdn_download_url(eq))
+    key = parse_inbound_aes_key(image_item)
+    raw = aes_ecb_decrypt(encrypted, key)
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise MediaError(f"图片超 {MAX_IMAGE_BYTES // 1024 // 1024}MB 上限")
+    ext = sniff_image(raw)
+    out = Path(dest_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    dest = out / f"img-{secrets.token_hex(8)}.{ext}"
+    dest.write_bytes(raw)
+    log.info("入站图片已落盘: %s (%d bytes)", dest, len(raw))
+    return str(dest)
