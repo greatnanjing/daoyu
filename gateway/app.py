@@ -11,6 +11,7 @@ from common.db import Database
 from common.models import InboundMessage
 from gateway.bridge import execute_bridge, execute_ilink_op
 from gateway.ilink import ILinkClient
+from gateway.media import MediaError, download_inbound_image
 from gateway.outbound import OutboundLoop
 from gateway.proxy import execute_proxy
 from gateway.reconnect import ReconnectTimer
@@ -25,8 +26,28 @@ async def _noop_reconnect() -> None:
     """入站管线路径的重连回调占位：真正的重连走 state + ReconnectTimer。"""
 
 
-async def handle_inbound(db, cfg, pool, outbound, msg: dict) -> None:
-    """入站管道：类型过滤 → 白名单 → 落盘去重 → 路由 → 本地秒回或入队。"""
+async def _save_inbound_images(db, cfg, ilink, image_items, from_user):
+    """下载解密全部图 → data/media/inbound/。返回 (成功路径列表, 最后错误或 None)。
+    ilink=None（无连接/测试）或单图失败：回执 ⚠️，不让异常逃逸（入站管道不炸）。"""
+    paths, last_err = [], None
+    for img in image_items:
+        try:
+            if ilink is None:
+                raise MediaError("iLink 连接不可用")
+            paths.append(await download_inbound_image(
+                ilink, img, cfg.repo_root / "data" / "media" / "inbound"))
+        except Exception as e:
+            last_err = e
+            log.warning("入站图片处理失败: %r", e)
+    if len(paths) < len(image_items):
+        db.enqueue(None, from_user,
+                   f"⚠️ 图片接收失败（{last_err}），请重发或改用文字")
+    return paths, last_err
+
+
+async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None:
+    """入站管道：类型过滤 → 白名单 → 落盘去重 → 路由 → 本地秒回或入队。
+    M3：item_list 遍历——文本照旧，图片（type==2）下载落盘后"发图即对话"。"""
     if msg.get("message_type") != 1:
         return
     if msg.get("group_id"):
@@ -36,15 +57,31 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict) -> None:
         log.info("非白名单用户 %s，忽略", from_user)
         return
 
-    text = (msg.get("item_list") or [{}])[0].get("text_item", {}).get("text", "")
+    text_parts: list[str] = []
+    image_items: list[dict] = []
+    for item in msg.get("item_list") or []:
+        if item.get("type") == 2:
+            image_items.append(item.get("image_item") or {})
+        elif item.get("text_item"):
+            # 文本判定不看 type==1：兼容缺 type 键的既有消息构造（M1 起仅取
+            # text_item 不校验 type），非图元素带 text_item 即文本。
+            text_parts.append(item["text_item"].get("text", ""))
+    text = "".join(text_parts).strip()
     msg_key = str(msg.get("message_id") or msg.get("seq") or "")
     if not msg_key:
         log.warning("消息缺 message_id/seq，跳过: %r", msg)
         return
+    media_path: str | None = None
+    if image_items:
+        image_paths, fail_err = await _save_inbound_images(
+            db, cfg, ilink, image_items, from_user)
+        media_path = image_paths[0] if image_paths else None
+    else:
+        image_paths, fail_err = [], None
     if db.insert_message(InboundMessage(
             msg_id=msg_key, from_user=from_user, text=text,
             context_token=msg.get("context_token", ""),
-            received_at=int(time.time()))) is None:
+            received_at=int(time.time()), media_path=media_path)) is None:
         return  # msg_id 去重（iLink 重连后消息会重投）
 
     # 重连 Y/N 确认拦截
@@ -73,6 +110,21 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict) -> None:
                 outbound.notify()   # 回执即时送达（approval server 2s 轮询收终态）
             return
 
+    if image_items and not text and not image_paths:
+        return   # 纯图且全部下载失败：已有 ⚠️ 回执，不建任务（防空文本进路由）
+    if image_paths and not text:
+        # 纯图消息：不走路由（空文本无命令语义），直接 chat 任务——发图即对话
+        session = db.get_active_binding(from_user, cfg.default_cwd)
+        prompt = "\n".join(
+            f"[用户发来图片，已保存到 {p}，请查看并回应]" for p in image_paths)
+        db.create_task(None, session.id, prompt, kind="chat")
+        db.enqueue(None, from_user, "✅ 收到图片，处理中")
+        if pool:
+            await pool.submit_check()
+        if outbound:
+            outbound.notify()
+        return
+
     try:
         slash = set(json.loads(db.get_state("slash_commands") or "[]"))
     except ValueError:
@@ -97,9 +149,11 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict) -> None:
         db.enqueue(None, from_user, await execute_proxy(db, r, cfg))
     else:  # chat / forward
         session = db.get_active_binding(from_user, cfg.default_cwd)   # 当前话题指针
-        db.create_task(None, session.id,
-                       text if r.kind == "chat" else f"/{r.command} {r.args}".strip(),
-                       kind=r.kind)
+        prompt = text if r.kind == "chat" else f"/{r.command} {r.args}".strip()
+        if image_paths:
+            prompt += "\n" + "\n".join(
+                f"[用户发来图片，已保存到 {p}，请查看]" for p in image_paths)
+        db.create_task(None, session.id, prompt, kind=r.kind)
         db.enqueue(None, from_user, "✅ 收到，处理中")
         if pool:
             await pool.submit_check()   # 即时唤醒调度，不等下一个轮询周期
@@ -143,7 +197,7 @@ async def poll_loop(db, cfg, ilink, pool, outbound, token_ref) -> None:
             db.set_state("get_updates_buf", buf)
         for m in result.get("msgs") or []:
             try:
-                await handle_inbound(db, cfg, pool, outbound, m)
+                await handle_inbound(db, cfg, pool, outbound, m, ilink=ilink)
             except Exception:
                 log.exception("处理入站消息失败: %r", m)
 
