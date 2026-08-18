@@ -120,3 +120,91 @@ async def test_get_bot_qrcode_post_first(client):
         m.post(f"{BASE_URL}{QR_PATH}", payload={"qrcode": "Q", "qrcode_img_content": "https://img"})
         data = await client.get_bot_qrcode([])
         assert data["qrcode"] == "Q"
+
+
+# ---- M3 媒体（字段级协议见 spec §2，源：官方包 v2.4.6）----
+
+CDN = "https://novac2c.cdn.weixin.qq.com/c2c"
+
+
+async def test_getuploadurl_body_shape(client):
+    with aioresponses() as m:
+        m.post(f"{BASE_URL}/ilink/bot/getuploadurl",
+               payload={"upload_full_url": "https://cdn/up"}, headers={
+                   "Content-Type": "application/octet-stream"})
+        resp = await client.getuploadurl(
+            filekey="ab" * 16, media_type=1, to_user_id="u@im.wechat",
+            rawsize=100, rawfilemd5="d41d8cd98f00b204e9800998ecf8427e",
+            filesize=112, no_need_thumb=True, aeskey="cd" * 16)
+        assert resp["upload_full_url"] == "https://cdn/up"
+        req = m.requests[("POST", __import__("yarl").URL(
+            f"{BASE_URL}/ilink/bot/getuploadurl"))][0]
+        body = _body(req)
+        assert body["media_type"] == 1 and body["no_need_thumb"] is True
+        assert body["filekey"] == "ab" * 16 and body["aeskey"] == "cd" * 16
+        assert body["rawsize"] == 100 and body["filesize"] == 112
+
+
+async def test_cdn_upload_returns_encrypted_param_header(client):
+    from gateway.ilink import ILinkError
+    with aioresponses() as m:
+        m.post("https://cdn/up", status=200,
+               headers={"x-encrypted-param": "DL-PARAM"})
+        param = await client.cdn_upload("https://cdn/up", b"ciphertext")
+        assert param == "DL-PARAM"
+        # 4xx → CdnClientError（立败）；5xx → ILinkError（可重试）
+        m.post("https://cdn/e4", status=403,
+               headers={"x-error-message": "forbidden"})
+        import pytest as _pytest
+        from gateway.ilink import CdnClientError
+        with _pytest.raises(CdnClientError):
+            await client.cdn_upload("https://cdn/e4", b"x")
+        m.post("https://cdn/e5", status=503)
+        with _pytest.raises(ILinkError):
+            await client.cdn_upload("https://cdn/e5", b"x")
+
+
+async def test_cdn_upload_missing_param_header(client):
+    from gateway.ilink import ILinkError
+    import pytest as _pytest
+    with aioresponses() as m:
+        m.post("https://cdn/up", status=200)
+        with _pytest.raises(ILinkError):
+            await client.cdn_upload("https://cdn/up", b"x")
+
+
+async def test_cdn_download_returns_bytes(client):
+    with aioresponses() as m:
+        m.get(f"{CDN}/download?encrypted_query_param=EQ", body=b"\x01\x02\x03")
+        buf = await client.cdn_download(f"{CDN}/download?encrypted_query_param=EQ")
+        assert buf == b"\x01\x02\x03"
+
+
+async def test_send_image_message_item_shape(client):
+    with aioresponses() as m:
+        m.post(f"{BASE_URL}/ilink/bot/sendmessage", payload={})
+        ok = await client.send_image_message(
+            "u@im.wechat", "CTX", download_param="DL-PARAM",
+            aes_key_b64="QUJDREVGR0hJSktMTU4=", size_cipher=112)
+        assert ok is True
+        req = m.requests[("POST", __import__("yarl").URL(
+            f"{BASE_URL}/ilink/bot/sendmessage"))][0]
+        body = _body(req)
+        msg = body["msg"]
+        assert msg["message_type"] == 2 and msg["message_state"] == 2
+        assert msg["context_token"] == "CTX"
+        item = msg["item_list"][0]
+        assert item["type"] == 2
+        assert item["image_item"]["media"] == {
+            "encrypt_query_param": "DL-PARAM",
+            "aes_key": "QUJDREVGR0hJSktMTU4=", "encrypt_type": 1}
+        assert item["image_item"]["mid_size"] == 112
+
+
+async def test_send_image_message_errcode_false(client):
+    with aioresponses() as m:
+        m.post(f"{BASE_URL}/ilink/bot/sendmessage",
+               payload={"errcode": 40001, "errmsg": "bad"})
+        ok = await client.send_image_message(
+            "u@im.wechat", "CTX", download_param="p", aes_key_b64="a==", size_cipher=1)
+        assert ok is False

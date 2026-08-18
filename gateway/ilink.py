@@ -38,6 +38,10 @@ class ILinkError(Exception):
     pass
 
 
+class CdnClientError(ILinkError):
+    """CDN 上传 4xx（客户端错误）：立败不重试（官方 cdn-upload.js 语义）。"""
+
+
 class ILinkClient:
     def __init__(self, session: aiohttp.ClientSession, base_url: str = BASE_URL):
         self._session = session
@@ -148,3 +152,78 @@ class ILinkClient:
             "ilink/bot/sendtyping",
             {"ilink_user_id": ilink_user_id, "typing_ticket": ticket,
              "status": status, "base_info": base_info()}, token, base_url)
+
+    # ---- M3 媒体（字段级协议见 spec §2）----
+
+    async def getuploadurl(self, *, filekey: str, media_type: int, to_user_id: str,
+                           rawsize: int, rawfilemd5: str, filesize: int,
+                           no_need_thumb: bool, aeskey: str,
+                           token: str | None = None,
+                           base_url: str | None = None) -> dict:
+        return await self._post(
+            "ilink/bot/getuploadurl",
+            {"filekey": filekey, "media_type": media_type,
+             "to_user_id": to_user_id, "rawsize": rawsize,
+             "rawfilemd5": rawfilemd5, "filesize": filesize,
+             "no_need_thumb": no_need_thumb, "aeskey": aeskey,
+             "base_info": base_info()}, token, base_url)
+
+    async def cdn_upload(self, url: str, ciphertext: bytes) -> str:
+        """POST 密文到 CDN（裸请求：无 iLink 鉴权头——官方 cdn-upload.js 同）。
+        成功取响应头 x-encrypted-param。4xx 抛 CdnClientError（立败）、
+        5xx 抛 ILinkError（上层重试）。"""
+        async with self._session.post(
+                url, data=ciphertext,
+                headers={"Content-Type": "application/octet-stream"}) as res:
+            if 400 <= res.status < 500:
+                err = res.headers.get("x-error-message", "")
+                raise CdnClientError(f"CDN 上传客户端错误 {res.status}: {err}")
+            if res.status != 200:
+                err = res.headers.get("x-error-message", f"status {res.status}")
+                raise ILinkError(f"CDN 上传服务端错误: {err}")
+            param = res.headers.get("x-encrypted-param")
+            if not param:
+                raise ILinkError("CDN 上传响应缺 x-encrypted-param 头")
+            return param
+
+    async def cdn_download(self, url: str) -> bytes:
+        """GET 密文（裸请求；full_url 或拼接 download URL 均可）。
+        错误日志只记 URL 前 40 字符（spec §3.5 脱敏：CDN 签名 URL 不整串进日志）。"""
+        async with self._session.get(url) as res:
+            if res.status != 200:
+                raise ILinkError(f"CDN 下载 {res.status}: {url[:40]}…")
+            return await res.read()
+
+    async def send_image_message(self, to_user: str, context_token: str, *,
+                                 download_param: str, aes_key_b64: str,
+                                 size_cipher: int, token: str | None = None,
+                                 base_url: str | None = None) -> bool:
+        """发图（sendmessage 媒体 item）。容错与 sendmessage 一致：网络/协议
+        异常不逃逸，返回 False 交 outbox 重试。aes_key_b64 = base64(raw16B)。"""
+        client_id = f"daoyu-{random.randint(0, 0xFFFFFFFFF):09x}"
+        try:
+            data = await self._post(
+                "ilink/bot/sendmessage",
+                {"msg": {
+                    "from_user_id": "",
+                    "to_user_id": to_user,
+                    "client_id": client_id,
+                    "message_type": 2,
+                    "message_state": 2,
+                    "context_token": context_token,
+                    "item_list": [{"type": 2, "image_item": {
+                        "media": {"encrypt_query_param": download_param,
+                                   "aes_key": aes_key_b64,
+                                   "encrypt_type": 1},
+                        "mid_size": size_cipher}}],
+                },
+                    "base_info": base_info()}, token, base_url)
+        except (ILinkError, aiohttp.ClientError, ValueError) as e:
+            log.warning("send_image_message 发送失败（送达未确认）: %s", e,
+                        exc_info=True)
+            return False
+        errcode = data.get("errcode", 0)
+        if errcode:
+            log.warning("send_image_message 被拒: errcode=%s errmsg=%s",
+                        errcode, data.get("errmsg"))
+        return not errcode
