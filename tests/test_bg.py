@@ -533,3 +533,21 @@ def test_reset_running_keeps_bg_with_id(db):
     assert db.get_task(chat_t).state == "pending"
     assert db.get_task(bg_t).state == "running"   # 已在后台跑 → watcher 接管，不重跑
     assert db.get_task(bg_no_id).state == "pending"
+
+
+async def test_runner_bg_includes_daoyu_mcp_config(db, cfg_bg):
+    """M3：bg 也装配 daoyu server（恒 send_image，无审批通道）——argv 带
+    --mcp-config 指向 daoyu-mcp- 前缀临时文件（任务结束已删，断言路径形态）。"""
+    import tempfile
+    s = db.get_or_create_session("u@im.wechat", str(cfg_bg.repo_root))
+    t = db.create_task(None, s.id, "跑个大活", kind="bg")
+    db.claim_next_pending({s.id})
+    runner = TaskRunner(db, cfg_bg, process_registry={})
+    await asyncio.wait_for(runner.run(db.get_task(t), s), timeout=10)
+    argv = json.loads(cfg_bg.args_log.read_text(encoding="utf-8"))["argv"]
+    assert "--mcp-config" in argv
+    mcp_path = argv[argv.index("--mcp-config") + 1]
+    assert "daoyu-mcp-" in mcp_path
+    assert Path(mcp_path).parent == Path(tempfile.gettempdir())
+    assert not Path(mcp_path).exists()          # 任务结束 finally 已删
+    assert argv[-1] == "跑个大活"                # --bg 仍是最后一个 flag

@@ -1,6 +1,6 @@
-"""strict 档审批接线（M2 Task 2）：
-- runner：strict 任务生成临时合并 mcp config（静态清单 + daoyu 审批 server 条目）
-  传给 claude 子进程，任务结束即删；非 strict 档继续用静态 mcp.json。
+"""strict 档审批接线（M2 Task 2，M3 起四档通用）：
+- runner：四档任务都生成临时合并 mcp config（静态清单 + daoyu server 条目；
+  strict=approve,send_image，其余=send_image）传给 claude 子进程，任务结束即删。
 - gateway：pending 审批存在时 Y/N 单字拦截本地秒回（decide + 回执），其他文本
   照常路由。
 - 拼接冒烟：runner 生成的 daoyu 条目手工起真实 approval_mcp 子进程，握手 +
@@ -88,13 +88,16 @@ async def test_strict_task_temp_merged_mcp_config_and_cleanup(db, tmp_path, monk
     assert entry["args"] == [str(ROOT / "worker" / "approval_mcp.py")]
     assert entry["env"] == {"DAOYU_DB": os.path.abspath(db.path),
                             "DAOYU_TASK_ID": str(t),
-                            "DAOYU_TO_USER": USER}
+                            "DAOYU_TO_USER": USER,
+                            "DAOYU_TOOLS": "approve,send_image"}
     # 任务结束：临时文件已删，静态文件原样保留
     assert not os.path.exists(tmp_cfg_path)
     assert (tmp_path / "claude" / "mcp.json").exists()
 
 
-async def test_non_strict_task_keeps_static_mcp_config(db, tmp_path, monkeypatch):
+async def test_non_strict_task_merges_send_image_only(db, tmp_path, monkeypatch):
+    """M3：非 strict 档同样走临时合并 config（daoyu=send_image，无审批工具
+    引用），静态 mcp.json 不删不改、临时文件结束即删。"""
     static = {"context7": {"type": "stdio", "command": "cmd", "args": [], "env": {}}}
     cfg = RunnerCfg(tmp_path, monkeypatch, static_servers=static)
     s = db.get_or_create_session(USER, str(tmp_path))   # 默认 policy=auto
@@ -104,12 +107,16 @@ async def test_non_strict_task_keeps_static_mcp_config(db, tmp_path, monkeypatch
     assert db.get_task(t).state == "done"
     log = _args_log(cfg)
     j = log["argv"].index("--mcp-config")
-    assert log["argv"][j + 1] == str(tmp_path / "claude" / "mcp.json")
-    assert "--permission-prompt-tool" not in log["argv"]
-    assert "mcp_config" in log and "daoyu" not in log["mcp_config"]["mcpServers"]
+    tmp_cfg_path = log["argv"][j + 1]
+    assert tmp_cfg_path != str(tmp_path / "claude" / "mcp.json")
+    assert "--permission-prompt-tool" not in log["argv"]   # 审批工具引用仅 strict 档
+    servers = log["mcp_config"]["mcpServers"]
+    assert servers["context7"] == static["context7"]       # 静态清单完整合并
+    assert servers[APPROVAL_MCP_SERVER]["env"]["DAOYU_TOOLS"] == "send_image"
     static_file = tmp_path / "claude" / "mcp.json"
-    assert static_file.exists()   # 非 strict 档不删不改静态文件
+    assert static_file.exists()   # 静态文件不删不改
     assert json.loads(static_file.read_text(encoding="utf-8"))["mcpServers"]["context7"]
+    assert not os.path.exists(tmp_cfg_path)   # 临时文件任务结束即删
 
 
 async def test_strict_task_failure_cleans_temp_config(db, tmp_path, monkeypatch):

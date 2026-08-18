@@ -300,3 +300,31 @@ async def test_fail_error_message_includes_result_text(db, cfg, tmp_path):
     assert db.get_task(t).state == "pending"          # 普通失败：attempts<3 回 pending
     err = [x for x in _outbox_texts(db) if x.startswith("❌")]
     assert err and "退出码 3" in err[0] and "API 抖动" in err[0]
+
+
+async def test_daoyu_mcp_merged_all_policies(db, cfg, tmp_path, monkeypatch):
+    """M3：四档（-p 路径）都合并 daoyu 条目——strict=approve,send_image，
+    其余=send_image；静态清单 server 保留。"""
+    args_log = tmp_path / "mcp_args.log"
+    monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
+    claude_dir = cfg.repo_root / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "mcp.json").write_text(json.dumps({"mcpServers": {"context7": {
+        "type": "stdio", "command": "x", "args": []}}}), encoding="utf-8")
+    for policy, expect_tools in (("auto", "send_image"),
+                                 ("strict", "approve,send_image"),
+                                 ("bypass", "send_image"),
+                                 ("plan", "send_image")):
+        s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+        db.set_policy(s.id, policy)
+        s = db.get_session(s.id)                 # 刷新拿带 policy 的绑定
+        t = db.create_task(None, s.id, "hi", kind="chat")
+        runner = TaskRunner(db, cfg, process_registry={})
+        await runner.run(db.get_task(t), s)
+        log = json.loads(args_log.read_text(encoding="utf-8"))
+        servers = log["mcp_config"]["mcpServers"]     # fake_claude 已快照文件内容
+        assert "context7" in servers, policy          # 静态清单保留
+        entry = servers["daoyu"]
+        assert entry["type"] == "stdio"
+        assert entry["env"]["DAOYU_TOOLS"] == expect_tools, policy
+        assert entry["env"]["DAOYU_TASK_ID"] == str(t)

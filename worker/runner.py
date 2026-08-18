@@ -84,8 +84,11 @@ class TaskRunner:
         tmp_mcp: str | None = None
         try:
             strict = session.policy == "strict"
-            if strict:
-                tmp_mcp = self._write_approval_mcp_config(task, session, static_mcp)
+            # M3：四档都合并 daoyu server（strict=approve+send_image，其余=
+            # send_image）。临时文件生命周期不变（finally 删 + 启动清扫）。
+            tmp_mcp = self._write_daoyu_mcp_config(
+                task, session, static_mcp,
+                tools="approve,send_image" if strict else "send_image")
             # 该 Claude 会话是否已被首次调用过（--session-id 建立后才能 --resume；
             # 对不存在的 UUID 直接 --resume 会报错，所以必须显式记录。
             # 不能用 task.attempts>0 判定：claim_next_pending 领取时已把 attempts 置 ≥1）
@@ -95,7 +98,7 @@ class TaskRunner:
                 resume=resume,
                 policy=session.policy,
                 budget=self._cfg.budget,
-                mcp_config=Path(tmp_mcp) if strict else static_mcp,
+                mcp_config=Path(tmp_mcp),
                 settings=self._cfg.repo_root / "claude" / "settings.json",
                 approval_mcp=strict,
             )
@@ -258,8 +261,9 @@ class TaskRunner:
         flag 集：--bare + 预算 + --permission-mode + --settings（硬 deny 清单与
         -p 同样生效）+ bypass 档 --disallowedTools（与 -p 同源常量）。不传
         --permission-prompt-tool —— strict 档审批 MCP 在 bg 下暂不支持，回执明示；
-        也不带 -p 全量 flag（--session-id/--resume 等会话由后台守护进程自管，
-        sessionId 事后可从 agents 条目拿）。--bg 与上述 flag 的组合行为待真机实测。"""
+        也不带 -p 全量 flag（--session-id/--resume 等会话由后台守护进程自管）；
+        M3 起 bg 带 --mcp-config/--strict-mcp-config（daoyu send_image），
+        与 -p 的 MCP flag 集同源。--bg 与上述 flag 的组合行为待真机实测。"""
         env = os.environ.copy()
         env.update(self._cfg.secrets)
         if getattr(self._cfg, "worker", {}).get("isolate_claude_config", False):
@@ -269,66 +273,81 @@ class TaskRunner:
         # prompt 以 "-" 开头会被 CLI 解析成 flag → 前置空格防误读（单用户自伤
         # 场景，预算闸兜底，一行防御即可）
         prompt = task.prompt if not task.prompt.startswith("-") else " " + task.prompt
-        argv = ["--bare",
-                "--settings", str(self._cfg.repo_root / "claude" / "settings.json"),
-                "--max-turns", str(self._cfg.budget.max_turns),
-                "--max-budget-usd", str(self._cfg.budget.max_usd),
-                "--permission-mode", POLICY_MODE[session.policy]]
-        if session.policy == "bypass":
-            argv += ["--disallowedTools", ",".join(BYPASS_DISALLOWED_TOOLS)]
-        argv += ["--bg", prompt]
+        # M3：bg 同样装配 daoyu server（恒 send_image——bg 无审批通道）。
+        # --mcp-config 与 --bg 的组合行为待真机实测（spec §5 追加项）。
+        tmp_mcp = self._write_daoyu_mcp_config(
+            task, session, self._cfg.repo_root / "claude" / "mcp.json",
+            tools="send_image")
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *prefix, *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                limit=_STREAM_LIMIT,
-                cwd=session.cwd, env=env)
-        except OSError as e:
-            await self._fail(task, session.wechat_user, f"无法启动 claude 后台子进程: {e}")
-            return
-        # 注册进程句柄（M4）：launch 阶段（bg_id 尚未落盘）CLI 若悬挂，/cancel
-        # 才能走既有 kill 路径，而不是"稍后再试"干等、session 槽位被占到重启。
-        entry = TrackedProcess(proc)
-        self._procs[task.id] = entry
-        try:
-            stdout, stderr = await proc.communicate()   # 两条管道并发收，无死锁风险
+            argv = ["--bare",
+                    "--settings", str(self._cfg.repo_root / "claude" / "settings.json"),
+                    "--mcp-config", tmp_mcp, "--strict-mcp-config",
+                    "--max-turns", str(self._cfg.budget.max_turns),
+                    "--max-budget-usd", str(self._cfg.budget.max_usd),
+                    "--permission-mode", POLICY_MODE[session.policy]]
+            if session.policy == "bypass":
+                argv += ["--disallowedTools", ",".join(BYPASS_DISALLOWED_TOOLS)]
+            argv += ["--bg", prompt]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *prefix, *argv,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    limit=_STREAM_LIMIT,
+                    cwd=session.cwd, env=env)
+            except OSError as e:
+                await self._fail(task, session.wechat_user, f"无法启动 claude 后台子进程: {e}")
+                return
+            # 注册进程句柄（M4）：launch 阶段（bg_id 尚未落盘）CLI 若悬挂，/cancel
+            # 才能走既有 kill 路径，而不是"稍后再试"干等、session 槽位被占到重启。
+            entry = TrackedProcess(proc)
+            self._procs[task.id] = entry
+            try:
+                stdout, stderr = await proc.communicate()   # 两条管道并发收，无死锁风险
+            finally:
+                self._procs.pop(task.id, None)
+            out = stdout.decode("utf-8", "replace")
+            m = _BG_ID_RE.search(out)
+            if entry.killed or self._db.get_task(task.id).state == "canceled":
+                # launch 被用户取消：canceled 终态已由 cancel 落盘，绝不走 _fail
+                # （failed→pending 的重试会把用户刚取消的任务再发一遍）
+                return
+            if proc.returncode != 0 or m is None:
+                err = f"后台启动失败（rc={proc.returncode}）: {out[-_RESULT_TAIL_CHARS:]}"
+                tail = stderr.decode("utf-8", "replace").strip()
+                if tail:
+                    err += f": {tail[-_STDERR_TAIL_CHARS:]}"
+                await self._fail(task, session.wechat_user, err)
+                return
+            bg_id = m.group(1)
+            self._db.set_bg_id(task.id, bg_id)
+            receipt = (f"🚀 已在后台启动（任务 #{task.id}，后台 id {bg_id}）。"
+                       f"完成后自动推送结果，/tasks 查进度、/cancel 取消。")
+            if session.policy == "strict":
+                # strict 档 bg 不传审批 MCP（--bg 组合保守集）——必须明示用户，
+                # 静默降档违背"选 strict = 要审批"的预期（M5）。deny 清单经
+                # --settings 照常生效（I3：与 -p 一致）。
+                receipt += ("（注：后台任务不走微信审批；strict 档下需审批的工具"
+                            "（Bash/写文件）会被直接拒绝，仅适合只读任务，"
+                            "要执行操作请同步跑）")
+            self._push(task, session.wechat_user, receipt)
         finally:
-            self._procs.pop(task.id, None)
-        out = stdout.decode("utf-8", "replace")
-        m = _BG_ID_RE.search(out)
-        if entry.killed or self._db.get_task(task.id).state == "canceled":
-            # launch 被用户取消：canceled 终态已由 cancel 落盘，绝不走 _fail
-            # （failed→pending 的重试会把用户刚取消的任务再发一遍）
-            return
-        if proc.returncode != 0 or m is None:
-            err = f"后台启动失败（rc={proc.returncode}）: {out[-_RESULT_TAIL_CHARS:]}"
-            tail = stderr.decode("utf-8", "replace").strip()
-            if tail:
-                err += f": {tail[-_STDERR_TAIL_CHARS:]}"
-            await self._fail(task, session.wechat_user, err)
-            return
-        bg_id = m.group(1)
-        self._db.set_bg_id(task.id, bg_id)
-        receipt = (f"🚀 已在后台启动（任务 #{task.id}，后台 id {bg_id}）。"
-                   f"完成后自动推送结果，/tasks 查进度、/cancel 取消。")
-        if session.policy == "strict":
-            # strict 档 bg 不传审批 MCP（--bg 组合保守集）——必须明示用户，
-            # 静默降档违背"选 strict = 要审批"的预期（M5）。deny 清单经
-            # --settings 照常生效（I3：与 -p 一致）。
-            receipt += ("（注：后台任务不走微信审批；strict 档下需审批的工具"
-                        "（Bash/写文件）会被直接拒绝，仅适合只读任务，"
-                        "要执行操作请同步跑）")
-        self._push(task, session.wechat_user, receipt)
+            try:
+                os.unlink(tmp_mcp)
+            except FileNotFoundError:
+                pass   # 已被清理——幂等
 
-    def _write_approval_mcp_config(self, task, session, static_path: Path) -> str:
-        """strict 档临时 mcp config：静态 mcp.json 的 mcpServers 合并 daoyu 审批
-        server 条目。审批 server 是 claude 拉起的孙进程，env 经 config 条目注入
-        （claude 子进程 env 无需感知）；command 用 sys.executable（runner 与
-        server 同解释器，Windows 下为 venv python 绝对路径，可靠无 PATH 依赖）。
-        返回临时文件路径（NamedTemporaryFile 前缀 daoyu-mcp-、delete=False，
-        调用方负责删除；kill 残留由 runner 启动时按前缀清扫）。"""
-        static = json.loads(static_path.read_text(encoding="utf-8"))
+    def _write_daoyu_mcp_config(self, task, session, static_path: Path, tools: str) -> str:
+        """四档通用临时 mcp config：静态 mcp.json 的 mcpServers 合并 daoyu server
+        条目（tools 按档传 approve,send_image 或 send_image）。daoyu server 是
+        claude 拉起的孙进程，env 经 config 条目注入（claude 子进程 env 无需感知）；
+        command 用 sys.executable（runner 与 server 同解释器，Windows 下为 venv
+        python 绝对路径，可靠无 PATH 依赖）。返回临时文件路径（NamedTemporaryFile
+        前缀 daoyu-mcp-、delete=False，调用方负责删除；kill 残留由 runner 启动时
+        按前缀清扫）。静态清单缺文件时按空清单合并（daoyu-only）——不因 mcp.json
+        缺席拖垮任务主路径。"""
+        static = (json.loads(static_path.read_text(encoding="utf-8"))
+                  if static_path.exists() else {})
         merged = {"mcpServers": {
             **static.get("mcpServers", {}),
             APPROVAL_MCP_SERVER: {
@@ -339,6 +358,7 @@ class TaskRunner:
                     "DAOYU_DB": os.path.abspath(self._db.path),
                     "DAOYU_TASK_ID": str(task.id),
                     "DAOYU_TO_USER": session.wechat_user,
+                    "DAOYU_TOOLS": tools,
                 },
             },
         }}
