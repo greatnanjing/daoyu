@@ -263,6 +263,26 @@ async def test_send_image_tool_errors_not_image(tmp_path):
         await p.wait()
 
 
+async def test_send_image_tool_errors_oversize(tmp_path):
+    """超 20MB 上限：拒绝且不落 outbox（首字节是 PNG 头，排除格式分支干扰）。"""
+    from gateway.media import MAX_IMAGE_BYTES
+    db = Database(tmp_path / "mcp.db")
+    db.ensure_schema()
+    huge = tmp_path / "huge.png"; huge.write_bytes(_PNG + b"\x00" * MAX_IMAGE_BYTES)
+    p = await _start(_media_srv_env(str(db.path)))
+    try:
+        await _handshake(p)
+        await _send(p, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": {"name": "send_image",
+                                   "arguments": {"path": str(huge)}}})
+        resp = await _recv(p)
+        assert "20MB 上限" in resp["result"]["content"][0]["text"]
+        assert db._conn.execute("SELECT COUNT(*) c FROM outbox").fetchone()["c"] == 0
+    finally:
+        p.terminate()
+        await p.wait()
+
+
 async def test_tools_assembly_by_env(tmp_path):
     db = Database(tmp_path / "mcp.db")
     db.ensure_schema()
