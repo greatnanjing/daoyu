@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS messages (
   text TEXT NOT NULL DEFAULT '',
   context_token TEXT NOT NULL DEFAULT '',
   received_at INTEGER NOT NULL,
-  state TEXT NOT NULL DEFAULT 'received'
+  state TEXT NOT NULL DEFAULT 'received',
+  media_path TEXT
 );
 CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +53,10 @@ CREATE TABLE IF NOT EXISTS outbox (
   attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 5,
   last_error TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'text',
+  media_path TEXT,
+  caption TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_state ON outbox(state, id);
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -91,7 +95,20 @@ class Database:
         self._migrate_sessions_table()
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        self._ensure_media_columns()
         self._conn.commit()
+
+    def _ensure_media_columns(self) -> None:
+        """M2 老库无损加媒体列（新库 _SCHEMA 已含，PRAGMA 查缺后 ALTER，幂等）。
+        ADD COLUMN NOT NULL DEFAULT 'text' 合法（静态默认值）。"""
+        for table, col, decl in (
+                ("messages", "media_path", "TEXT"),
+                ("outbox", "kind", "TEXT NOT NULL DEFAULT 'text'"),
+                ("outbox", "media_path", "TEXT"),
+                ("outbox", "caption", "TEXT")):
+            cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
     def _migrate_sessions_table(self) -> None:
         """旧 sessions 表（UNIQUE(wechat_user, cwd)，一目录一会话）无损迁移为
@@ -176,9 +193,10 @@ class Database:
     # ---- messages ----
     def insert_message(self, msg: InboundMessage) -> int | None:
         cur = self._conn.execute(
-            "INSERT OR IGNORE INTO messages(msg_id, from_user, text, context_token, received_at) "
-            "VALUES(?,?,?,?,?)",
-            (msg.msg_id, msg.from_user, msg.text, msg.context_token, msg.received_at))
+            "INSERT OR IGNORE INTO messages(msg_id, from_user, text, context_token, "
+            "received_at, media_path) VALUES(?,?,?,?,?,?)",
+            (msg.msg_id, msg.from_user, msg.text, msg.context_token,
+             msg.received_at, msg.media_path))
         self._conn.commit()
         return cur.lastrowid if cur.rowcount else None
 
@@ -397,11 +415,24 @@ class Database:
         self._conn.commit()
         return cur.lastrowid
 
+    def enqueue_media(self, task_id: int | None, to_user: str, media_path: str,
+                      caption: str = "") -> int:
+        """M3 媒体出站行：kind=image、text 恒空串（caption 独立列，投递时与图
+        分两条 sendmessage——官方实现模式）。"""
+        cur = self._conn.execute(
+            "INSERT INTO outbox(task_id, to_user, text, kind, media_path, caption, "
+            "created_at) VALUES(?,?,?,?,?,?,?)",
+            (task_id, to_user, "", "image", media_path, caption, int(time.time())))
+        self._conn.commit()
+        return cur.lastrowid
+
     def _outbox_row(self, row) -> OutboxItem:
         return OutboxItem(id=row["id"], task_id=row["task_id"], to_user=row["to_user"],
                           text=row["text"], seq=row["seq"], state=row["state"],
                           attempts=row["attempts"], max_attempts=row["max_attempts"],
-                          last_error=row["last_error"], created_at=row["created_at"])
+                          last_error=row["last_error"], created_at=row["created_at"],
+                          kind=row["kind"], media_path=row["media_path"],
+                          caption=row["caption"])
 
     def get_outbox(self, outbox_id: int) -> OutboxItem | None:
         row = self._conn.execute("SELECT * FROM outbox WHERE id=?", (outbox_id,)).fetchone()

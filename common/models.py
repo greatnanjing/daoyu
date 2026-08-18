@@ -11,6 +11,7 @@ class InboundMessage:
     received_at: int
     state: str = "received"  # received / queued
     id: int | None = None
+    media_path: str | None = None   # M3：入站图片落盘路径（无图为 None）
 
 
 @dataclass
@@ -51,6 +52,9 @@ class OutboxItem:
     max_attempts: int
     last_error: str | None
     created_at: int
+    kind: str = "text"              # M3：text / image
+    media_path: str | None = None   # kind=image 时的本地图片路径
+    caption: str | None = None      # kind=image 时的配文（与图分两条消息发）
 
 
 @dataclass

@@ -183,3 +183,73 @@ def test_last_task_summary(db):
     assert db.last_task_summary(s.id) == "[bg] 后台长任务"
     other = db.get_or_create_session("u@im.wechat", "/other")
     assert db.last_task_summary(other.id) is None        # 会话间不串
+
+
+# ---- M3 媒体列 ----
+
+def test_media_columns_on_fresh_db(db):
+    """新库（_SCHEMA 直接建）与旧库（ALTER 迁移）终态一致：四列齐、幂等。"""
+    cols = {r[1] for r in db._conn.execute("PRAGMA table_info(outbox)")}
+    assert {"kind", "media_path", "caption"} <= cols
+    mcols = {r[1] for r in db._conn.execute("PRAGMA table_info(messages)")}
+    assert "media_path" in mcols
+    db.ensure_schema()   # 幂等：重复执行不炸不变
+    assert {"kind", "media_path", "caption"} <= {
+        r[1] for r in db._conn.execute("PRAGMA table_info(outbox)")}
+
+
+def test_media_columns_migrated_from_m2_db(tmp_path):
+    """旧库（M2 形态，无媒体列）跑 ensure_schema 加列且数据无损。"""
+    import sqlite3
+    from common.db import Database
+    old = tmp_path / "old.db"
+    c = sqlite3.connect(old)
+    c.executescript("""
+      CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,
+        msg_id TEXT UNIQUE NOT NULL, from_user TEXT NOT NULL,
+        text TEXT NOT NULL DEFAULT '', context_token TEXT NOT NULL DEFAULT '',
+        received_at INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'received');
+      CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER REFERENCES tasks(id), to_user TEXT NOT NULL,
+        text TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 5, last_error TEXT,
+        created_at INTEGER NOT NULL);
+      INSERT INTO outbox(to_user, text, created_at) VALUES('u', '旧文本行', 1);
+    """)
+    c.commit()
+    c.close()
+    d = Database(old)
+    d.ensure_schema()
+    row = d._conn.execute("SELECT * FROM outbox").fetchone()
+    assert row["text"] == "旧文本行" and row["kind"] == "text"   # 数据无损 + 默认值
+
+
+def test_insert_message_with_media_path(db):
+    from common.models import InboundMessage
+    mid = db.insert_message(InboundMessage(
+        msg_id="m1", from_user="u@im.wechat", text="", context_token="c",
+        received_at=1, media_path="/data/media/inbound/img-x.png"))
+    assert mid is not None
+    row = db._conn.execute("SELECT media_path FROM messages WHERE id=?", (mid,)).fetchone()
+    assert row["media_path"] == "/data/media/inbound/img-x.png"
+    # 不带 media_path 的老调用兼容（默认 None → NULL）
+    mid2 = db.insert_message(InboundMessage(
+        msg_id="m2", from_user="u@im.wechat", text="hi", context_token="c", received_at=1))
+    assert db._conn.execute(
+        "SELECT media_path FROM messages WHERE id=?", (mid2,)).fetchone()["media_path"] is None
+
+
+def test_enqueue_media_shape(db):
+    oid = db.enqueue_media(None, "u@im.wechat", "/data/media/outbound/a.png", "看这个")
+    item = db.next_outbox_batch(limit=10)[0]
+    assert item.id == oid
+    assert item.kind == "image"
+    assert item.media_path == "/data/media/outbound/a.png"
+    assert item.caption == "看这个"
+    assert item.text == ""          # 媒体行 text 恒空串（caption 独立列）
+
+
+def test_enqueue_text_rows_default_kind_text(db):
+    db.enqueue(None, "u@im.wechat", "普通文本")
+    assert db.next_outbox_batch(limit=10)[0].kind == "text"
