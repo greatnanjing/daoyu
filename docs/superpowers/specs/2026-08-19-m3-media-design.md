@@ -130,7 +130,7 @@ CDN 基址：`https://novac2c.cdn.weixin.qq.com/c2c`（官方包常量 `CDN_BASE
 
 **`gateway/ilink.py`（薄扩展，保持纯协议层）**：`getuploadurl(body)`、`cdn_upload(url, ciphertext)`（POST octet-stream，返回 `x-encrypted-param`）、`cdn_download(url)`（GET 密文）、`send_image_message(to_user, ctx, uploaded, token, base_url)`（sendmessage 媒体 item，容错误误处理照抄现有 `sendmessage`：失败返回 False 交 outbox 重试）。
 
-**`gateway/outbound.py`**：`_drain_once` 按 `item.kind` 分支。image 分支：`upload_image` → caption 文本条（走现有 `_send`）→ `send_image_message`，每条间隔照走 `_respect_interval`；`_sent_today` 计数每条消息（caption+图 = 2 条）照加。文件丢失（outbound 目录被清）→ 上传直接抛 → `mark_send_failed`，重试耗尽进死信告警（现机制）。
+**`gateway/outbound.py`**：`_drain_once` 按 `item.kind` 分支。image 分支：`upload_image` → caption 文本条（走现有 `_send`）→ `send_image_message`，每条间隔照走 `_respect_interval`；`_sent_today` 计数每 outbox 行 +1（与文本行同语义）。文件丢失（outbound 目录被清）→ 上传直接抛 → `mark_send_failed`，重试耗尽进死信告警（现机制）。
 
 ### 3.3 schema 变更（`common/db.py`）
 
@@ -165,7 +165,7 @@ ALTER TABLE outbox    ADD COLUMN caption TEXT;              -- 图配文，可�
 |---|---|
 | 单测 | 加解密 roundtrip（含跨边界长度）、`pkcs7_padded_size`、`parse_inbound_aes_key` 双形态、`sniff_image` 四格式、`upload_image`（aioresponses mock getuploadurl/CDN POST，覆盖 4xx 立败/5xx 重试/缺 x-encrypted-param）、`download_inbound_image`（mock CDN GET，覆盖 full_url 优先/解密失败/坏 magic）、schema 加列迁移幂等 |
 | 入站路由 | 图片消息 → 建任务 prompt 断言；图+文同条 item_list 拼合；下载失败回执；msg_id 去重覆盖图片重投 |
-| MCP | `send_image` 协议往返（仿 approval 测试）：成功/文件不存在/超大/非图片；`DAOTU_TOOLS` 装配两档 |
+| MCP | `send_image` 协议往返（仿 approval 测试）：成功/文件不存在/超大/非图片；`DAOYU_TOOLS` 装配两档 |
 | 出站 | outbox kind 分支：caption+图两条发送顺序、上传失败重试、文件丢失死信 |
 | E2E | fake iLink 加媒体端点 + fake claude 调 send_image → 全链路断言 sendmessage 的 item 结构 |
 
@@ -183,7 +183,7 @@ ALTER TABLE outbox    ADD COLUMN caption TEXT;              -- 图配文，可�
 2. schema 加列迁移 + `enqueue_media` + 单测
 3. `ilink.py` 薄方法 + 入站管线图片分支 + 路由测试
 4. 出站 kind 分支 + 投递测试
-5. MCP server 升级（统一 daoyu server + `DAOTU_TOOLS` 装配 + 四档合并）+ 测试
+5. MCP server 升级（统一 daoyu server + `DAOYU_TOOLS` 装配 + 四档合并）+ 测试
 6. E2E + 文档更新（TRD §3.1 "仅支持文本"勘误、README 命令表、CLAUDE.md）
 7. 真机验收（§5 清单，用户配合发图）
 

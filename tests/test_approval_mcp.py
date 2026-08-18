@@ -305,3 +305,29 @@ async def test_tools_assembly_by_env(tmp_path):
     finally:
         p.terminate()
         await p.wait()
+
+
+async def test_send_image_io_error_returns_iserror_server_survives(tmp_path):
+    """M-1/F3：_send_image 内 I/O 类故障（此处 DB 写入必败）不得击穿 server——
+    返回 isError 文本（fail-safe 不误发图），且 server 仍响应后续请求。DAOYU_DB
+    指向非 SQLite 文件（INSERT 必抛 DatabaseError；只读权限位在 Windows 下不可靠，
+    坏文件形态在两端平台同样确定性地触发该故障类）。"""
+    garbage = tmp_path / "garbage.db"
+    garbage.write_bytes(b"this is not a sqlite database at all .....")
+    img = tmp_path / "x.png"; img.write_bytes(_PNG)
+    p = await _start(_media_srv_env(str(garbage)))
+    try:
+        await _handshake(p)
+        await _send(p, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": {"name": "send_image",
+                                   "arguments": {"path": str(img)}}})
+        resp = await _recv(p)
+        assert resp["result"].get("isError") is True      # 兜底 isError 文本
+        assert "内部错误" in resp["result"]["content"][0]["text"]
+        # server 仍存活：后续 tools/list 正常响应（bg 长任务后续调用不受损）
+        await _send(p, {"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
+        resp = await _recv(p)
+        assert resp["id"] == 3 and resp["result"]["tools"]
+    finally:
+        p.terminate()
+        await p.wait()

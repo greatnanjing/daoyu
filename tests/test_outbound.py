@@ -297,6 +297,84 @@ async def test_drain_image_missing_file_failure(db):
     assert row["state"] == "pending"
 
 
+class CaptionFailFirstILink(FakeMediaILink):
+    """caption 文本条首次 sendmessage 失败、后续成功；统一 events 记录顺序。"""
+
+    def __init__(self):
+        super().__init__()
+        self.events: list[tuple] = []
+        self._text_fails = 1
+
+    async def sendmessage(self, to_user, context_token, text,
+                          token=None, base_url=None):
+        if self._text_fails > 0:
+            self._text_fails -= 1
+            return False
+        self.events.append(("text", text))
+        return True
+
+    async def send_image_message(self, to_user, context_token, *,
+                                 download_param, aes_key_b64, size_cipher,
+                                 token=None, base_url=None):
+        self.events.append(("image", download_param))
+        return True
+
+
+async def test_image_row_caption_fail_retry_resends_caption(db, tmp_path):
+    # F5/ledger6：caption 发送失败 → 整行留 pending；重试整行重做（caption 会
+    # 重发——_send_media 文档化的核心取舍）。回归锁：重试后两条消息顺序
+    # caption 在前、图在后，行终态 sent。
+    img = tmp_path / "out.png"; img.write_bytes(_png_bytes())
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    db.enqueue_media(None, "u@im.wechat", str(img), "看这个")
+    fake = CaptionFailFirstILink()
+    loop = OutboundLoop(db, fake, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    await loop._drain_once()
+    assert fake.events == []                        # caption 失败 → 图未发
+    row = db._conn.execute("SELECT state, last_error FROM outbox").fetchone()
+    assert row["state"] == "pending" and "caption 发送失败" in row["last_error"]
+    await loop._drain_once()                        # 整行重试
+    assert [e[0] for e in fake.events] == ["text", "image"]   # caption 重发在前
+    assert fake.events[0][1] == "看这个"
+    assert db._conn.execute("SELECT state FROM outbox").fetchone()["state"] == "sent"
+
+
+async def test_image_row_dead_letter_alerts(db, tmp_path):
+    # F5/ledger6：图片行上传恒失败 → 烧满 attempts 进死信 + ⚠️ 告警入 outbox
+    # （监控链路回归锁；告警需 cfg 带 whitelist，否则 _alert_all 静默跳过）。
+    img = tmp_path / "gone.png"; img.write_bytes(_png_bytes())
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    db.enqueue_media(None, "u@im.wechat", str(img), "")
+    fake = FakeMediaILink()
+
+    async def boom(url, ciphertext):
+        raise RuntimeError("cdn down forever")
+    fake.cdn_upload = boom
+    cfg = FakeCfg()
+    cfg.whitelist = {"u@im.wechat"}
+    loop = OutboundLoop(db, fake, cfg,
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    task = asyncio.create_task(loop.run_forever())
+    try:
+        assert await wait_until(lambda: db._conn.execute(
+            "SELECT state FROM outbox WHERE kind='image'"
+        ).fetchone()["state"] == "dead")
+        row = db._conn.execute(
+            "SELECT attempts, last_error FROM outbox WHERE kind='image'").fetchone()
+        assert row["attempts"] >= 5 and "CDN 上传失败" in row["last_error"]
+        alerts = [r["text"] for r in db._conn.execute(
+            "SELECT text FROM outbox WHERE kind!='image'")]
+        assert any(t.startswith("⚠️ 出站图片死信") for t in alerts)
+        dead = db._conn.execute(
+            "SELECT detail FROM audit_log WHERE kind='dead_letter'").fetchall()
+        assert dead
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 async def test_empty_bot_token_window_keeps_pending_then_delivers(db):
     # I-1 回归：token 失效（401/403 清空）→ 重连扫码窗（最长 600s）内不得 claim
     # outbox——空 token 发送必败，5 次尝试会在几十秒内烧光 → 全部死信（M1 无

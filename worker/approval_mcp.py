@@ -133,6 +133,8 @@ def _send_image(conn, args) -> str:
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = out_dir / f"img-{secrets.token_hex(8)}.{ext}"
     dest.write_bytes(raw)
+    # 与 common/db.py 的 enqueue_media 同构的裸 SQL（孙进程跨进程写主库）——
+    # 改 outbox 表结构需同步两处。
     conn.execute(
         "INSERT INTO outbox(task_id, to_user, text, kind, media_path, caption, "
         "created_at) VALUES(?,?,?,?,?,?,?)",
@@ -166,15 +168,25 @@ def main():
         elif m == "tools/call":
             name = (msg.get("params") or {}).get("name")
             args = (msg.get("params") or {}).get("arguments") or {}
-            if name == "approve":
-                verdict = _approve(conn, args)
-                _resp(msg["id"], {"content": [{"type": "text", "text": verdict}]})
-            elif name == "send_image":
+            # 兜底（M-1/F3）：磁盘满等 I/O 故障不得击穿 server 进程——server 一死
+            # 该任务后续全部 mcp__daoyu__* 调用都失败（bg 长任务受损最大）。返回
+            # isError 文本（fail-safe：不误发图、不误放行；approve 正常路径的
+            # behavior JSON 契约不变，仅异常时降级为 isError——claude 会按失败
+            # 处理，不会当成 allow）。
+            try:
+                if name == "approve":
+                    verdict = _approve(conn, args)
+                    _resp(msg["id"], {"content": [{"type": "text", "text": verdict}]})
+                elif name == "send_image":
+                    _resp(msg["id"], {"content": [{"type": "text",
+                                                   "text": _send_image(conn, args)}]})
+                else:
+                    _resp(msg["id"], {"content": [{"type": "text",
+                                                   "text": "unknown tool"}],
+                                      "isError": True})
+            except Exception as e:
                 _resp(msg["id"], {"content": [{"type": "text",
-                                               "text": _send_image(conn, args)}]})
-            else:
-                _resp(msg["id"], {"content": [{"type": "text",
-                                               "text": "unknown tool"}],
+                                               "text": f"daoyu server 内部错误: {e!r}"}],
                                   "isError": True})
         elif m == "ping":
             _resp(msg["id"], {})

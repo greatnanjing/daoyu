@@ -28,7 +28,8 @@ async def _noop_reconnect() -> None:
 
 async def _save_inbound_images(db, cfg, ilink, image_items, from_user):
     """下载解密全部图 → data/media/inbound/。返回 (成功路径列表, 最后错误或 None)。
-    ilink=None（无连接/测试）或单图失败：回执 ⚠️，不让异常逃逸（入站管道不炸）。"""
+    ilink=None（无连接/测试）或单图失败：回执 ⚠️，不让异常逃逸（入站管道不炸）。
+    ⚠️ 回执依赖调用方已按 msg_id 查重（I-1/F1）——重投不重复下载、不重复回执。"""
     paths, last_err = [], None
     for img in image_items:
         try:
@@ -70,6 +71,12 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
     msg_key = str(msg.get("message_id") or msg.get("seq") or "")
     if not msg_key:
         log.warning("消息缺 message_id/seq，跳过: %r", msg)
+        return
+    # I-1/F1：图片下载与 ⚠️ 失败回执都发生在 insert_message 去重之前——先按
+    # msg_id 查重（iLink 重连后消息会重投），已存在则整条跳过：重投不再重复
+    # 下载 CDN 密文、不再重复回执。成功图首次到达路径行为不变；insert_message
+    # 的 UNIQUE 去重仍兜底文本路径。
+    if db.message_exists(msg_key):
         return
     media_path: str | None = None
     if image_items:

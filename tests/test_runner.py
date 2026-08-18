@@ -328,3 +328,24 @@ async def test_daoyu_mcp_merged_all_policies(db, cfg, tmp_path, monkeypatch):
         assert entry["type"] == "stdio"
         assert entry["env"]["DAOYU_TOOLS"] == expect_tools, policy
         assert entry["env"]["DAOYU_TASK_ID"] == str(t)
+
+
+async def test_daoyu_mcp_config_bad_static_json_fails_open(db, cfg, tmp_path, monkeypatch):
+    """I-2/F2：静态 mcp.json 存在但 JSON 损坏 → 按空清单合并（daoyu-only），
+    任务不因解析异常穿透而 failed——四档全任务都走该装配路径，坏文件须与
+    缺文件同策略 fail-open。"""
+    args_log = tmp_path / "mcp_bad_args.log"
+    monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
+    claude_dir = cfg.repo_root / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "mcp.json").write_text("{oops: 不是合法 JSON", encoding="utf-8")
+    s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+    t = db.create_task(None, s.id, "hi", kind="chat")
+    runner = TaskRunner(db, cfg, process_registry={})
+    await runner.run(db.get_task(t), s)
+
+    assert db.get_task(t).state == "done"          # 任务不失败（fail-open）
+    log = json.loads(args_log.read_text(encoding="utf-8"))
+    servers = log["mcp_config"]["mcpServers"]      # fake_claude 已快照文件内容
+    assert set(servers) == {"daoyu"}               # 坏清单按空合并，无残留条目
+    assert servers["daoyu"]["env"]["DAOYU_TOOLS"] == "send_image"   # auto 档

@@ -2,6 +2,7 @@
 import asyncio
 import glob
 import json
+import logging
 import os
 import re
 import sys
@@ -12,6 +13,8 @@ from common.text import split_text
 from worker.cli_builder import (APPROVAL_MCP_SERVER, BYPASS_DISALLOWED_TOOLS,
                                 POLICY_MODE, build_argv, claude_config_dir)
 from worker.stream import StreamParser, Throttle
+
+log = logging.getLogger(__name__)
 
 # 进度推送里工具命令 JSON 的截断长度（够认出在跑什么即可）
 _PROGRESS_DETAIL_LIMIT = 60
@@ -78,7 +81,7 @@ class TaskRunner:
         if task.kind == "bg":
             return await self._run_bg(task, session)
         static_mcp = self._cfg.repo_root / "claude" / "mcp.json"
-        # strict 档：临时合并 mcp config（静态清单 + daoyu 审批 server 条目，含
+        # 四档通用：临时合并 mcp config（静态清单 + daoyu server 条目，含
         # 本机绝对路径与任务级 env——不能进 git 的静态 mcp.json）。run 的每条出口
         # （成功/失败/取消/异常）都在 finally 删除，不留临时文件。
         tmp_mcp: str | None = None
@@ -344,10 +347,19 @@ class TaskRunner:
         command 用 sys.executable（runner 与 server 同解释器，Windows 下为 venv
         python 绝对路径，可靠无 PATH 依赖）。返回临时文件路径（NamedTemporaryFile
         前缀 daoyu-mcp-、delete=False，调用方负责删除；kill 残留由 runner 启动时
-        按前缀清扫）。静态清单缺文件时按空清单合并（daoyu-only）——不因 mcp.json
-        缺席拖垮任务主路径。"""
-        static = (json.loads(static_path.read_text(encoding="utf-8"))
-                  if static_path.exists() else {})
+        按前缀清扫）。静态清单缺文件或坏 JSON/不可读时按空清单合并（daoyu-only）
+        + log.warning——与缺文件同策略 fail-open，不因 mcp.json 异常拖垮任务
+        主路径（M3 起四档 + bg 全任务都走此装配，静默全灭不可接受）。"""
+        if static_path.exists():
+            try:
+                static = json.loads(static_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                log.warning("静态 mcp.json 读取/解析失败，按空清单合并: %s err=%r",
+                            static_path, e)
+                static = {}
+        else:
+            log.warning("静态 mcp.json 缺席，按空清单合并（daoyu-only）: %s", static_path)
+            static = {}
         merged = {"mcpServers": {
             **static.get("mcpServers", {}),
             APPROVAL_MCP_SERVER: {

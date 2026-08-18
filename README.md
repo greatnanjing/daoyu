@@ -136,9 +136,10 @@ python -m gateway.app                   # 前台调试运行（不进 systemd）
 
 ```
 ├── gateway/   # app 入口 / ilink 协议 / router 命令路由 / bridge 桥命令 /
-│              # proxy 配置代理命令 / outbound 出站节流重试 / reconnect 24h 连接守护 / login 扫码
+│              # proxy 配置代理命令 / outbound 出站节流重试 / media 媒体 CDN AES 上传下载解密 /
+│              # reconnect 24h 连接守护 / login 扫码
 ├── worker/    # pool 会话串行调度+bg 后台监视 / cli_builder argv 组装 / runner 子进程执行 /
-│              # stream 解析 / approval_mcp 审批 MCP server（stdio）
+│              # stream 解析 / approval_mcp daoyu MCP server（审批+发图，stdio）
 ├── common/    # db（SQLite 五表+approvals+state KV）/ config / models / text（分页）
 ├── claude/    # settings.json + mcp.json（进 git）、secrets.env（gitignore）
 ├── tests/     # 单测 + E2E（fixtures/ 模拟 claude 子进程：-p 流回放与 --bg 两种形态）

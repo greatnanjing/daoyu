@@ -200,6 +200,13 @@ class Database:
         self._conn.commit()
         return cur.lastrowid if cur.rowcount else None
 
+    def message_exists(self, msg_id: str) -> bool:
+        """按 msg_id 查重（I-1/F1）：图片下载与 ⚠️ 失败回执都发生在 insert_message
+        去重之前，入站管道须先查重——iLink 重投不重复下载 CDN 密文、不重复回执。"""
+        return self._conn.execute(
+            "SELECT 1 FROM messages WHERE msg_id=? LIMIT 1", (msg_id,)
+        ).fetchone() is not None
+
     def latest_context_token(self, from_user: str) -> str | None:
         row = self._conn.execute(
             "SELECT context_token FROM messages WHERE from_user=? "
@@ -418,7 +425,9 @@ class Database:
     def enqueue_media(self, task_id: int | None, to_user: str, media_path: str,
                       caption: str = "") -> int:
         """M3 媒体出站行：kind=image、text 恒空串（caption 独立列，投递时与图
-        分两条 sendmessage——官方实现模式）。"""
+        分两条 sendmessage——官方实现模式）。生产路径的跨进程写入是
+        worker/approval_mcp.py _send_image 里与本方法同构的裸 SQL——改 outbox
+        表结构需同步两处。"""
         cur = self._conn.execute(
             "INSERT INTO outbox(task_id, to_user, text, kind, media_path, caption, "
             "created_at) VALUES(?,?,?,?,?,?,?)",

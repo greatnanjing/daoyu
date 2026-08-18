@@ -112,3 +112,58 @@ async def test_image_msg_id_dedup(tmp_path):
     await handle_inbound(db, cfg, None, None, msg, ilink=fake)
     await handle_inbound(db, cfg, None, None, msg, ilink=fake)   # iLink 重投
     assert len(_tasks(db)) == 1
+
+
+class CountingBadILink:
+    """密文恒坏（解密必败）并计数——锁"失败图重投只下载一次"。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def cdn_download(self, url):
+        self.calls += 1
+        return b"garbage-not-encrypted"
+
+
+async def test_failed_image_redelivery_single_receipt(tmp_path):
+    """I-1/F1 回归：下载失败的图消息被 iLink 重投两次 → 只下载一次 CDN 密文、
+    ⚠️ 回执恰好一条（去重保护回执副作用，不只保护任务创建）。"""
+    db = Database(tmp_path / "t.db"); db.ensure_schema()
+    cfg = Cfg(tmp_path)
+    bad = CountingBadILink()
+    msg = _img_msg(7, secrets.token_bytes(16).hex(), _png())
+    await handle_inbound(db, cfg, None, None, msg, ilink=bad)
+    await handle_inbound(db, cfg, None, None, msg, ilink=bad)   # 重投 1
+    await handle_inbound(db, cfg, None, None, msg, ilink=bad)   # 重投 2
+    assert bad.calls == 1                       # 不再重复下载
+    receipts = [r["text"] for r in db._conn.execute(
+        "SELECT text FROM outbox") if "图片接收失败" in r["text"]]
+    assert len(receipts) == 1                   # 回执恰好一条
+    assert _tasks(db) == []
+
+
+async def test_partial_images_one_ok_one_failed(tmp_path):
+    """F5/ledger5：多图部分成功（1 成 1 败）→ 任务 prompt 只带成功路径 + ⚠️ 回执。"""
+    db = Database(tmp_path / "t.db"); db.ensure_schema()
+    cfg = Cfg(tmp_path)
+    key = secrets.token_bytes(16)
+    good_ct = aes_ecb_encrypt(_png(), key)
+
+    class PartialILink:
+        async def cdn_download(self, url):
+            if "BAD" in url:
+                raise RuntimeError("cdn 410 gone")
+            return good_ct
+
+    msg = {"message_id": 8, "seq": 8, "from_user_id": USER,
+           "message_type": 1, "context_token": "CTX", "item_list": [
+               {"type": 2, "image_item": {"aeskey": "00" * 16,
+                                          "media": {"encrypt_query_param": "BAD"}}},
+               {"type": 2, "image_item": {"aeskey": key.hex(),
+                                          "media": {"encrypt_query_param": "OK"}}}]}
+    await handle_inbound(db, cfg, None, None, msg, ilink=PartialILink())
+    rows = _tasks(db)
+    assert len(rows) == 1
+    assert rows[0]["prompt"].count("已保存到") == 1     # 只带成功的那张
+    assert any("图片接收失败" in r["text"] for r in db._conn.execute(
+        "SELECT text FROM outbox"))                     # ⚠️ 部分失败回执
