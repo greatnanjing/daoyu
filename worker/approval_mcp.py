@@ -135,11 +135,15 @@ def _send_image(conn, args) -> str:
     dest.write_bytes(raw)
     # 与 common/db.py 的 enqueue_media 同构的裸 SQL（孙进程跨进程写主库）——
     # 改 outbox 表结构需同步两处。
-    conn.execute(
-        "INSERT INTO outbox(task_id, to_user, text, kind, media_path, caption, "
-        "created_at) VALUES(?,?,?,?,?,?,?)",
-        (task_id, to_user, "", "image", str(dest), caption, int(time.time())))
-    conn.commit()
+    try:
+        conn.execute(
+            "INSERT INTO outbox(task_id, to_user, text, kind, media_path, caption, "
+            "created_at) VALUES(?,?,?,?,?,?,?)",
+            (task_id, to_user, "", "image", str(dest), caption, int(time.time())))
+        conn.commit()
+    except Exception:
+        conn.rollback()   # 清残缺事务，保住连接给后续调用（异常交外圈转 isError）
+        raise
     return f"已排队发送：{dest.name}" + (f"（配文：{caption}）" if caption else "")
 
 

@@ -129,7 +129,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 ## 开发
 
 ```bash
-python -m pytest                        # 全量测试（243 个）
+python -m pytest                        # 全量测试（249 个）
 python -m pytest tests/test_e2e.py -v   # E2E：fake iLink + fake claude 子进程全链路
 python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```
