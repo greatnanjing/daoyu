@@ -53,7 +53,9 @@
 - 长轮询 `getupdates`（服务器 hold 35s）——**无公众号式 5 秒必须返回的死线**，天然适配慢 agent 任务。
 - 支持 `sendtyping`（"正在输入"状态）。
 - 连接有效期 **24 小时**；每次扫码登录 Bot ID 会变化（平台设计）。
-- 当前开源实现仅支持**文本**消息；媒体需 CDN 加密上传（二期）。
+- 媒体消息（图片）M3 已支持：CDN AES-128-ECB 加密上传/下载（协议细节见
+  `docs/superpowers/specs/2026-08-19-m3-media-design.md` §2，源：官方
+  @tencent-weixin/openclaw-weixin v2.4.6 dist 源码）；语音/文件/视频未实现。
 - 腾讯保留内容过滤与限速权利，无 SLA。
 
 ### 3.2 已知陷阱与对策（丢消息防线之一）

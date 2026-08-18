@@ -129,7 +129,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 ## 开发
 
 ```bash
-python -m pytest                        # 全量测试（199 个）
+python -m pytest                        # 全量测试（243 个）
 python -m pytest tests/test_e2e.py -v   # E2E：fake iLink + fake claude 子进程全链路
 python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```
@@ -152,4 +152,10 @@ python -m gateway.app                   # 前台调试运行（不进 systemd）
 - **bypass 档 `/bg` 带 `--disallowedTools` 工具级兜底**（与 `-p` 同源常量）；`--bg` 与 `--settings`/`--disallowedTools` 的实际组合行为待真机确认（当前如实传入）。
 - **OCR / 视觉 MCP**（tesseract-ocr / ai-vision）：M3 再评估选型接入；当前已装 chrome-devtools / context7 / web-reader 三台。
 - **`/mcp`、`/config` 只读**：启停单个 MCP server、运行时改 gateway 配置 M3 提供（改文件 + 重启即生效）。
-- **媒体收发**（图片/语音）：M3。
+- **语音/文件/视频收发**：仍为二期（图片收发 M3 已实现，见下节）。
+
+## M3 媒体收发（图片双向，代码完成待真机验收）
+
+- **发图即对话**：微信里直接发图片即进入当前对话——刀鱼从 CDN 下载解密落盘后转成 prompt（"[用户发来图片，已保存到 …，请查看并回应]"）发给当前会话的 Claude；图文混发拼接为同一条 prompt。下载失败回 ⚠️ 提示、不建任务。
+- **Claude 回图**：Claude 调 MCP 工具 `send_image(path, caption)` 把图片经 CDN 加密上传发回微信（caption 作为单独文本条先发）；工具四档恒装配（含 `/bg`），图片须为 PNG/JPEG/GIF/WebP 且 ≤20MB。
+- **待真机验收**（代码完成 ≠ 已验收）：入站 payload 采样、出站全链路（Windows + 生产服务器）、caption 呈现、生产服务器 装 cryptography 依赖、微信压缩确认——清单见 `docs/superpowers/specs/2026-08-19-m3-media-design.md` §5。

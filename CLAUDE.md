@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**M2 已实现**（2026-08-16），199 个测试全绿（`python -m pytest`）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
+**M3 媒体收发（图片双向）代码完成**（2026-08-19，真机验收清单未跑，见 M3 清单），243 个测试全绿（`python -m pytest`）；M2 已实现（2026-08-16）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
 
 - [docs/PRD.md](docs/PRD.md) — 产品需求（功能 FR-1~10、非功能需求、里程碑 M1/M2/M3、范围外）
 - [docs/TRD.md](docs/TRD.md) — 技术设计（架构、SQLite 数据模型、claude CLI 调用规范、命令路由、安全设计、测试策略）
@@ -24,19 +24,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`/sessions`**：会话列表（目录 + 最近任务摘要）与 `/cd #n` 序号切换（见上一条：现为话题两级展示）。
 - **监控告警**：死信 / 日限熔断 / 预算耗尽死信 / 连接失效清 token 四处自动推微信 ⚠️（复用出站通道，发全部白名单）。
 
+**M3 功能清单**（媒体收发，图片双向；**代码完成待真机验收**——spec §5 五项：入站 payload 采样 / 出站全链路（Windows + 生产服务器）/ caption 呈现 / 生产服务器 装 cryptography / 微信压缩确认）：
+
+- **入站发图即对话**：[gateway/app.py](gateway/app.py) 遍历 `item_list`（`message_type==1` 不变，图片 `type==2`）→ [gateway/media.py](gateway/media.py) CDN 下载 + AES-128-ECB 解密（aeskey 双形态：`image_item.aeskey` hex 优先 / `media.aes_key` base64）→ 随机名落盘 `data/media/inbound/`（magic bytes 白名单 PNG/JPEG/GIF/WebP、20MB 上限）→ 纯图建 chat 任务（prompt 模板"[用户发来图片，已保存到 {p}，请查看并回应]"）、图文拼 prompt；下载失败 ⚠️ 回执、不建任务。
+- **出站 `send_image`**：Claude 调 MCP 工具 `send_image(path, caption)`（[worker/approval_mcp.py](worker/approval_mcp.py) 现为 daoyu 统一 stdio server，`DAOYU_TOOLS` 装配：strict="approve,send_image"、其余档="send_image"；经临时合并 mcp config **四档恒装配**，`/bg` 同样带）→ 校验复制到 `data/media/outbound/` → 写 outbox `kind=image` 行（[common/db.py](common/db.py) `enqueue_media`）→ 出站协程整链路现做（getuploadurl → CDN 密文 POST 取 `x-encrypted-param` → caption 文本条 → 图片条），失败整行重试（不缓存 downloadParam）。协议细节见 [docs/superpowers/specs/2026-08-19-m3-media-design.md](docs/superpowers/specs/2026-08-19-m3-media-design.md) §2。
+- **schema**：messages 加 `media_path`、outbox 加 `kind` / `media_path` / `caption`（幂等 ALTER），入站图片路径随 messages 行落盘。
+
 组件清单（入口文件）：
 
 - **入口**：`daoyu` console script → [gateway/app.py](gateway/app.py) `start()`（读 `gateway/config.json` + `claude/secrets.env`，崩溃恢复后常驻 poll / outbound / reconnect / worker-pool 四协程）；`daoyu-login` → [gateway/login.py](gateway/login.py)（终端扫码，token 写 DB state 后退出）。
-- **gateway**：[gateway/ilink.py](gateway/ilink.py)（iLink 协议封装）、[gateway/router.py](gateway/router.py)（命令总线路由）、[gateway/bridge.py](gateway/bridge.py)（桥命令 + /help 多层合并）、[gateway/proxy.py](gateway/proxy.py)（TUI 配置命令微信代理）、[gateway/outbound.py](gateway/outbound.py)（outbox 投递/重试/死信/节流/typing）、[gateway/reconnect.py](gateway/reconnect.py)（24h 连接过期守护）。
-- **worker**：[worker/pool.py](worker/pool.py)（按 session 串行调度池 + bg 后台监视 watcher）、[worker/cli_builder.py](worker/cli_builder.py)（claude argv 组装）、[worker/runner.py](worker/runner.py)（子进程执行/流式进度/费用记账/bg 启动分支）、[worker/stream.py](worker/stream.py)（stream-json 解析 + 节流器）、[worker/approval_mcp.py](worker/approval_mcp.py)（审批 MCP server）。
-- **common**：[common/db.py](common/db.py)（SQLite 五表 + approvals + state KV）、[common/config.py](common/config.py)（配置加载契约）、[common/models.py](common/models.py)、[common/text.py](common/text.py)（长文本分页）。
+- **gateway**：[gateway/ilink.py](gateway/ilink.py)（iLink 协议封装）、[gateway/router.py](gateway/router.py)（命令总线路由）、[gateway/bridge.py](gateway/bridge.py)（桥命令 + /help 多层合并）、[gateway/proxy.py](gateway/proxy.py)（TUI 配置命令微信代理）、[gateway/outbound.py](gateway/outbound.py)（outbox 投递/重试/死信/节流/typing + 图片 CDN 上传链路）、[gateway/reconnect.py](gateway/reconnect.py)（24h 连接过期守护）、[gateway/media.py](gateway/media.py)（媒体 CDN AES-128-ECB 上传/下载/解密）。
+- **worker**：[worker/pool.py](worker/pool.py)（按 session 串行调度池 + bg 后台监视 watcher）、[worker/cli_builder.py](worker/cli_builder.py)（claude argv 组装）、[worker/runner.py](worker/runner.py)（子进程执行/流式进度/费用记账/bg 启动分支）、[worker/stream.py](worker/stream.py)（stream-json 解析 + 节流器）、[worker/approval_mcp.py](worker/approval_mcp.py)（daoyu MCP server：审批 approve + 发图 send_image）。
+- **common**：[common/db.py](common/db.py)（SQLite 五表 + approvals + state KV；M3 加 messages.media_path 与 outbox.kind/media_path/caption）、[common/config.py](common/config.py)（配置加载契约）、[common/models.py](common/models.py)、[common/text.py](common/text.py)（长文本分页）。
 - **配置**：`gateway/config.example.json`（实例 config.json 进 gitignore）；`claude/settings.json` + `claude/mcp.json`（进 git，宿主隔离靠 CLAUDE_CONFIG_DIR，见硬性约束）；`claude/secrets.env`（gitignore）；`deploy/daoyu.service`（systemd 单元）。
 
 ## 常用命令
 
 ```bash
-python -m pytest                        # 全量测试（199 个）
-python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程；M2 含审批往返/bg 冒烟）
+python -m pytest                        # 全量测试（243 个）
+python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程；M2 含审批往返/bg 冒烟；M3 媒体 E2E 在 tests/test_media_e2e.py）
 daoyu-login                             # 终端扫码登录（token 落盘后退出）
 python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```
@@ -65,6 +71,12 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 - **`context_token` 只使用当前会话最新入站消息的**，绝不复用历史值（复用旧 token 会 HTTP 200 但静默不投递）。
 - **入站按 `msg_id` 幂等去重**（iLink 重连后消息会重投）；出站走 outbox 发件箱，失败重试，至少 5 次后才进死信并告警。
 - **宿主配置隔离靠 `CLAUDE_CONFIG_DIR`（机制化）**：实测 `--bare`/`--settings` 均不能隔离宿主 `~/.claude`（宿主 defaultMode/allow/trustAllFiles/插件全部穿透生效，直接架空 strict 审批与硬 deny 清单）；runner 与 pool 给每个 claude 子进程注入 `CLAUDE_CONFIG_DIR=<repo>/data/claude-home/`（调用即 mkdir，`--bare` 仅为减载）。凭据不受影响：仍经 secrets env 注入（ANTHROPIC_API_KEY 等）；MCP 清单经 `--mcp-config` 显式传。刀鱼持久配置在 `claude/settings.json` 与 `claude/mcp.json`（进 git），代理命令（/permissions /config /mcp）改的就是这些文件。
+- **媒体出站走 outbox kind=image 行**：投递时整链路现做（上传→caption→图），
+  失败整行重试（不缓存 downloadParam）；caption 与图分两条 sendmessage（官方模式）。
+  MCP server 键 `daoyu` 统一装配（approve 仅 strict + send_image 四档，`DAOYU_TOOLS`）。
+- **入站图片消息 `message_type==1` 不变、`item_list[].type==2`**；aeskey 双形态
+  （`image_item.aeskey` hex 优先 / `media.aes_key` base64）；magic bytes 白名单 +
+  20MB 上限，随机名落盘 `data/media/inbound|outbound/`。
 
 ## 统一命令总线（产品核心）
 
@@ -103,7 +115,7 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 
 - **M1（MVP）✅**：SQLite schema → gateway 收发+落盘去重 → worker 调 `claude -p`（会话绑定、stream 解析、节流推送）→ 命令总线 → 崩溃恢复 → E2E。
 - **M2 ✅**：审批（`--permission-prompt-tool` **实测在 2.1.233 仍存在可用**——注意 `--help` 不列全 flag，勿以 help 缺失判断移除）→ `--bg` 长任务（启动 `claude --bg "<prompt>"` 返回任务 id；轮询 `claude agents --json`；停止 `claude stop <id>`；`claude logs` 是 TUI 流不可解析）→ MCP 装载（chrome-devtools/context7/web-reader；tesseract-ocr/ai-vision 推迟 M3）→ 配置代理命令全套（/permissions 读写、/mcp、/config 只读）→ `/policy` strict 档审批 → `/sessions` → 监控告警。已移交：kill 需进程组（MCP 孙进程继承管道）、出站按页计数熔断。
-- **M3（二期）**：媒体收发（ClawBot CDN 加密上传）；OCR/视觉 MCP 选型；/mcp 启停与 /config 写入。
+- **M3（进行中）**：媒体收发（图片双向，CDN AES-128-ECB）✅ 代码完成待真机验收（2026-08-19，协议源 @tencent-weixin/openclaw-weixin v2.4.6 dist）；余下：OCR/视觉 MCP 选型、/mcp 启停与 /config 写入、真机验收五项（spec §5）。
 
 ## 开放问题（涉及前先实测，勿凭假设实现）
 
