@@ -1,16 +1,20 @@
-"""刀鱼审批 MCP server（stdio）。claude 子进程经 --permission-prompt-tool 调用。
+"""刀鱼 daoyu MCP server（stdio）：approve（审批）+ send_image（发图），按 DAOYU_TOOLS 装配。
 
-与主进程共享同一 SQLite（WAL 多进程安全）：approve 被调用 → 写 approvals 行 +
-写 outbox 推微信 → 轮询用户 Y/N → 返回 behavior JSON；300s 超时 = expired = 拒绝。
-返回契约（claude 2.1.233 实测报错原文）：必须是
+approve 由 claude 子进程经 --permission-prompt-tool 调用：与主进程共享同一
+SQLite（WAL 多进程安全）→ 写 approvals 行 + 写 outbox 推微信 → 轮询用户 Y/N →
+返回 behavior JSON；300s 超时 = expired = 拒绝。返回契约（claude 2.1.233 实测
+报错原文）：必须是
   {"behavior": "allow", "updatedInput": <object>} 或 {"behavior": "deny", "message": <str>}
 ——纯文本 "approved" 会被 claude 判 invalid permission result，决策实际从未生效。
+send_image 是普通工具（非 permission prompt tool），返回纯文本结果。
 """
 import json
 import os
+import secrets
 import sqlite3
 import sys
 import time
+from pathlib import Path
 
 POLL_S = 2
 TIMEOUT_S = int(os.environ.get("DAOYU_APPROVAL_TIMEOUT", "300"))
@@ -28,14 +32,29 @@ def _resp(id_, result):
 
 
 def _tools():
-    return {"tools": [{
-        "name": "approve",
-        "description": "请求用户批准一次工具调用（微信 Y/N，5 分钟超时拒绝）",
-        "inputSchema": {"type": "object",
-                        "properties": {"tool_name": {"type": "string"},
-                                       "input": {"type": "string"}},
-                        "required": ["tool_name"]},
-    }]}
+    enabled = {t.strip() for t in os.environ.get("DAOYU_TOOLS", "approve").split(",")
+               if t.strip()}
+    tools = []
+    if "approve" in enabled:
+        tools.append({
+            "name": "approve",
+            "description": "请求用户批准一次工具调用（微信 Y/N，5 分钟超时拒绝）",
+            "inputSchema": {"type": "object",
+                            "properties": {"tool_name": {"type": "string"},
+                                           "input": {"type": "string"}},
+                            "required": ["tool_name"]},
+        })
+    if "send_image" in enabled:
+        tools.append({
+            "name": "send_image",
+            "description": "发送本地图片文件到用户微信（自动上传 CDN 原图；"
+                           "支持 PNG/JPEG/GIF/WebP，≤20MB）",
+            "inputSchema": {"type": "object",
+                            "properties": {"path": {"type": "string"},
+                                           "caption": {"type": "string"}},
+                            "required": ["path"]},
+        })
+    return {"tools": tools}
 
 
 def _behavior_allow(updated_input) -> str:
@@ -92,6 +111,36 @@ def _approve(conn, args):
     return _behavior_deny(f"超时 {TIMEOUT_S // 60} 分钟未应答")
 
 
+def _send_image(conn, args) -> str:
+    """普通工具（非审批）：返回纯文本结果。复制到 data/media/outbound/（防
+    Claude 临时文件被清）→ 写 outbox 媒体行（主进程出站协程投递）。"""
+    from gateway.media import MAX_IMAGE_BYTES, sniff_image
+    task_id = int(os.environ.get("DAOYU_TASK_ID", "0"))
+    to_user = os.environ.get("DAOYU_TO_USER", "")
+    path = str(args.get("path", ""))
+    caption = str(args.get("caption", ""))
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as e:
+        return f"读文件失败: {e}"
+    if len(raw) > MAX_IMAGE_BYTES:
+        return f"图片超过 {MAX_IMAGE_BYTES // 1024 // 1024}MB 上限"
+    try:
+        ext = sniff_image(raw)
+    except Exception as e:
+        return f"不是支持的图片格式: {e}"
+    out_dir = Path(os.environ["DAOYU_DB"]).parent / "media" / "outbound"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / f"img-{secrets.token_hex(8)}.{ext}"
+    dest.write_bytes(raw)
+    conn.execute(
+        "INSERT INTO outbox(task_id, to_user, text, kind, media_path, caption, "
+        "created_at) VALUES(?,?,?,?,?,?,?)",
+        (task_id, to_user, "", "image", str(dest), caption, int(time.time())))
+    conn.commit()
+    return f"已排队发送：{dest.name}" + (f"（配文：{caption}）" if caption else "")
+
+
 def main():
     sys.stdin.reconfigure(encoding="utf-8")     # Windows 管道默认 cp936，JSON-RPC 必须 UTF-8
     sys.stdout.reconfigure(encoding="utf-8")
@@ -117,13 +166,16 @@ def main():
         elif m == "tools/call":
             name = (msg.get("params") or {}).get("name")
             args = (msg.get("params") or {}).get("arguments") or {}
-            if name != "approve":
+            if name == "approve":
+                verdict = _approve(conn, args)
+                _resp(msg["id"], {"content": [{"type": "text", "text": verdict}]})
+            elif name == "send_image":
+                _resp(msg["id"], {"content": [{"type": "text",
+                                               "text": _send_image(conn, args)}]})
+            else:
                 _resp(msg["id"], {"content": [{"type": "text",
                                                "text": "unknown tool"}],
                                   "isError": True})
-                continue
-            verdict = _approve(conn, args)
-            _resp(msg["id"], {"content": [{"type": "text", "text": verdict}]})
         elif m == "ping":
             _resp(msg["id"], {})
         else:

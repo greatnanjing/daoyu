@@ -193,3 +193,95 @@ async def test_mcp_approval_timeout_denies(tmp_path):
     finally:
         p.terminate()
         await p.wait()
+
+
+# ---- M3：daoyu 统一 server 的 send_image 工具 ----
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+def _media_srv_env(db_path: str, tools: str = "send_image") -> dict:
+    e = _srv_env(db_path)
+    e["DAOYU_TOOLS"] = tools
+    return e
+
+
+async def _handshake(p):
+    await _send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    assert (await _recv(p))["id"] == 1
+
+
+async def test_send_image_tool_roundtrip(tmp_path):
+    db = Database(tmp_path / "mcp.db")
+    db.ensure_schema()
+    img = tmp_path / "shot.png"; img.write_bytes(_PNG)
+    p = await _start(_media_srv_env(str(db.path)))
+    try:
+        await _handshake(p)
+        await _send(p, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        resp = await _recv(p)
+        assert [t["name"] for t in resp["result"]["tools"]] == ["send_image"]
+        await _send(p, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                        "params": {"name": "send_image",
+                                   "arguments": {"path": str(img),
+                                                 "caption": "看这个"}}})
+        resp = await _recv(p)
+        assert "已排队发送" in resp["result"]["content"][0]["text"]
+        row = db._conn.execute(
+            "SELECT kind, media_path, caption, to_user FROM outbox").fetchone()
+        assert row["kind"] == "image" and row["caption"] == "看这个"
+        assert row["to_user"] == TO_USER
+        saved = Path(row["media_path"])
+        assert saved.read_bytes() == _PNG            # 复制到了 outbound 目录
+        assert saved.parent.name == "outbound"
+        assert "media" in str(saved.parent.parent)   # <db目录>/media/outbound/
+    finally:
+        p.terminate()
+        await p.wait()
+
+
+async def test_send_image_tool_errors_not_image(tmp_path):
+    db = Database(tmp_path / "mcp.db")
+    db.ensure_schema()
+    bad = tmp_path / "not.txt"; bad.write_bytes(b"plain text")
+    p = await _start(_media_srv_env(str(db.path)))
+    try:
+        await _handshake(p)
+        await _send(p, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": {"name": "send_image",
+                                   "arguments": {"path": str(bad)}}})
+        resp = await _recv(p)
+        assert "图片格式" in resp["result"]["content"][0]["text"]
+        assert db._conn.execute("SELECT COUNT(*) c FROM outbox").fetchone()["c"] == 0
+        await _send(p, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                        "params": {"name": "send_image",
+                                   "arguments": {"path": "/no/such.png"}}})
+        resp = await _recv(p)
+        assert "读文件失败" in resp["result"]["content"][0]["text"]
+    finally:
+        p.terminate()
+        await p.wait()
+
+
+async def test_tools_assembly_by_env(tmp_path):
+    db = Database(tmp_path / "mcp.db")
+    db.ensure_schema()
+    p = await _start(_media_srv_env(str(db.path), tools="approve,send_image"))
+    try:
+        await _handshake(p)
+        await _send(p, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        resp = await _recv(p)
+        names = sorted(t["name"] for t in resp["result"]["tools"])
+        assert names == ["approve", "send_image"]
+    finally:
+        p.terminate()
+        await p.wait()
+    p = await _start(_media_srv_env(str(db.path), tools="approve"))
+    try:
+        await _handshake(p)
+        await _send(p, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        resp = await _recv(p)
+        assert [t["name"] for t in resp["result"]["tools"]] == ["approve"]  # 兼容
+    finally:
+        p.terminate()
+        await p.wait()
