@@ -22,7 +22,7 @@
     "isolate_claude_config": false
   },
   "reconnect": {
-    "session_duration_s": 86400,
+    "session_duration_s": 2592000,
     "warning_before_s": 7200,
     "reminder_interval_s": 1800,
     "force_before_s": 1800,

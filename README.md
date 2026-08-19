@@ -74,7 +74,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 | `throttle` | 节流：最小发送间隔 / 进度窗口 / 单条分页字符上限 / 每日发送上限 |
 | `budget` | 预算闸：`max_turns` + `max_usd`，与权限档位独立、恒生效 |
 | `worker` | 任务池并发数与轮询间隔 |
-| `reconnect` | iLink 24h 连接守护参数（`silent_grace_s`：静默续期窗口，超窗才推二维码扫码） |
+| `reconnect` | 连接守护参数（`session_duration_s` 默认 30 天——token 长效实证；token 真失效时 401 自动触发重扫；`silent_grace_s`：重连先静默尝试再推二维码） |
 
 ## 日常使用（微信里发）
 

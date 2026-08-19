@@ -65,7 +65,7 @@ def test_load_config_defaults_fill_contract_keys(tmp_path):
               "page_char_limit", "daily_send_limit"):
         assert k in cfg.throttle, k
     assert cfg.worker["concurrency"] == 3
-    assert cfg.reconnect["session_duration_s"] == 86400
+    assert cfg.reconnect["session_duration_s"] == 2592000   # 30 天（token 长效实证）
     assert cfg.secrets == {}
 
 

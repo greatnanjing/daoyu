@@ -16,7 +16,10 @@ _DEFAULT_THROTTLE = {"min_send_interval_s": 1.0, "progress_window_s": 2.5,
                      "page_char_limit": 2000, "daily_send_limit": 500}
 _DEFAULT_WORKER = {"concurrency": 3, "poll_interval_s": 0.5,
                    "bg_poll_s": 10, "bg_blocked_timeout_s": 1800}
-_DEFAULT_RECONNECT = {"session_duration_s": 86400, "warning_before_s": 7200,
+# session_duration_s 默认 30 天：实测（2026-08-19，本机实例 token 连续 ≥3.5 天
+# 有效无 401）服务端 bot_token 长期存活，TRD 时代 "24h 过期" 假设被推翻——
+# 主动续期周期过长无害（token 真死时 poll_loop 401 清 token 自动触发重扫）。
+_DEFAULT_RECONNECT = {"session_duration_s": 2592000, "warning_before_s": 7200,
                       "reminder_interval_s": 1800, "force_before_s": 1800,
                       "qrcode_scan_timeout_s": 600, "silent_grace_s": 30}
 
