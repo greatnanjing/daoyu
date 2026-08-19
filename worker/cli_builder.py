@@ -105,3 +105,50 @@ def expand_platform(servers: dict, windows: bool) -> dict:
                    "args": ["/c", svc["command"], *svc.get("args", [])]}
         out[name] = svc
     return out
+
+
+# Linux headless Chrome 自动发现的约定安装形态（@puppeteer/browsers npmmirror
+# 安装产物）：~/.cache/puppeteer/chrome-headless-shell/linux-<ver>/chrome-headless-
+# shell-linux64/chrome-headless-shell。服务器无桌面环境，chrome-devtools-mcp
+# 必须显式 --headless + --executablePath 才能拉起该二进制。
+_LINUX_CHROME_GLOB = ("chrome-headless-shell", "linux-*", "chrome-headless-shell-linux64",
+                      "chrome-headless-shell")
+# Chrome 152 在 OpenCloudOS 9 上唯一缺失的系统库（headless 壳仍链接 ALSA）；
+# 免 sudo 方案 = rpm 解包到 ~/chrome-libs/usr/lib64，注入 LD_LIBRARY_PATH。
+_LINUX_ALSA_REL = Path("chrome-libs") / "usr" / "lib64" / "libasound.so.2"
+
+
+def inject_linux_chrome(servers: dict, home: Path) -> dict:
+    """Linux 侧 chrome-devtools 条目的本机装配注入（纯函数，home 参数化可测）。
+
+    命中约定路径的 headless Chrome 时给 chrome-devtools 条目追加
+    --headless --isolated --executablePath，并按需注入 LD_LIBRARY_PATH
+    （~/chrome-libs 解包的 libasound 存在时）；同时显式清空条目 env 的
+    http(s)_proxy——服务器 shell 的死代理配置会穿透给 Chrome 导致所有导航
+    失败（systemd 生产环境本就干净，防御手跑排障场景）。条目 env 与静态条目
+    env 合并（注入值优先），args 追加在静态 args 之后（CLI 后值覆盖前值）。
+    未安装（约定路径缺失）或条目缺席/坏形态时原样返回——fail-open，与
+    expand_platform 的防御口径一致。Windows 由调用方分支排除，不会走到。"""
+    chrome = None
+    base = home / ".cache" / "puppeteer"
+    if base.is_dir():
+        cands = sorted(base.glob(str(Path(*_LINUX_CHROME_GLOB))))
+        if cands:
+            chrome = cands[-1]   # 版本目录字典序 = 最高版本
+    svc = servers.get("chrome-devtools")
+    if chrome is None or not isinstance(svc, dict):
+        return servers
+    env = dict(svc.get("env") or {})
+    alsa = home / _LINUX_ALSA_REL
+    if alsa.exists():
+        env["LD_LIBRARY_PATH"] = str(alsa.parent) + (
+            ":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
+    env.setdefault("http_proxy", "")
+    env.setdefault("https_proxy", "")
+    servers = {**servers, "chrome-devtools": {
+        **svc,
+        "args": [*svc.get("args", []), "--headless", "--isolated",
+                 "--executablePath", str(chrome)],
+        "env": env,
+    }}
+    return servers

@@ -135,3 +135,73 @@ def test_expand_platform_does_not_mutate_input():
     expand_platform(servers, windows=True)
     assert servers["context7"]["command"] == "npx"
     assert servers["context7"]["args"] == ["x"]
+
+
+# ---- inject_linux_chrome：Linux 侧 headless Chrome 装配注入 ----
+
+def test_inject_linux_chrome_hits_convention_path(tmp_path):
+    # 约定安装形态命中：args 追加 headless/isolated/executablePath，
+    # env 清空代理；多版本目录取字典序最高（最新版）
+    from worker.cli_builder import inject_linux_chrome
+    v151 = tmp_path / ".cache/puppeteer/chrome-headless-shell/linux-151.0.1.2/chrome-headless-shell-linux64"
+    v152 = tmp_path / ".cache/puppeteer/chrome-headless-shell/linux-152.0.7977.42/chrome-headless-shell-linux64"
+    v151.mkdir(parents=True); v152.mkdir(parents=True)
+    (v151 / "chrome-headless-shell").write_bytes(b"")
+    (v152 / "chrome-headless-shell").write_bytes(b"")
+    servers = {"chrome-devtools": _svc("npx", ["chrome-devtools-mcp@latest"])}
+    out = inject_linux_chrome(servers, tmp_path)
+    args = out["chrome-devtools"]["args"]
+    assert args[:1] == ["chrome-devtools-mcp@latest"]          # 静态 args 保留在前
+    assert "--headless" in args and "--isolated" in args
+    assert args[args.index("--executablePath") + 1] == str(v152 / "chrome-headless-shell")
+    env = out["chrome-devtools"]["env"]
+    assert env["http_proxy"] == "" and env["https_proxy"] == ""
+
+
+def test_inject_linux_chrome_alsa_env(tmp_path):
+    # ~/chrome-libs 解包的 libasound 存在时注入 LD_LIBRARY_PATH；
+    # 静态 env 的已有键保留（注入值只补不删）
+    from worker.cli_builder import inject_linux_chrome
+    d = tmp_path / ".cache/puppeteer/chrome-headless-shell/linux-152.0.7977.42/chrome-headless-shell-linux64"
+    d.mkdir(parents=True)
+    (d / "chrome-headless-shell").write_bytes(b"")
+    alsa = tmp_path / "chrome-libs/usr/lib64"
+    alsa.mkdir(parents=True)
+    (alsa / "libasound.so.2").write_bytes(b"")
+    servers = {"chrome-devtools": {**_svc("npx"), "env": {"FOO": "bar"}}}
+    env = inject_linux_chrome(servers, tmp_path)["chrome-devtools"]["env"]
+    assert env["LD_LIBRARY_PATH"] == str(alsa)
+    assert env["FOO"] == "bar"
+
+
+def test_inject_linux_chrome_no_chrome_noop(tmp_path):
+    # 未安装（约定路径缺席）：条目原样返回（fail-open）
+    from worker.cli_builder import inject_linux_chrome
+    servers = {"chrome-devtools": _svc("npx", ["chrome-devtools-mcp@latest"]),
+               "context7": _svc("npx", ["-y", "ctx"])}
+    out = inject_linux_chrome(servers, tmp_path)
+    assert out is servers or out == servers
+    assert out["chrome-devtools"]["args"] == ["chrome-devtools-mcp@latest"]
+
+
+def test_inject_linux_chrome_missing_entry_or_bad_shape(tmp_path):
+    # 条目缺席 / 非 dict 形态：不炸、不改其他条目
+    from worker.cli_builder import inject_linux_chrome
+    d = tmp_path / ".cache/puppeteer/chrome-headless-shell/linux-152.0.0.0/chrome-headless-shell-linux64"
+    d.mkdir(parents=True)
+    (d / "chrome-headless-shell").write_bytes(b"")
+    out = inject_linux_chrome({"context7": _svc("npx")}, tmp_path)
+    assert "chrome-devtools" not in out
+    out2 = inject_linux_chrome({"chrome-devtools": "not-a-dict"}, tmp_path)
+    assert out2["chrome-devtools"] == "not-a-dict"
+
+
+def test_inject_linux_chrome_does_not_mutate_input(tmp_path):
+    from worker.cli_builder import inject_linux_chrome
+    d = tmp_path / ".cache/puppeteer/chrome-headless-shell/linux-152.0.0.0/chrome-headless-shell-linux64"
+    d.mkdir(parents=True)
+    (d / "chrome-headless-shell").write_bytes(b"")
+    servers = {"chrome-devtools": _svc("npx", ["chrome-devtools-mcp@latest"])}
+    inject_linux_chrome(servers, tmp_path)
+    assert servers["chrome-devtools"]["args"] == ["chrome-devtools-mcp@latest"]
+    assert servers["chrome-devtools"]["env"] == {}

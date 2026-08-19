@@ -12,7 +12,8 @@ from pathlib import Path
 from common.text import split_text
 from worker.cli_builder import (APPROVAL_MCP_SERVER, BYPASS_DISALLOWED_TOOLS,
                                 OCR_MCP_SERVER, POLICY_MODE, build_argv,
-                                claude_config_dir, expand_platform)
+                                claude_config_dir, expand_platform,
+                                inject_linux_chrome)
 from worker.stream import StreamParser, Throttle
 
 log = logging.getLogger(__name__)
@@ -365,8 +366,12 @@ class TaskRunner:
         disabled = {d for d in disabled if isinstance(d, str)} if isinstance(disabled, list) else set()
         servers = {k: v for k, v in static.get("mcpServers", {}).items()
                    if k not in disabled}
-        # 平台无关条目 → 实际拉起形态（Windows 白名单命令包 cmd /c）
+        # 平台无关条目 → 实际拉起形态（Windows 白名单命令包 cmd /c；Linux 给
+        # chrome-devtools 注入本机 headless Chrome 装配——约定路径命中才注入，
+        # 未安装 no-op，详见 inject_linux_chrome）
         servers = expand_platform(servers, sys.platform == "win32")
+        if sys.platform != "win32":
+            servers = inject_linux_chrome(servers, Path.home())
         merged = {"mcpServers": {
             **servers,
             APPROVAL_MCP_SERVER: {
