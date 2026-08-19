@@ -26,8 +26,11 @@ if TYPE_CHECKING:
 # bg_id 刚落盘时 agents 列表可能尚未见到该条目（守护进程注册竞态），宽限期内
 # 条目缺失不算"被外部停止"（updated_at 由 set_bg_id 刷新，作 bg_id 写入时间用）
 _BG_MISSING_GRACE_S = 60.0
-# completed 条目自带输出/cost 字段的键名未实测采样：扫常见候选，取首个命中。
-# 全部未命中 → resume 兜底要总结 / 不记 cost。
+# completed/done 条目自带输出/cost 字段的键名：扫常见候选，取首个命中。
+# 真机采样（2026-08-19，生产服务器 CLI 2.1.233）done 条目只有
+# pid/id/cwd/kind/startedAt(毫秒)/sessionId/name/status/state 十个字段，
+# **无任何输出/cost 字段** → resume 兜底是常态路径而非兜底；候选扫描留给
+# 未来版本可能自带输出的形态。
 _BG_RESULT_KEYS = ("result", "output", "lastMessage", "text", "summary")
 _BG_COST_KEYS = ("costUsd", "cost_usd", "total_cost_usd", "costUSD")
 # 结果兜底 prompt（TRD：回原会话要一份 ≤500 字总结，--max-turns 2 限定回合）
@@ -251,7 +254,10 @@ class WorkerPool:
             # working/completed 等非 blocked 态：清"首次观察 blocked"计时——
             # blocked→working 恢复后再 blocked 应从零重计，不累计旧值（I2）
             self._db.delete_state(blocked_key)
-        if state == "completed":
+        # 真机采样（2026-08-19，CLI 2.1.233）：完结态 state 值是 "done"（M2 写码时
+        # 假设的 "completed" 从未出现，watcher 每轮空转、任务永卡 running——task
+        # #10 实证）；failed 条目值为 "failed"。两值都认，未来版本漂移再采样。
+        if state in ("completed", "done"):
             result = _extract_bg_result(entry)
             if result is None:
                 cwd = session.cwd if session else os.getcwd()
@@ -364,10 +370,11 @@ class WorkerPool:
         return (cp.stdout + b"\n" + cp.stderr).decode("utf-8", "replace").strip()
 
     def _resume_summary(self, cwd: str, claude_uuid: str) -> str:
-        """结果兜底：completed 条目无输出字段时，回原 Claude 会话（--resume，
-        cwd 同会话绑定目录）要一份 ≤500 字总结。同步 subprocess（watcher 经
-        to_thread 调）；异常/空 → ""（调用方以占位文案完结，避免每轮无限重试）。
-        异常细节写 self._resume_error_detail（线程内不碰 db，调用方审计，M1）。
+        """结果获取的常态路径：真机 done 条目无输出字段（2.1.233 采样，见
+        _BG_RESULT_KEYS 注释）→ 回原 Claude 会话（--resume，cwd 同会话绑定目录）
+        要一份 ≤500 字总结。同步 subprocess（watcher 经 to_thread 调）；异常/空
+        → ""（调用方以占位文案完结，避免每轮无限重试）。异常细节写
+        self._resume_error_detail（线程内不碰 db，调用方审计，M1）。
         policy 固定 auto：只读回总结，不带审批 MCP（bg 档不传审批工具）。"""
         try:
             argv = build_argv(

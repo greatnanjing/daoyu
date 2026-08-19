@@ -253,6 +253,24 @@ async def test_watcher_completed_falls_back_to_resume(db):
     assert any("总结：S-UUID-1" in x for x in _texts(db))
 
 
+async def test_watcher_done_state_realistic_entry(db):
+    """真机采样回归锁（2026-08-19，生产服务器 CLI 2.1.233，task #10 实证）：
+    完结态 state 值是 "done"（非 M2 假设的 "completed"——watcher 每轮空转、
+    任务永卡 running），条目十字段无任何输出/cost 字段 → 必走 resume 总结。"""
+    t = _make_bg_task(db, cwd="/repo")
+    pool = make_watch_pool(db)
+    calls = []
+    pool._resume_summary = lambda cwd, sid: calls.append(sid) or "数完：3 个文件"
+    pool._agents_json = lambda: [_entry(
+        state="done", pid=1054635, cwd="/repo", kind="background",
+        started_ms=1787103088037, name="directory file count", status="idle")]
+
+    await pool._bg_watch_round()
+    assert db.get_task(t).state == "done"
+    assert calls == ["S-UUID-1"]                  # 无输出字段 → resume 是常态路径
+    assert any("数完：3 个文件" in x for x in _texts(db))
+
+
 async def test_watcher_result_paginated(db):
     t = _make_bg_task(db)
     pool = make_watch_pool(db)                    # page_char_limit=2000
