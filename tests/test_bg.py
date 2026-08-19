@@ -621,3 +621,31 @@ async def test_runner_bg_excludes_mcp_config(db, cfg_bg):
     assert argv[-1] == "跑个大活"                # --bg 仍是最后一个 flag
     after = set(Path(tempfile.gettempdir()).glob("daoyu-mcp-*.json"))
     assert after == before                      # bg 不写临时 mcp config
+
+
+def test_resume_summary_excludes_mcp_config(db, tmp_path, monkeypatch):
+    """审查修正回归锁：_resume_summary 原直传静态 claude/mcp.json 作
+    --mcp-config——静态清单已平台无关化（command 裸写 npx/uvx、Windows 包装
+    下沉到 runner 合并层），而此路径不经合并层展开 → Windows 裸 npx 直启
+    FileNotFoundError。且取结果是 max-turns 2 只读总结（prompt 固定、无需
+    MCP 工具）→ 与启动分支同口径摘除（先例见上个测试）。同步方法直调，
+    fake_claude 秒回不触 300s 超时。"""
+    args_log = tmp_path / "resume_args.log"
+    monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
+    monkeypatch.setenv("FAKE_CLAUDE_SCRIPT", str(FIXTURES / "review_stream.jsonl"))
+    monkeypatch.setenv("FAKE_CLAUDE_STDIN_LOG", str(tmp_path / "stdin.log"))
+    cfg = SimpleNamespace(
+        claude_bin=[sys.executable, str(FIXTURES / "fake_claude.py")],
+        secrets={"ANTHROPIC_API_KEY": "sk-test"},
+        repo_root=tmp_path,
+        budget=Budget(max_turns=10, max_usd=1.0),
+        worker={})
+    pool = WorkerPool(db, config=cfg, runner=NullRunner(), poll_interval_s=30)
+
+    result = pool._resume_summary(str(tmp_path), "S-UUID-1")   # 同步方法直调
+
+    argv = json.loads(args_log.read_text(encoding="utf-8"))["argv"]
+    assert "--mcp-config" not in argv
+    assert "--strict-mcp-config" not in argv
+    assert "--fork-session" in argv             # 恒 fork（daemon 持有时直 resume 被拒）
+    assert result == "审查完成：3 个问题。"       # fake 回放含 result 行，解析正常

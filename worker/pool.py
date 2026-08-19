@@ -414,13 +414,15 @@ class WorkerPool:
         空结果，task #13 实证）；fork 总能分叉副本，daemon 已退出时同样可用。
         同步 subprocess（watcher 经 to_thread 调）；异常/空 → ""。无 result
         行（被拒/超时/输出形态漂移）置 _resume_error_detail 供调用方审计
-        （线程内不碰 db，M1）。policy 固定 auto：只读回总结，不带审批 MCP。"""
+        （线程内不碰 db，M1）。policy 固定 auto：只读回总结，不带审批 MCP。
+        不传 --mcp-config（bg 无 MCP 口径；静态清单已平台无关化而此路径
+        不经合并层展开，总结任务亦无需工具）。"""
         try:
             argv = build_argv(
                 session_uuid=claude_uuid, resume=True, policy="auto",
                 # --max-turns 2（TRD 兜底规范）：总结一次即答，防兜底自己跑飞
                 budget=Budget(max_turns=2, max_usd=self._cfg.budget.max_usd),
-                mcp_config=self._cfg.repo_root / "claude" / "mcp.json",
+                mcp_config=None,
                 settings=self._cfg.repo_root / "claude" / "settings.json",
                 fork_session=True)
             cp = subprocess.run([*self._claude_prefix(), *argv],
