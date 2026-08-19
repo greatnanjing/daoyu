@@ -198,7 +198,6 @@ async def test_daily_limit_circuit_breaker_audits_once(db):
 
 # ---- M3 媒体出站 ----
 
-import base64
 import secrets as _secrets
 
 from gateway.media import aes_ecb_decrypt, aes_ecb_encrypt
@@ -219,10 +218,10 @@ class FakeMediaILink:
         return True
 
     async def send_image_message(self, to_user, context_token, *,
-                                 download_param, aes_key_b64, size_cipher,
+                                 download_param, aes_key_hex, size_cipher,
                                  token=None, base_url=None):
         self.sent_images.append({"download_param": download_param,
-                                 "aes_key_b64": aes_key_b64,
+                                 "aes_key_hex": aes_key_hex,
                                  "size_cipher": size_cipher})
         return True
 
@@ -264,7 +263,10 @@ async def test_drain_image_row_caption_then_image(db, tmp_path):
     sent = fake.sent_images[0]
     assert sent["download_param"] == "DL-PARAM"
     assert sent["size_cipher"] == ((len(raw) + 16) // 16 * 16)
-    key = base64.b64decode(sent["aes_key_b64"])
+    # aes_key_hex 是 hex32 字符串（sendmessage 报 base64(hex32 ASCII)——官方
+    # 形态，防 base64(raw16B) 回退导致微信端空白图）
+    assert len(sent["aes_key_hex"]) == 32
+    key = bytes.fromhex(sent["aes_key_hex"])
     assert len(key) == 16 and aes_ecb_decrypt(fake.uploaded_ct, key) == raw
     assert db.get_outbox(db._conn.execute(
         "SELECT id FROM outbox").fetchone()["id"]).state == "sent"
@@ -314,7 +316,7 @@ class CaptionFailFirstILink(FakeMediaILink):
         return True
 
     async def send_image_message(self, to_user, context_token, *,
-                                 download_param, aes_key_b64, size_cipher,
+                                 download_param, aes_key_hex, size_cipher,
                                  token=None, base_url=None):
         self.events.append(("image", download_param))
         return True

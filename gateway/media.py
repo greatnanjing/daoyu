@@ -107,7 +107,7 @@ _UPLOAD_RETRIES = 3
 class UploadedImage:
     filekey: str          # hex32（getuploadurl 用）
     download_param: str   # x-encrypted-param（sendmessage 的 encrypt_query_param）
-    aes_key: bytes        # 原始 16B（sendmessage 时 base64）
+    aes_key: bytes        # 原始 16B（CDN 密文用它加密；sendmessage 报 base64(hex32 ASCII)）
     size_cipher: int      # 密文大小（sendmessage 的 mid_size）
 
 

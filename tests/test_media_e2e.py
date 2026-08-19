@@ -3,7 +3,6 @@
 2) 出站：enqueue_media → OutboundLoop._drain_once → FakeMediaILink 断言上传+发送参数。
 3) MCP：send_image 子进程往返 → outbox 媒体行 → _drain_once 投出。
 （真机微信端验收见 spec §5 待实测清单，另行手动做。）"""
-import base64
 import secrets
 import sys
 from pathlib import Path
@@ -46,10 +45,10 @@ class E2EILink:
         return True
 
     async def send_image_message(self, to_user, ctx, *, download_param,
-                                 aes_key_b64, size_cipher, token=None,
+                                 aes_key_hex, size_cipher, token=None,
                                  base_url=None):
         self.sent_images.append({"download_param": download_param,
-                                  "aes_key_b64": aes_key_b64,
+                                  "aes_key_hex": aes_key_hex,
                                   "size_cipher": size_cipher})
         return True
 
@@ -136,7 +135,9 @@ async def test_e2e_outbound_image_via_outbox(db, tmp_path):
     assert len(ilink.sent_images) == 1
     sent = ilink.sent_images[0]
     assert sent["download_param"] == "E2E-DL-PARAM"
-    key = base64.b64decode(sent["aes_key_b64"])
+    # aes_key_hex 是 hex32（sendmessage 报 base64(hex32 ASCII)，防空白图回退）
+    assert len(sent["aes_key_hex"]) == 32
+    key = bytes.fromhex(sent["aes_key_hex"])
     assert len(key) == 16
     assert aes_ecb_decrypt(ilink.uploaded_ct, key) == _PNG    # 上传密文可解回原图
     assert db._conn.execute("SELECT state FROM outbox").fetchone()["state"] == "sent"

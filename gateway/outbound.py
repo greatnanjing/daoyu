@@ -1,6 +1,5 @@
 """出站发送器：outbox → iLink。最小发送间隔节流、失败重试、死信、每日上限熔断、typing 状态。"""
 import asyncio
-import base64
 import logging
 import random
 import time
@@ -171,7 +170,7 @@ class OutboundLoop:
             ok = await self._ilink.send_image_message(
                 item.to_user, ctx,
                 download_param=up.download_param,
-                aes_key_b64=base64.b64encode(up.aes_key).decode(),
+                aes_key_hex=up.aes_key.hex(),
                 size_cipher=up.size_cipher, token=token, base_url=base)
         except Exception as e:
             log.warning("send_image_message 异常: user=%s err=%r", item.to_user, e)

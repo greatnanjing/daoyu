@@ -195,11 +195,17 @@ class ILinkClient:
             return await res.read()
 
     async def send_image_message(self, to_user: str, context_token: str, *,
-                                 download_param: str, aes_key_b64: str,
+                                 download_param: str, aes_key_hex: str,
                                  size_cipher: int, token: str | None = None,
                                  base_url: str | None = None) -> bool:
         """发图（sendmessage 媒体 item）。容错与 sendmessage 一致：网络/协议
-        异常不逃逸，返回 False 交 outbox 重试。aes_key_b64 = base64(raw16B)。"""
+        异常不逃逸，返回 False 交 outbox 重试。
+
+        aes_key_hex 是 hex32 字符串；media.aes_key = base64(hex32 ASCII)——
+        官方 send.ts 形态（Buffer.from(aeskey.toString("hex")).toString("base64"))。
+        M3 真机验收（2026-08-19）实证：传 base64(raw16B)（24 字符）微信端解不出
+        key、图片空白；微信自身发图也是 base64(hex32 ASCII)（44 字符）。CDN 密文
+        本身仍用 raw16B 加密（两个形态编码的是同一把 key）。"""
         client_id = f"daoyu-{random.randint(0, 0xFFFFFFFFF):09x}"
         try:
             data = await self._post(
@@ -213,7 +219,8 @@ class ILinkClient:
                     "context_token": context_token,
                     "item_list": [{"type": 2, "image_item": {
                         "media": {"encrypt_query_param": download_param,
-                                   "aes_key": aes_key_b64,
+                                   "aes_key": base64.b64encode(
+                                       aes_key_hex.encode("ascii")).decode(),
                                    "encrypt_type": 1},
                         "mid_size": size_cipher}}],
                 },

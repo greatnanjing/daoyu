@@ -185,7 +185,7 @@ async def test_send_image_message_item_shape(client):
         m.post(f"{BASE_URL}/ilink/bot/sendmessage", payload={})
         ok = await client.send_image_message(
             "u@im.wechat", "CTX", download_param="DL-PARAM",
-            aes_key_b64="QUJDREVGR0hJSktMTU4=", size_cipher=112)
+            aes_key_hex="0123456789abcdef0123456789abcdef", size_cipher=112)
         assert ok is True
         req = m.requests[("POST", __import__("yarl").URL(
             f"{BASE_URL}/ilink/bot/sendmessage"))][0]
@@ -195,9 +195,13 @@ async def test_send_image_message_item_shape(client):
         assert msg["context_token"] == "CTX"
         item = msg["item_list"][0]
         assert item["type"] == 2
+        # aes_key 形态 = base64(hex32 ASCII)（官方 send.ts；M3 真机验收实证
+        # base64(raw16B) 导致微信端解不出 key、图片空白）
+        import base64 as _b64
         assert item["image_item"]["media"] == {
             "encrypt_query_param": "DL-PARAM",
-            "aes_key": "QUJDREVGR0hJSktMTU4=", "encrypt_type": 1}
+            "aes_key": _b64.b64encode(b"0123456789abcdef0123456789abcdef").decode(),
+            "encrypt_type": 1}
         assert item["image_item"]["mid_size"] == 112
 
 
@@ -206,5 +210,5 @@ async def test_send_image_message_errcode_false(client):
         m.post(f"{BASE_URL}/ilink/bot/sendmessage",
                payload={"errcode": 40001, "errmsg": "bad"})
         ok = await client.send_image_message(
-            "u@im.wechat", "CTX", download_param="p", aes_key_b64="a==", size_cipher=1)
+            "u@im.wechat", "CTX", download_param="p", aes_key_hex="0f", size_cipher=1)
         assert ok is False
