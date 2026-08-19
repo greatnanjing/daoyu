@@ -34,8 +34,12 @@ _BG_MISSING_GRACE_S = 60.0
 # 未来版本可能自带输出的形态。
 _BG_RESULT_KEYS = ("result", "output", "lastMessage", "text", "summary")
 _BG_COST_KEYS = ("costUsd", "cost_usd", "total_cost_usd", "costUSD")
-# 结果兜底 prompt（TRD：回原会话要一份 ≤500 字总结，--max-turns 2 限定回合）
-_BG_SUMMARY_PROMPT = "用不超过500字总结你的最终结果"
+# 结果取回 prompt（--max-turns 2 限定回合）。TRD 原口径"≤500 字总结"真机
+# 实证不可用（task #14）：Claude 把文件清单压缩成统计摘要——用户要的是清单
+# 本身。改为要求逐项列出 + 放宽到 1500 字（微信分页兜底，2000 字/页）。
+_BG_SUMMARY_PROMPT = ("请给出你的最终结果：若属清单必须逐项列出（紧凑格式，"
+                      "不要概括或省略）；总长控制在1500字内，超出时优先保留"
+                      "结论与关键条目")
 
 
 def _extract_bg_result(entry: dict) -> str | None:
