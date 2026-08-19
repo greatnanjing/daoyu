@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），290 个测试全绿（`python -m pytest`）；M2 已实现（2026-08-16）。M3 全部完成：媒体收发 + /mcp 启停与 /config 写入（余项 A，spec 2026-08-19-mcp-config-writable-design）+ OCR MCP（余项 B，spec 2026-08-19-ocr-mcp-design）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
+**M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），297 个测试全绿（`python -m pytest`）；M2 已实现（2026-08-16）。M3 全部完成、真机验收通过（2026-08-19，余项 B 四项全过：OCR 主链路 / /mcp 列表呈现系统条目 / /mcp off 系统条目拦截 / /bg 回归）：媒体收发（图片双向）+ /mcp 启停与 /config 写入（余项 A，spec 2026-08-19-mcp-config-writable-design）+ OCR MCP（余项 B，spec 2026-08-19-ocr-mcp-design）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
 
 - [docs/PRD.md](docs/PRD.md) — 产品需求（功能 FR-1~10、非功能需求、里程碑 M1/M2/M3、范围外）
 - [docs/TRD.md](docs/TRD.md) — 技术设计（架构、SQLite 数据模型、claude CLI 调用规范、命令路由、安全设计、测试策略）
@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **strict 档审批**：`/policy strict` 后任务带 `--permission-prompt-tool mcp__daoyu__approve`；[worker/approval_mcp.py](worker/approval_mcp.py)（stdio JSON-RPC server，经临时合并 mcp config 由 claude 拉起、任务结束即删）写 approvals 行 + outbox 🔐 推微信；gateway `handle_inbound` 拦截 Y/N 单字 decide（300s 超时 = expired = 拒绝）。
 - **`/bg` 长任务**：桥命令建 bg 任务 → runner `claude --bg` 启动分支（bg_id 落盘即回执）→ [worker/pool.py](worker/pool.py) `_bg_watcher` 轮询 `claude agents --json --all` 推进（真机 2.1.233 三终态：`done`=完成/`blocked`=等用户输入，均 fork 取结果推送完结、`failed`=失败重试；条目无输出字段，结果靠 `--fork-session` 回原会话取——直接 `--resume` 被 daemon 持有拒绝且 rc=0；消失取消）；`/cancel` 走 `claude stop`。
-- **MCP 装载**：`claude/mcp.json` 已装 chrome-devtools / context7 / web-reader 三台（实测 connected；平台无关形态——command 直写 npx/uvx，runner 合并层 Windows 包 cmd /c（白名单 {npx,uvx}）+ 过滤 disabled，Linux 直传 + 冷缓存预热）；另有 daoyu-ocr 系统条目（RapidOCR 本地 OCR，runner 恒注入、不受 /mcp 启停管辖，余项 B）。
+- **MCP 装载**：`claude/mcp.json` 已装 chrome-devtools / context7 / web-reader 三台（平台无关形态——command 直写 npx/uvx，runner 合并层 Windows 包 cmd /c（白名单 {npx,uvx}）+ 过滤 disabled；Linux 侧 chrome-devtools 由 `inject_linux_chrome` 按约定路径注入 headless Chrome 装配——`~/.cache/puppeteer/chrome-headless-shell/linux-*`（npmmirror 装，手动拼 URL 会 404 必须走 `@puppeteer/browsers`）+ `~/chrome-libs` 解包 libasound 免 sudo，注入 `--headless --isolated --executablePath` + LD_LIBRARY_PATH + 清死代理；2026-08-19 真机验证 Next.js SPA 完整渲染，未安装 no-op fail-open）；另有 daoyu-ocr 系统条目（RapidOCR 本地 OCR，runner 恒注入、不受 /mcp 启停管辖，余项 B）。
 - **配置代理命令**：[gateway/proxy.py](gateway/proxy.py) — `/permissions`（列表 + deny add/del + allow add，写 `claude/settings.json`）、`/mcp`（列表 + on/off 启停，写 mcp.json 顶层 disabled）、`/config`（概览 + set 七键白名单写 gateway/config.json，重启生效）。
 - **同目录多话题**：sessions 表 `UNIQUE(wechat_user, cwd, claude_uuid)`（ensure_schema 对旧表做无损迁移：建 v2 → 搬行 → 换名，幂等）。`/new` 当前目录开新话题；`/sessions` 两级展示（目录分组 + 组内全局序号，序号按 last_active_at DESC）；`/cd #n` 切话题、`/cd <路径>` 切目录（指向该目录最新话题，无则建）；当前话题指针在 state KV `active_session:<wechat_user>`（[common/db.py](common/db.py) `get_active_binding`，chat/policy/bg/cancel 均走它；老库无指针时经旧 `cwd:` 指针回退并回写）。`/policy` 每话题独立。
 - **`/sessions`**：会话列表（目录 + 最近任务摘要）与 `/cd #n` 序号切换（见上一条：现为话题两级展示）。
@@ -72,7 +72,7 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 - **长任务必须走 `claude --bg` + `claude agents --json` 轮询**（后台任务管理是 `claude agents`；停止是 `claude stop <id>`；`claude logs <id>` 实测 2.1.233 存在——TUI 流含 ANSI 转义、人读可但不宜程序解析）：`-p` 结束 5s 会杀后台 bash，subagent 默认上限 10min。
 - **`context_token` 只使用当前会话最新入站消息的**，绝不复用历史值（复用旧 token 会 HTTP 200 但静默不投递）。
 - **入站按 `msg_id` 幂等去重**（iLink 重连后消息会重投）；出站走 outbox 发件箱，失败重试，至少 5 次后才进死信并告警。
-- **宿主配置隔离靠 `CLAUDE_CONFIG_DIR`（机制化）**：实测 `--bare`/`--settings` 均不能隔离宿主 `~/.claude`（宿主 defaultMode/allow/trustAllFiles/插件全部穿透生效，直接架空 strict 审批与硬 deny 清单）；runner 与 pool 给每个 claude 子进程注入 `CLAUDE_CONFIG_DIR=<repo>/data/claude-home/`（调用即 mkdir，`--bare` 仅为减载）。凭据不受影响：仍经 secrets env 注入（ANTHROPIC_API_KEY 等）；MCP 清单经 `--mcp-config` 显式传。刀鱼持久配置在 `claude/settings.json` 与 `claude/mcp.json`（进 git），代理命令（/permissions /config /mcp）改的就是这些文件。
+- **宿主配置隔离靠 `CLAUDE_CONFIG_DIR`（机制化）**：实测 `--bare`/`--settings` 均不能隔离宿主 `~/.claude`（宿主 defaultMode/allow/trustAllFiles/插件全部穿透生效，直接架空 strict 审批与硬 deny 清单）；runner 与 pool 给每个 claude 子进程注入 `CLAUDE_CONFIG_DIR=<repo>/data/claude-home/`（调用即 mkdir）。**`-p` 路径已不带 `--bare`**（2026-08-19 实测：`--bare` 剥离 WebFetch/WebSearch/Write/Glob/Grep 全部扩展工具只留 Bash/Edit/Read+MCP；去掉后 WebSearch 经智谱端点适配 `web_search_prime` 完全可用、真机查证带 Sources 验证通过，WebFetch 因抓取前的 claude.ai 域名验证国内不可达而失败但模型会 fallback 到 web-reader MCP；bg 分支保守集保留 `--bare`）。凭据不受影响：仍经 secrets env 注入（ANTHROPIC_API_KEY 等）；MCP 清单经 `--mcp-config` 显式传。刀鱼持久配置在 `claude/settings.json` 与 `claude/mcp.json`（进 git），代理命令（/permissions /config /mcp）改的就是这些文件。
 - **媒体出站走 outbox kind=image 行**：投递时整链路现做（上传→caption→图），
   失败整行重试（不缓存 downloadParam）；caption 与图分两条 sendmessage（官方模式）。
   MCP server 键 `daoyu` 统一装配（approve 仅 strict + send_image 四档，`DAOYU_TOOLS`）。
