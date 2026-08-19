@@ -64,8 +64,9 @@ def _get_engine():
 ```
 
 - `_ocr(args)`：读 bytes → `sniff_image` 白名单（PNG/JPEG；GIF/WebP 动图非 OCR
-  合理输入，白名单收紧为 sniff 的 png/jpg 两种）→ 临时文件（RapidOCR 收路径不收
-  bytes；temp 目录随机名）→ `engine(path)` → 行文本拼接 → 删临时文件。
+  合理输入，白名单收紧为 sniff 的 png/jpg 两种）→ 交引擎（收 bytes 直接传；若
+  实测该版本仅收路径，则临时文件中转 + finally 删除——以 §5.1 实测为准）→
+  行文本拼接。
 - 引擎返回结构按 rapidocr_onnxruntime 实际 API 处理（实现首步以包内签名/示例为准，
   不预设字段名——**待实测项 §5.1**）。
 
