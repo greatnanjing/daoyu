@@ -23,6 +23,12 @@ except Exception:
 if not d.get("hasCompletedOnboarding"):
     d["hasCompletedOnboarding"] = True
     json.dump(d, open(p, "w"), indent=2)
+# 自定义 API key 确认弹窗答过 No 会进 rejected（单用户环境，env key 就是要用的）
+r = d.setdefault("customApiKeyResponses", {"approved": [], "rejected": []})
+if r.get("rejected"):
+    r["approved"] = sorted(set(r.get("approved", [])) | set(r["rejected"]))
+    r["rejected"] = []
+    json.dump(d, open(p, "w"), indent=2)
 PY
 if [ "${DAOYU_TUI_DRYRUN:-0}" = "1" ]; then
     echo "cwd=$PWD"
