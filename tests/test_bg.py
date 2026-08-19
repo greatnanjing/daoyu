@@ -291,6 +291,22 @@ async def test_watcher_blocked_fresh_keeps_running(db):
     assert db.get_task(t).state == "running"
 
 
+async def test_watcher_failed_entry_fails_task(db):
+    """M3 真机采样（2026-08-19，CLI 2.1.226）：daemon 条目 state="failed"——
+    M2 版 watcher 无此分支，每轮空转、任务永卡 running。现按失败推进（可重试
+    语义）；条目已是 daemon 终态，无需 stop。"""
+    t = _make_bg_task(db)
+    pool = make_watch_pool(db)
+    stopped = []
+    pool._stop_bg = lambda bg_id: stopped.append(bg_id) or ""
+    pool._agents_json = lambda: [_entry(state="failed")]
+
+    await pool._bg_watch_round()
+    assert db.get_task(t).state in ("failed", "pending")   # finish failed（可重试语义）
+    assert stopped == []                                   # 不 stop（非孤儿）
+    assert any("执行失败" in x for x in _texts(db))
+
+
 async def test_watcher_blocked_timer_counts_from_first_sight(db):
     """I2：长任务（startedAt 40 分钟前）刚进 blocked 不得立即误杀——计时从
     首次观察到 blocked 的本地时刻起算，持续 blocked 满 timeout 下一轮才杀。"""

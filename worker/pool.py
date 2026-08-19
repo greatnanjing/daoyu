@@ -274,6 +274,20 @@ class WorkerPool:
             self._db.finish_task(t.id, "done")
             if session:
                 self._db.touch_session(session.id)
+        elif state == "failed":
+            # M3 真机采样（2026-08-19，CLI 2.1.226）：条目 state="failed"——daemon
+            # 侧失败（条目无 error detail 字段）。M2 版只覆盖 completed/blocked/
+            # 消失，failed 每轮空转、任务永卡 running。按失败推进（attempts 未
+            # 耗尽 → pending 重跑，耗尽 → dead 死信告警），无需 stop（条目已是
+            # daemon 终态，不占资源）。未知其他状态值不处理（记观察）——CLI 版本
+            # 漂移加新中间态时误判 failed 会重复烧预算，宁空转待采样。
+            if self._db.get_task(t.id).state != "running":   # 先落者胜（M3）
+                return
+            self._db.delete_state(blocked_key)
+            self._db.finish_task(t.id, "failed")
+            self._db.audit("bg_failed", f"task={t.id} bg_id={t.claude_bg_id}")
+            self._db.enqueue(t.id, to_user,
+                             f"❌ 后台任务 #{t.id} 在后台执行失败（daemon 报 failed）。")
         elif state == "blocked":
             since = self._db.get_state(blocked_key)
             if since is None:
