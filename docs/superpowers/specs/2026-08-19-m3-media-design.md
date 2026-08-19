@@ -1,7 +1,7 @@
 # 刀鱼 M3 媒体收发设计（图片双向）
 
 - **日期**: 2026-08-19
-- **状态**: 已确认（本 session 需求澄清与设计结论的沉淀）
+- **状态**: 已实现并真机验收通过（2026-08-19，§5 五项全过；验收期实测勘误登记于 §2.2 / §3.4 / §5）
 - **配套文档**: [PRD.md](../../PRD.md) / [TRD.md](../../TRD.md)；实现计划另见 plans/
 
 ---
@@ -58,11 +58,12 @@ MessageItemType:  TEXT=1  IMAGE=2  VOICE=3  FILE=4  VIDEO=5
    ```json
    {"type": 2, "image_item": {
       "media": {"encrypt_query_param": "<x-encrypted-param>",
-                 "aes_key": "<base64(raw16B)>", "encrypt_type": 1},
+                 "aes_key": "<base64(hex32 ASCII)>", "encrypt_type": 1},
       "mid_size": <密文字节数>}}
    ```
    message_type=2（BOT）、message_state=2（FINISH）、client_id、context_token 照常。
    **caption 与图是两条独立 sendmessage**（官方实现每个 item 单独一条消息，`item_list` 恒单元素）——照抄。
+   > **实测勘误（2026-08-19 真机验收）**：`aes_key` = base64(hex32 ASCII)——即把加密用 random16B key 的 hex 表示（32 个 ASCII 字符）再做 base64（官方 send.ts 形态）。本 spec 原写的 `base64(raw16B)` 是错的：真机传 raw16B 的 base64 微信端收图空白（上传/发送链路全 200 但图打不开）。
 
 CDN 基址：`https://novac2c.cdn.weixin.qq.com/c2c`（官方包常量 `CDN_BASE_URL`，可配置覆盖；本项目按常量用）。
 
@@ -149,7 +150,7 @@ ALTER TABLE outbox    ADD COLUMN caption TEXT;              -- 图配文，可�
 - 工具清单按 env `DAOYU_TOOLS` 装配（逗号分隔）：strict 档 = `approve,send_image`，auto/bypass/plan = `send_image`。
 - 临时合并 mcp config 机制从"仅 strict 档合并"扩为"**四档都合并** daoyu 条目"（`daoyu-mcp-` 前缀临时文件、任务结束即删、启动清扫，全部复用现机制）。
 - `send_image` 行为：校验（存在/≤20MB/magic bytes）→ 复制到 `data/media/outbound/<随机名>.<ext>` → 写 outbox 媒体行（to_user 经任务 env `DAOYU_TO_USER` 注入，照抄审批的 `DAOYU_DB`/`DAOYU_TASK_ID` 模式，见 [worker/runner.py:339-341](../../worker/runner.py)）→ 返回**纯文本确认**（普通工具返回，非审批，无需 behavior JSON）。
-- `--bg` 任务同样装配：stdio server 由 claude 子进程拉起、outbox 经 SQLite 跨进程，审批 MCP 已验证此模式。
+- `--bg` 任务**不装配**：> **实测勘误（2026-08-19 真机验收）**：`--mcp-config` 与 `--bg` 结构性不兼容——daemon 异步拉起 worker（客户端返回 ~1s 后才读 mcp config），临时文件在 run() 返回即删 → daemon "exit 1 before init" 100% 复现（daemon.log 三次三崩）；持久化文件 + 终态清理的替代方案其启动清扫会误删存活 bg 任务文件（gateway 重启后 bg 仍活着）。bg 会话因此无 MCP 工具（send_image 不可用），回执明示；CLI 修复该竞态后可再装回。
 - 硬约束不变：server 键 `daoyu` 与工具引用严格一致；strict 审批 flag 语义不动。
 
 ### 3.5 安全
@@ -171,11 +172,15 @@ ALTER TABLE outbox    ADD COLUMN caption TEXT;              -- 图配文，可�
 
 ## 5. 待实测清单（真机，实现完成后验收）
 
-1. **入站 payload 采样**：真机发图抓 getupdates 原始消息——`image_item.aeskey`（hex）与 `media.aes_key`（base64）哪个实际存在、`full_url` 有无、`message_type` 实际值（复核 §2.1 推断）
-2. **出站全链路**：getuploadurl → CDN POST → sendmessage 真机成功，微信端收到原图（Windows 开发机 + 生产服务器 各验一次）
-3. **caption 呈现**：caption 文本条 + 图片条的到达顺序与微信端呈现
-4. **生产服务器 依赖**：`cryptography` 在生产 venv 安装无坑
-5. **微信压缩行为**：用户端发图微信客户端是否预压缩（知识确认，不影响协议）
+**✅ 全部验收通过（2026-08-19，生产服务器 + 微信真机）**：
+
+1. ~~**入站 payload 采样**~~：✅ 真机发图采样，`message_type==1` + `item_list[].type==2` 与 §2.1 推断一致；双形态 aeskey 解析兼容真机 payload（`parse_inbound_aes_key` 三形态全保留）。
+2. ~~**出站全链路**~~：✅ getuploadurl → CDN POST → sendmessage 真机成功，微信端收到原图（生产服务器验证）。**发现并修正 aes_key 形态**（见 §2.2 勘误：base64(hex32 ASCII)，非 base64(raw16B)）。
+3. ~~**caption 呈现**~~：✅ caption 文本条先到、图片条后到（两条独立 sendmessage），微信端呈现正常。
+4. ~~**生产服务器 依赖**~~：✅ `cryptography` 生产 venv 安装无坑。
+5. ~~**微信压缩行为**~~：✅ 知识确认：用户端发图微信客户端会预压缩（非原图时）；CDN 链路本身不改变图片内容。
+
+**验收期顺带落定的 bg 结论**（与媒体无直接关系，借真机环境实测）：三终态 `done`/`blocked`/`failed`、`--all` 必带、done 条目无输出字段、取结果恒 `--fork-session`、`--mcp-config` 与 `--bg` 结构性不兼容（见 §3.4 勘误）——详见 CLAUDE.md 硬性约束。
 
 ## 6. 实现顺序（writing-plans 细化基准）
 

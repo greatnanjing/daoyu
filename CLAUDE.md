@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**M3 媒体收发（图片双向）代码完成**（2026-08-19，真机验收清单未跑，见 M3 清单），249 个测试全绿（`python -m pytest`）；M2 已实现（2026-08-16）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
+**M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），253 个测试全绿（`python -m pytest`）；M2 已实现（2026-08-16）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
 
 - [docs/PRD.md](docs/PRD.md) — 产品需求（功能 FR-1~10、非功能需求、里程碑 M1/M2/M3、范围外）
 - [docs/TRD.md](docs/TRD.md) — 技术设计（架构、SQLite 数据模型、claude CLI 调用规范、命令路由、安全设计、测试策略）
@@ -17,17 +17,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **M2 功能清单**（M1 收发/任务池/命令总线/崩溃恢复之上新增）：
 
 - **strict 档审批**：`/policy strict` 后任务带 `--permission-prompt-tool mcp__daoyu__approve`；[worker/approval_mcp.py](worker/approval_mcp.py)（stdio JSON-RPC server，经临时合并 mcp config 由 claude 拉起、任务结束即删）写 approvals 行 + outbox 🔐 推微信；gateway `handle_inbound` 拦截 Y/N 单字 decide（300s 超时 = expired = 拒绝）。
-- **`/bg` 长任务**：桥命令建 bg 任务 → runner `claude --bg` 启动分支（bg_id 落盘即回执）→ [worker/pool.py](worker/pool.py) `_bg_watcher` 轮询 `claude agents --json` 推进（completed 取结果/兜底 resume 总结、blocked 超时失败、消失取消）；`/cancel` 走 `claude stop`。
+- **`/bg` 长任务**：桥命令建 bg 任务 → runner `claude --bg` 启动分支（bg_id 落盘即回执）→ [worker/pool.py](worker/pool.py) `_bg_watcher` 轮询 `claude agents --json --all` 推进（真机 2.1.233 三终态：`done`=完成/`blocked`=等用户输入，均 fork 取结果推送完结、`failed`=失败重试；条目无输出字段，结果靠 `--fork-session` 回原会话取——直接 `--resume` 被 daemon 持有拒绝且 rc=0；消失取消）；`/cancel` 走 `claude stop`。
 - **MCP 装载**：`claude/mcp.json` 已装 chrome-devtools / context7 / web-reader 三台（实测 connected；Windows 形态 cmd /c，Linux 部署改直用 npx/uvx + 冷缓存预热）。
 - **配置代理命令**：[gateway/proxy.py](gateway/proxy.py) — `/permissions`（列表 + deny add/del + allow add，写 `claude/settings.json`）、`/mcp`、`/config`（只读脱敏）。
 - **同目录多话题**：sessions 表 `UNIQUE(wechat_user, cwd, claude_uuid)`（ensure_schema 对旧表做无损迁移：建 v2 → 搬行 → 换名，幂等）。`/new` 当前目录开新话题；`/sessions` 两级展示（目录分组 + 组内全局序号，序号按 last_active_at DESC）；`/cd #n` 切话题、`/cd <路径>` 切目录（指向该目录最新话题，无则建）；当前话题指针在 state KV `active_session:<wechat_user>`（[common/db.py](common/db.py) `get_active_binding`，chat/policy/bg/cancel 均走它；老库无指针时经旧 `cwd:` 指针回退并回写）。`/policy` 每话题独立。
 - **`/sessions`**：会话列表（目录 + 最近任务摘要）与 `/cd #n` 序号切换（见上一条：现为话题两级展示）。
 - **监控告警**：死信 / 日限熔断 / 预算耗尽死信 / 连接失效清 token 四处自动推微信 ⚠️（复用出站通道，发全部白名单）。
 
-**M3 功能清单**（媒体收发，图片双向；**代码完成待真机验收**——spec §5 五项：入站 payload 采样 / 出站全链路（Windows + 生产服务器）/ caption 呈现 / 生产服务器 装 cryptography / 微信压缩确认）：
+**M3 功能清单**（媒体收发，图片双向；**真机验收通过 2026-08-19**，spec §5 五项全过。验收期实测修正三处：出站 `media.aes_key` 形态 = base64(hex32 ASCII)（传 base64(raw16B) 微信端空白图）；MCP 工具需 settings allow（acceptEdits 不放行 MCP 工具、headless 无确认通道直接 deny）；bg 摘除 `--mcp-config`（daemon 异步读与临时文件即删竞态，见硬性约束））：
 
 - **入站发图即对话**：[gateway/app.py](gateway/app.py) 遍历 `item_list`（`message_type==1` 不变，图片 `type==2`）→ [gateway/media.py](gateway/media.py) CDN 下载 + AES-128-ECB 解密（aeskey 双形态：`image_item.aeskey` hex 优先 / `media.aes_key` base64）→ 随机名落盘 `data/media/inbound/`（magic bytes 白名单 PNG/JPEG/GIF/WebP、20MB 上限）→ 纯图建 chat 任务（prompt 模板"[用户发来图片，已保存到 {p}，请查看并回应]"）、图文拼 prompt；下载失败 ⚠️ 回执、不建任务。
-- **出站 `send_image`**：Claude 调 MCP 工具 `send_image(path, caption)`（[worker/approval_mcp.py](worker/approval_mcp.py) 现为 daoyu 统一 stdio server，`DAOYU_TOOLS` 装配：strict="approve,send_image"、其余档="send_image"；经临时合并 mcp config **四档恒装配**，`/bg` 同样带）→ 校验复制到 `data/media/outbound/` → 写 outbox `kind=image` 行（与 [common/db.py](common/db.py) 的 `db.enqueue_media` 同构的裸 SQL，跨进程写入）→ 出站协程整链路现做（getuploadurl → CDN 密文 POST 取 `x-encrypted-param` → caption 文本条 → 图片条），失败整行重试（不缓存 downloadParam）。协议细节见 [docs/superpowers/specs/2026-08-19-m3-media-design.md](docs/superpowers/specs/2026-08-19-m3-media-design.md) §2。
+- **出站 `send_image`**：Claude 调 MCP 工具 `send_image(path, caption)`（[worker/approval_mcp.py](worker/approval_mcp.py) 现为 daoyu 统一 stdio server，`DAOYU_TOOLS` 装配：strict="approve,send_image"、其余档="send_image"；经临时合并 mcp config **-p 四档恒装配**（`/bg` 不带，见硬性约束）；工具本身需 `claude/settings.json` allow `mcp__daoyu__send_image`）→ 校验复制到 `data/media/outbound/` → 写 outbox `kind=image` 行（与 [common/db.py](common/db.py) 的 `db.enqueue_media` 同构的裸 SQL，跨进程写入）→ 出站协程整链路现做（getuploadurl → CDN 密文 POST 取 `x-encrypted-param` → caption 文本条 → 图片条），失败整行重试（不缓存 downloadParam）。协议细节见 [docs/superpowers/specs/2026-08-19-m3-media-design.md](docs/superpowers/specs/2026-08-19-m3-media-design.md) §2。
 - **schema**：messages 加 `media_path`、outbox 加 `kind` / `media_path` / `caption`（幂等 ALTER），入站图片路径随 messages 行落盘。
 
 组件清单（入口文件）：
@@ -41,7 +41,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-python -m pytest                        # 全量测试（249 个）
+python -m pytest                        # 全量测试（253 个）
 python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程；M2 含审批往返/bg 冒烟；M3 媒体 E2E 在 tests/test_media_e2e.py）
 daoyu-login                             # 终端扫码登录（token 落盘后退出）
 python -m gateway.app                   # 前台调试运行（不进 systemd）
@@ -66,8 +66,9 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 - **resume 必须在同一 cwd**（Claude 按 cwd + git worktree 作用域）；`/cd` 切目录 = 换绑另一会话。
 - **用户 prompt 经 stdin 传入** `claude -p`，避免 shell 转义问题；子进程 cwd = 会话绑定的工作目录。
 - **strict 审批 flag 语义**：strict = `--permission-mode default` + `--permission-prompt-tool mcp__daoyu__approve`（实测 acceptEdits 下不触发 prompt-tool、default 才触发，TRD §4.1 "strict=acceptEdits" 假设已被实测推翻）；审批 server 条目经**临时合并 mcp config**（静态 mcp.json + daoyu 条目，含任务级 env，`daoyu-mcp-` 前缀）传入，任务结束（成功/失败/取消）即删、启动时清扫 kill 残留。server 键 `daoyu` 与工具引用必须严格一致（不一致 = Claude 找不到审批工具 = 该次工具调用被 deny，fail-safe）。**审批工具的返回必须是 behavior JSON**（`{"behavior":"allow","updatedInput":{...}}` / `{"behavior":"deny","message":...}`）——纯文本会被 claude 判 invalid permission result，决策从未生效。
-- **`--bg` flag 集（与审批工具组合待真机实测）**：`--bare` + 预算 + `--permission-mode` + `--settings`（硬 deny 清单与 `-p` 一致生效）+ bypass 档 `--disallowedTools`（与 `-p` 同源常量）；不传 `--permission-prompt-tool`——strict 档 `/bg` 在 default 模式下需审批的工具（Bash/写文件）被直接拒绝（fail-safe，仅适合只读任务），回执/文档已如实明示；prompt 以 `-` 开头时前置空格防 flag 解析。
-- **长任务必须走 `claude --bg` + `claude agents --json` 轮询**（实测当前 CLI 无 `claude logs` 子命令，后台任务管理是 `claude agents`；停止是 `claude stop <id>`）：`-p` 结束 5s 会杀后台 bash，subagent 默认上限 10min。
+- **`--bg` flag 集（真机实测 2026-08-19）**：`--bare` + 预算 + `--permission-mode` + `--settings`（硬 deny 清单与 `-p` 一致生效）+ bypass 档 `--disallowedTools`（与 `-p` 同源常量）；不传 `--permission-prompt-tool`——strict 档 `/bg` 在 default 模式下需审批的工具（Bash/写文件）被直接拒绝（fail-safe，仅适合只读任务），回执/文档已如实明示；prompt 以 `-` 开头时前置空格防 flag 解析。**不传 `--mcp-config`**：daemon 异步拉起 worker（客户端返回 ~1s 后才读 mcp config），临时文件在 run() 返回即删 → daemon "exit 1 before init" 100% 复现；bg 会话因此无 MCP 工具（send_image 不可用），回执明示。
+- **bg 三终态与取结果（真机实测 2.1.233）**：`claude agents --json --all` 条目终态 `done`/`blocked`/`failed`（默认过滤 failed，**必须带 `--all`**）；done 条目十字段（pid/id/cwd/kind/startedAt/sessionId/name/status/state）**无输出/cost 字段** → 取结果靠回原会话（`--fork-session`，直接 `--resume` 被 daemon 持有拒绝且 **rc=0**、错误只在输出——静默空结果）；`blocked` = 会话等用户后续输入（Claude 结尾反问是常态），bg 无输入通道即永久挂起 → 首次观察即 fork 取结果完结。
+- **长任务必须走 `claude --bg` + `claude agents --json` 轮询**（后台任务管理是 `claude agents`；停止是 `claude stop <id>`；`claude logs <id>` 实测 2.1.233 存在——TUI 流含 ANSI 转义、人读可但不宜程序解析）：`-p` 结束 5s 会杀后台 bash，subagent 默认上限 10min。
 - **`context_token` 只使用当前会话最新入站消息的**，绝不复用历史值（复用旧 token 会 HTTP 200 但静默不投递）。
 - **入站按 `msg_id` 幂等去重**（iLink 重连后消息会重投）；出站走 outbox 发件箱，失败重试，至少 5 次后才进死信并告警。
 - **宿主配置隔离靠 `CLAUDE_CONFIG_DIR`（机制化）**：实测 `--bare`/`--settings` 均不能隔离宿主 `~/.claude`（宿主 defaultMode/allow/trustAllFiles/插件全部穿透生效，直接架空 strict 审批与硬 deny 清单）；runner 与 pool 给每个 claude 子进程注入 `CLAUDE_CONFIG_DIR=<repo>/data/claude-home/`（调用即 mkdir，`--bare` 仅为减载）。凭据不受影响：仍经 secrets env 注入（ANTHROPIC_API_KEY 等）；MCP 清单经 `--mcp-config` 显式传。刀鱼持久配置在 `claude/settings.json` 与 `claude/mcp.json`（进 git），代理命令（/permissions /config /mcp）改的就是这些文件。
@@ -115,12 +116,12 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 
 - **M1（MVP）✅**：SQLite schema → gateway 收发+落盘去重 → worker 调 `claude -p`（会话绑定、stream 解析、节流推送）→ 命令总线 → 崩溃恢复 → E2E。
 - **M2 ✅**：审批（`--permission-prompt-tool` **实测在 2.1.233 仍存在可用**——注意 `--help` 不列全 flag，勿以 help 缺失判断移除）→ `--bg` 长任务（启动 `claude --bg "<prompt>"` 返回任务 id；轮询 `claude agents --json`；停止 `claude stop <id>`；`claude logs` 是 TUI 流不可解析）→ MCP 装载（chrome-devtools/context7/web-reader；tesseract-ocr/ai-vision 推迟 M3）→ 配置代理命令全套（/permissions 读写、/mcp、/config 只读）→ `/policy` strict 档审批 → `/sessions` → 监控告警。已移交：kill 需进程组（MCP 孙进程继承管道）、出站按页计数熔断。
-- **M3（进行中）**：媒体收发（图片双向，CDN AES-128-ECB）✅ 代码完成待真机验收（2026-08-19，协议源 @tencent-weixin/openclaw-weixin v2.4.6 dist）；余下：OCR/视觉 MCP 选型、/mcp 启停与 /config 写入、真机验收五项（spec §5）。
+- **M3 ✅（余项见下）**：媒体收发（图片双向，CDN AES-128-ECB）代码完成并**真机验收通过**（2026-08-19，spec §5 五项全过；协议源 @tencent-weixin/openclaw-weixin v2.4.6 dist）；验收期修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config、resume 恒 fork、取结果 prompt 逐项列出。余下：OCR/视觉 MCP 选型、/mcp 启停与 /config 写入。
 
 ## 开放问题（涉及前先实测，勿凭假设实现）
 
-TRD §11 登记的未决项：`/init` 在 headless 下的确切行为、bypass 档下 `permissions.deny` 是否生效、微信文本单条长度上限（分页阈值依据）、Claude Code 版本漂移（对策：固定版本 + 升级前跑 E2E 回归）。M2 新登记（均待真机验收）：
+TRD §11 登记的未决项：`/init` 在 headless 下的确切行为、bypass 档下 `permissions.deny` 是否生效、微信文本单条长度上限（分页阈值依据）、Claude Code 版本漂移（对策：固定版本 + 升级前跑 E2E 回归）。M2 新登记的 bg 三项已随 M3 验收（2026-08-19）全部落定：
 
-- **bg completed 条目字段名未采样**：`claude agents --json` 完成条目自带输出/cost 的键名未实测（pool 按 result/output/lastMessage/text/summary 扫描候选，全未命中走 `--resume` 兜底总结）。
-- **`--bg` 与 `--permission-prompt-tool` 组合未实测**：bg 不传审批工具（strict 档 `/bg` 无审批，回执明示）；`--settings`/bypass 档 `--disallowedTools` 已如实传入但 `--bg` 下的实际行为待真机确认。
-- **bg 停机竞态**：`claude stop <id>` 与 daemon 状态推进的竞态窗口（已按"先落终态者胜"处理 cancel/watcher 双向，真机确认 `claude stop` 对 running 条目的实际时延）。
+- ~~**bg completed 条目字段名未采样**~~ → 已采样：终态值是 `done`（非 completed）、条目十字段无输出/cost 字段，取结果靠 `--fork-session` 回原会话（常态路径而非兜底）。
+- ~~**`--bg` 与 `--permission-prompt-tool` 组合未实测**~~ → 已落定：bg 不传审批工具（strict 档回执明示）；`--settings` 硬 deny 与 acceptEdits 下 Bash 正常放行均实证；**`--mcp-config` 与 `--bg` 结构性不兼容**（daemon 异步读竞态，已摘除，bg 无 MCP）。
+- ~~**bg 停机竞态**~~ → 已落定：按"先落终态者胜"处理 cancel/watcher 双向，真机验收通过（`/cancel` 与 watcher 完结均正常）。

@@ -263,3 +263,13 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 1. **§4.1 "strict档: acceptEdits+审批MCP"** —— acceptEdits 权限模式下 `--permission-prompt-tool` **不触发**（需批准工具直接放行）；**default 模式才触发审批**。实现：`POLICY_MODE["strict"] = "default"`。另：审批工具必须返回 `{behavior: "allow", updatedInput?}` / `{behavior: "deny", message}` JSON（纯文本被判 invalid，决策不生效）。
 2. **§5 路由顺序"转发（2）先于代理（3）"** —— 实测 `system/init` 的 `slash_commands` 含 `config`/`mcp`，若转发在前则代理命令永不可达。实现顺序改为：桥 → iLink 运维 → **代理 → 转发**。
 3. **§7/§8 "--bare 隔离宿主配置"** —— 实测 `--bare` 与 `--settings` 均**不能**隔离宿主 `~/.claude`（宿主 defaultMode/allow/trustAllFiles 穿透生效，可架空审批与硬 deny）。实现：env 注入 `CLAUDE_CONFIG_DIR=<repo>/data/claude-home/` 机制化隔离（凭据仍经 secrets env 注入）。
+
+## 14. 实测勘误（2026-08-19，M3 真机验收期证实）
+
+以下本文件原假设被真机（claude 2.1.233 + 生产服务器 + 微信端）推翻或落定，实现以勘误为准（原文保留供追溯）：
+
+1. **§4.1 command 行 "claude --bg 后台执行 + `claude logs <id>` 轮询"** —— 轮询应为 `claude agents --json --all`（**必须带 `--all`**，默认过滤 failed 条目）；停止是 `claude stop <id>`。`claude logs <id>` 实测**存在**（M2 曾记"无此子命令"亦不准确）但是 TUI 流、含 ANSI 转义，人读可、不宜程序解析。
+2. **§4.1 bg 结果获取口径** —— bg 条目终态实测三值：`done` / `blocked` / `failed`（M2 写码假设的 `completed` 从未出现）；done 条目十字段**无输出/cost 字段**，取结果靠 `--fork-session` 回原会话要结果（直接 `--resume` 被 daemon 持有拒绝且 **rc=0**、错误只在输出——会静默空结果）；`blocked` = 会话等用户后续输入（Claude 结尾反问是常态），bg 无输入通道即永久挂起 → 首次观察即 fork 取结果完结。取结果 prompt 原"≤500 字总结"口径不可用（清单被压缩成统计）→ 改"逐项列出、1500 字内"。
+3. **§4.1 "`--bg` 与 `--mcp-config` 组合"** —— 结构性不兼容：daemon 异步拉起 worker（客户端返回 ~1s 后才读 mcp config），临时文件在 run() 返回即删 → daemon "exit 1 before init" 100% 复现。实现：bg 摘除 `--mcp-config`，bg 会话无 MCP 工具（回执明示）。
+4. **§11 "ClawBot 媒体（CDN 加密上传）未实现"** —— M3 已实现并真机验收（图片双向）。出站 `media.aes_key` 形态实测 = **base64(hex32 ASCII)**（spec 原写 base64(raw16B) 有误：真机传 raw16B 形态微信端收空白图）；MCP 工具 `send_image` 需 `claude/settings.json` allow（acceptEdits 不放行 MCP 工具、headless 无确认通道直接 deny）。协议细节见 M3 spec §2。
+
