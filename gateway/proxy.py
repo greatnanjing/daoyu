@@ -1,8 +1,9 @@
 """代理命令（TUI 交互专属命令的微信文字版，M2 Task 5）。
 
 /permissions 读写 claude/settings.json（刀鱼专属配置——宿主 ~/.claude 已由
-CLAUDE_CONFIG_DIR 机制隔离，改的就是刀鱼这份），/mcp 与 /config 只读脱敏；
-其余 proxy 命令提示暂未提供。全部 gateway 本地秒回，不经 Claude。写回统一
+CLAUDE_CONFIG_DIR 机制隔离，改的就是刀鱼这份），/mcp 列表 + on/off 启停（顶层
+disabled 标记，下一任务生效），/config 只读脱敏；其余 proxy 命令提示暂未提供。
+全部 gateway 本地秒回，不经 Claude。写回统一
 ensure_ascii=False, indent=2 + 临时文件原子替换，效果等价 TUI、天然可版本化。
 """
 import json
@@ -11,6 +12,7 @@ import tempfile
 
 PERMISSIONS_USAGE = ("用法：/permissions deny add <规则> | "
                      "/permissions deny del <序号> | /permissions allow add <规则>")
+MCP_USAGE = "用法：/mcp — 列表；/mcp off <序号|名字> 停用；/mcp on <序号|名字> 启用"
 _SCOPES = ("deny", "allow")
 
 
@@ -29,9 +31,11 @@ async def execute_proxy(db, route, config) -> str:
             return f"claude/settings.json 解析失败：{e}"
     if cmd == "mcp":
         try:
-            return _mcp(config)
+            return _mcp(db, config, route.args.strip())
         except NotJsonObjectError as e:
             return f"配置文件格式异常（顶层不是对象）：{e}"
+        except ValueError as e:
+            return f"claude/mcp.json 解析失败：{e}"
     if cmd == "config":
         try:
             return _config(config)
@@ -70,10 +74,9 @@ def _perm_lists(data) -> dict:
     return perms
 
 
-def _save_settings(config, data) -> None:
-    """原子写：先写同目录临时文件再 os.replace。截断式 write_text 中途崩溃
-    会留半写文件，下次 claude 调用读 settings 失败。"""
-    path = _settings_path(config)
+def _atomic_write_json(path, data) -> None:
+    """原子写 JSON：同目录临时文件 + os.replace。截断式 write_text 中途崩溃
+    会留半写文件，下次读取方（claude / gateway 启动）读失败。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
@@ -86,6 +89,11 @@ def _save_settings(config, data) -> None:
         except OSError:
             pass
         raise
+
+
+def _save_settings(config, data) -> None:
+    """原子写 claude/settings.json（见 _atomic_write_json）。"""
+    _atomic_write_json(_settings_path(config), data)
 
 
 def _fmt_rules(name: str, rules: list) -> str:
@@ -142,27 +150,77 @@ def _permissions(db, config, args: str) -> str:
     return f"已删除 {scope} 第 {n} 条（{removed}），下次调用生效。"
 
 
-# ---- /mcp：只读列 claude/mcp.json ----
+# ---- /mcp：列 claude/mcp.json + on/off 启停（顶层 disabled 标记）----
 
-def _mcp(config) -> str:
+def _load_mcp(config):
+    """读 mcp.json；返回 (path, raw dict)。文件缺失返回 (path, None)。"""
     path = config.repo_root / "claude" / "mcp.json"
     if not path.is_file():
-        return "未找到 claude/mcp.json。"
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError as e:
-        return f"claude/mcp.json 解析失败：{e}"
+        return path, None
+    raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise NotJsonObjectError(path)
+    return path, raw
+
+
+def _mcp(db, config, args: str) -> str:
+    path, raw = _load_mcp(config)
+    if raw is None:
+        return "未找到 claude/mcp.json。"
     servers = raw.get("mcpServers") or {}
+    disabled = raw.get("disabled")
+    disabled = disabled if isinstance(disabled, list) else []
+
+    parts = args.split()
+    if parts and parts[0] in ("on", "off"):
+        if len(parts) != 2:
+            return MCP_USAGE
+        return _mcp_toggle(db, path, raw, servers, disabled,
+                           parts[0], parts[1])
+
     if not servers:
         return "claude/mcp.json 中没有配置 MCP server。"
-    lines = ["🔌 mcpServers（claude/mcp.json，只读；启停 M3 提供）："]
+    lines = ["🔌 mcpServers（claude/mcp.json；启停下一任务生效）："]
     for i, (name, svc) in enumerate(servers.items(), 1):
         cmd = svc.get("command", "?") if isinstance(svc, dict) else "?"
         first_arg = f" {svc['args'][0]}" if isinstance(svc, dict) and svc.get("args") else ""
-        lines.append(f"  {i}. {name} — {cmd}{first_arg}")
+        mark = "⛔" if name in disabled else "✅"
+        lines.append(f"  {i}. {name} {mark} — {cmd}{first_arg}")
+    lines.append(MCP_USAGE)
     return "\n".join(lines)
+
+
+def _mcp_toggle(db, path, raw, servers, disabled, op, target) -> str:
+    """on/off 单个 server：名字精确匹配优先，否则 1-based 序号（与列表一致）。"""
+    name = None
+    if target in servers:
+        name = target
+    elif target.isascii() and target.isdigit():
+        n = int(target)
+        keys = list(servers)
+        if 1 <= n <= len(keys):
+            name = keys[n - 1]
+        else:
+            return f"序号越界：共 {len(keys)} 个 server。"
+    if name is None:
+        return (f"没有这个 server：{target}（当前：{', '.join(servers) or '（空）'}）")
+
+    if op == "off":
+        if name in disabled:
+            return f"{name} 已是停用状态。"
+        disabled = [*disabled, name]
+        raw["disabled"] = disabled
+        _atomic_write_json(path, raw)
+        db.audit("config_change", f"mcp off {name}")
+        return f"已停用 {name}，下一任务生效（配置保留，/mcp on {name} 可再启）。"
+    # on
+    if name not in disabled:
+        return f"{name} 已处于启用状态。"
+    disabled = [d for d in disabled if d != name]
+    raw["disabled"] = disabled      # 空数组也留键（与静态 mcp.json 初始形态一致）
+    _atomic_write_json(path, raw)
+    db.audit("config_change", f"mcp on {name}")
+    return f"已启用 {name}，下一任务生效。"
 
 
 # ---- /config：只读 gateway/config.json（脱敏，不回显任何 secret 值） ----

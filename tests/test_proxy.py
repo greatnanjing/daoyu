@@ -271,3 +271,94 @@ async def test_handle_inbound_proxy_branch_replies(db, tmp_path):
     texts = _outbox_texts(db)
     assert len(texts) == 1
     assert "未找到 claude/settings.json" in texts[0]   # 真执行了 execute_proxy
+
+
+# ---- /mcp on/off 启停 ----
+
+def _write_mcp(root, servers, disabled=None):
+    (root / "claude").mkdir(exist_ok=True)
+    doc = {"mcpServers": servers}
+    if disabled is not None:
+        doc["disabled"] = disabled
+    (root / "claude" / "mcp.json").write_text(
+        json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_mcp(root):
+    return json.loads(
+        (root / "claude" / "mcp.json").read_text(encoding="utf-8"))
+
+
+_MCP_SRV = {
+    "chrome-devtools": {"type": "stdio", "command": "npx",
+                         "args": ["chrome-devtools-mcp@latest"], "env": {}},
+    "web-reader": {"type": "stdio", "command": "uvx",
+                    "args": ["mcp-server-fetch"], "env": {}},
+}
+
+
+async def test_mcp_off_by_name_then_on_by_index(db, tmp_path):
+    _write_mcp(tmp_path, _MCP_SRV)
+    reply = await execute_proxy(db, _route("mcp", "off web-reader"), FakeCfg(tmp_path))
+    assert "已停用" in reply and "下一任务生效" in reply
+    doc = _read_mcp(tmp_path)
+    assert doc["disabled"] == ["web-reader"]
+    assert doc["mcpServers"]["web-reader"]      # 条目保留不丢
+    assert len(_audit_details(db, "config_change")) == 1
+
+    reply = await execute_proxy(db, _route("mcp", "on 2"), FakeCfg(tmp_path))
+    assert "已启用" in reply
+    assert _read_mcp(tmp_path)["disabled"] == []
+
+
+async def test_mcp_off_by_index(db, tmp_path):
+    _write_mcp(tmp_path, _MCP_SRV)
+    reply = await execute_proxy(db, _route("mcp", "off 1"), FakeCfg(tmp_path))
+    assert "已停用" in reply and "chrome-devtools" in reply
+    assert _read_mcp(tmp_path)["disabled"] == ["chrome-devtools"]
+
+
+async def test_mcp_off_duplicate_idempotent_hint(db, tmp_path):
+    _write_mcp(tmp_path, _MCP_SRV, disabled=["web-reader"])
+    reply = await execute_proxy(db, _route("mcp", "off web-reader"), FakeCfg(tmp_path))
+    assert "已是停用" in reply
+    assert _read_mcp(tmp_path)["disabled"] == ["web-reader"]   # 文件未动
+
+
+async def test_mcp_on_not_disabled_hint(db, tmp_path):
+    _write_mcp(tmp_path, _MCP_SRV)
+    reply = await execute_proxy(db, _route("mcp", "on chrome-devtools"), FakeCfg(tmp_path))
+    assert "已处于启用" in reply
+
+
+async def test_mcp_off_unknown_target(db, tmp_path):
+    _write_mcp(tmp_path, _MCP_SRV)
+    reply = await execute_proxy(db, _route("mcp", "off ghost"), FakeCfg(tmp_path))
+    assert "没有这个 server" in reply and "chrome-devtools" in reply   # 提示当前清单
+
+
+async def test_mcp_off_index_out_of_range(db, tmp_path):
+    _write_mcp(tmp_path, _MCP_SRV)
+    reply = await execute_proxy(db, _route("mcp", "off 9"), FakeCfg(tmp_path))
+    assert "越界" in reply and "共 2" in reply
+    assert "disabled" not in _read_mcp(tmp_path)     # 文件未动（无 disabled 键）
+
+
+async def test_mcp_off_missing_target_shows_usage(db, tmp_path):
+    _write_mcp(tmp_path, _MCP_SRV)
+    for args in ("off", "on", "toggle web-reader", "off 1 2"):
+        reply = await execute_proxy(db, _route("mcp", args), FakeCfg(tmp_path))
+        assert "用法" in reply, args
+
+
+async def test_mcp_list_marks_disabled(db, tmp_path):
+    _write_mcp(tmp_path, _MCP_SRV, disabled=["web-reader"])
+    reply = await execute_proxy(db, _route("mcp"), FakeCfg(tmp_path))
+    assert "⛔" in reply and "✅" in reply
+    assert reply.index("chrome-devtools") < reply.index("web-reader")
+
+
+async def test_mcp_off_atomic_no_tmp_leftover(db, tmp_path):
+    _write_mcp(tmp_path, _MCP_SRV)
+    await execute_proxy(db, _route("mcp", "off web-reader"), FakeCfg(tmp_path))
+    assert list((tmp_path / "claude").glob("*.tmp")) == []
