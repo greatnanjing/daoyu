@@ -32,3 +32,17 @@ def test_claude_deny_rules_absolute_anchored():
     assert "Edit(./data/daoyu.db)" not in deny         # cwd 相对锚定不随 /cd 走
     # bypass 档工具级兜底与 deny 清单是同一防线，两清单不得漂移
     assert set(BYPASS_DISALLOWED_TOOLS) == set(deny)
+
+
+def test_claude_allow_rules_cover_daoyu_send_image():
+    # M3 真机验收（2026-08-19）回归：send_image 是 MCP 工具，acceptEdits 只放行
+    # 文件编辑、不放行 MCP 调用——headless 无确认通道时直接 deny。不在 allow
+    # 清单 = auto/bypass/plan 档发图全挂。approve 不进 allow：它是 prompt-tool
+    # 走审批通道，Claude 自主调用 approve 应被拒（fail-safe）。
+    import json
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    perms = json.loads((root / "claude" / "settings.json").read_text(
+        encoding="utf-8"))["permissions"]
+    assert "mcp__daoyu__send_image" in perms.get("allow", [])
+    assert not any("approve" in r for r in perms.get("allow", []))
