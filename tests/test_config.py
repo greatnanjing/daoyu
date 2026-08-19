@@ -88,3 +88,45 @@ def test_load_config_budget_unknown_key_exits_with_hint(tmp_path):
     _write_config(tmp_path, {"budget": {"max_turns": 10, "budget_usd": 1.0}})
     with pytest.raises(SystemExit, match="budget"):
         load_config(tmp_path)
+
+
+# ---- host_claude_env / merge_claude_secrets：宿主 settings.json 动态凭据层 ----
+
+def test_host_claude_env_whitelist(tmp_path):
+    from common.config import host_claude_env
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude/settings.json").write_text(json.dumps({
+        "env": {"ANTHROPIC_AUTH_TOKEN": "t1", "ANTHROPIC_BASE_URL": "https://x",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "m1", "API_TIMEOUT_MS": "9000",
+                "DISABLE_TELEMETRY": "1"},          # 非白名单：不取
+        "permissions": {"defaultMode": "auto"},     # 非 env：不取
+    }), encoding="utf-8")
+    env = host_claude_env(tmp_path)
+    assert env == {"ANTHROPIC_AUTH_TOKEN": "t1", "ANTHROPIC_BASE_URL": "https://x",
+                   "ANTHROPIC_DEFAULT_OPUS_MODEL": "m1", "API_TIMEOUT_MS": "9000"}
+
+
+def test_host_claude_env_missing_or_bad(tmp_path):
+    from common.config import host_claude_env
+    assert host_claude_env(tmp_path) == {}                       # 无文件
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude/settings.json").write_text("{bad json", encoding="utf-8")
+    assert host_claude_env(tmp_path) == {}                       # 坏 JSON
+    (tmp_path / ".claude/settings.json").write_text("{}", encoding="utf-8")
+    assert host_claude_env(tmp_path) == {}                       # 无 env 块
+
+
+def test_merge_claude_secrets_dedup_and_priority():
+    from common.config import merge_claude_secrets
+    fb = {"ANTHROPIC_API_KEY": "old", "ANTHROPIC_BASE_URL": "old-url",
+          "OTHER": "keep"}
+    # 动态层出 AUTH_TOKEN → 兜底层 API_KEY 剔除（防双 key 双头）
+    out = merge_claude_secrets(fb, {"ANTHROPIC_AUTH_TOKEN": "new"})
+    assert "ANTHROPIC_API_KEY" not in out and out["ANTHROPIC_AUTH_TOKEN"] == "new"
+    # 反向同理；动态层逐键覆盖（BASE_URL 换新）
+    out2 = merge_claude_secrets(fb, {"ANTHROPIC_API_KEY": "k2",
+                                     "ANTHROPIC_BASE_URL": "new-url"})
+    assert "ANTHROPIC_AUTH_TOKEN" not in out2 and out2["ANTHROPIC_API_KEY"] == "k2"
+    assert out2["ANTHROPIC_BASE_URL"] == "new-url" and out2["OTHER"] == "keep"
+    # 动态层为空 → 兜底层原样
+    assert merge_claude_secrets(fb, {}) == fb

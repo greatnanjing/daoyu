@@ -80,3 +80,35 @@ def load_config(repo_root: Path | None = None) -> Config:
         budget=budget,
         secrets=secrets,
     )
+
+
+# 宿主 settings.json env 块的动态凭据白名单：ANTHROPIC_* 全前缀（覆盖未来新增
+# 的模型槽位变量）+ API_TIMEOUT_MS。用户在宿主 ~/.claude/settings.json 里维护
+# key 与模型映射（会动态变动），刀鱼每个任务现场读取跟随；secrets.env 退化为
+# 兜底层。只取凭据/模型键——permissions/plugins/defaultMode 等一概不碰，
+# CLAUDE_CONFIG_DIR 隔离语义不变。
+def host_claude_env(home: Path | None = None) -> dict:
+    """宿主 ~/.claude/settings.json env 块的白名单子集（坏文件/缺席 → {}）。
+    纯函数、home 参数化可测；任何解析异常静默回退兜底层。"""
+    try:
+        p = (home or Path.home()) / ".claude" / "settings.json"
+        env = (json.loads(p.read_text(encoding="utf-8")) or {}).get("env") or {}
+        return {k: v for k, v in env.items()
+                if isinstance(k, str) and isinstance(v, str)
+                and (k.startswith("ANTHROPIC_") or k == "API_TIMEOUT_MS")}
+    except Exception:
+        return {}
+
+
+def merge_claude_secrets(fallback: dict, host: dict) -> dict:
+    """兜底层（secrets.env）+ 动态层（宿主 settings.json）合并，动态层逐键优先。
+    AUTH_TOKEN/API_KEY 二选一去重：两层各出一把时双头并发（Authorization 与
+    x-api-key 各带不同 key）语义不明——以动态层声明的形态为准，剔除兜底层的
+    另一形态。"""
+    out = dict(fallback)
+    if "ANTHROPIC_AUTH_TOKEN" in host:
+        out.pop("ANTHROPIC_API_KEY", None)
+    if "ANTHROPIC_API_KEY" in host:
+        out.pop("ANTHROPIC_AUTH_TOKEN", None)
+    out.update(host)
+    return out

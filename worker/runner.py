@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 from common.text import split_text
+from common.config import host_claude_env, merge_claude_secrets
 from worker.cli_builder import (APPROVAL_MCP_SERVER, BYPASS_DISALLOWED_TOOLS,
                                 OCR_MCP_SERVER, POLICY_MODE, build_argv,
                                 claude_config_dir, expand_platform,
@@ -110,7 +111,9 @@ class TaskRunner:
             bin_ = self._cfg.claude_bin
             prefix = bin_ if isinstance(bin_, list) else [bin_]
             env = os.environ.copy()
-            env.update(self._cfg.secrets)
+            # 凭据/模型：宿主 settings.json 动态层优先（key/模型映射会变），
+            # secrets.env 兜底（见 merge_claude_secrets）
+            env.update(merge_claude_secrets(self._cfg.secrets, host_claude_env()))
             # 机制化隔离宿主 ~/.claude（--bare/--settings 实测均不能隔离）。
             # ⚠️ 开关默认关：2026-08-16 本机（Windows+代理环境）实测 CLAUDE_CONFIG_DIR
             # 重定向后 claude 启动挂死（连上 API 后等响应、CPU 零增长；宿主形态正常）。
@@ -274,7 +277,7 @@ class TaskRunner:
         重启后 bg 仍活着），引入新竞态不值当。bg 会话因此无 MCP 工具（send_image
         不可用），回执明示；CLI 侧修复该竞态后可再装回。"""
         env = os.environ.copy()
-        env.update(self._cfg.secrets)
+        env.update(merge_claude_secrets(self._cfg.secrets, host_claude_env()))
         if getattr(self._cfg, "worker", {}).get("isolate_claude_config", False):
             env["CLAUDE_CONFIG_DIR"] = claude_config_dir(self._cfg.repo_root)
         bin_ = self._cfg.claude_bin

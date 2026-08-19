@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from types import SimpleNamespace
 
@@ -151,16 +152,29 @@ async def test_runner_crash_does_not_kill_pool(db):
     await asyncio.gather(loop_task, return_exceptions=True)
 
 
-def test_claude_env_redirects_config_dir(db, fake_runner, tmp_path):
+def test_claude_env_redirects_config_dir(db, fake_runner, tmp_path, monkeypatch):
     """C3：agents/stop/resume 子进程（也是 claude CLI）在 isolate_claude_config
-    开关开启时同样注入 CLAUDE_CONFIG_DIR 隔离宿主 ~/.claude，且目录自动创建。"""
+    开关开启时同样注入 CLAUDE_CONFIG_DIR 隔离宿主 ~/.claude，且目录自动创建。
+    Path.home 钉到 tmp_path：凭据动态层读的是真实宿主 settings.json，不隔离
+    会让测试机器的宿主 env 块穿透（KeyError/值漂移）。"""
+    monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: tmp_path))
     cfg = SimpleNamespace(repo_root=tmp_path, secrets={"ANTHROPIC_API_KEY": "sk"},
                           worker={"isolate_claude_config": True})
     pool = WorkerPool(db, config=cfg, runner=fake_runner, poll_interval_s=30)
     env = pool._claude_env()
     assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "data" / "claude-home")
     assert (tmp_path / "data" / "claude-home").is_dir()
-    assert env["ANTHROPIC_API_KEY"] == "sk"       # secrets 照常注入
+    assert env["ANTHROPIC_API_KEY"] == "sk"       # secrets 兜底层照常注入
+
+    # 宿主 settings.json 动态层优先 + token/api-key 形态去重
+    (tmp_path / ".claude").mkdir(exist_ok=True)
+    (tmp_path / ".claude/settings.json").write_text(json.dumps(
+        {"env": {"ANTHROPIC_AUTH_TOKEN": "host-token",
+                 "ANTHROPIC_DEFAULT_OPUS_MODEL": "host-model"}}), encoding="utf-8")
+    env2 = pool._claude_env()
+    assert env2["ANTHROPIC_AUTH_TOKEN"] == "host-token"
+    assert "ANTHROPIC_API_KEY" not in env2          # 兜底形态被动态层剔除
+    assert env2["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "host-model"
 
     # 默认关 → 不注入（本机 Windows 代理环境实测该重定向致挂死，Linux 部署再开）
     cfg2 = SimpleNamespace(repo_root=tmp_path, secrets={"ANTHROPIC_API_KEY": "sk"},

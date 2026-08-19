@@ -16,6 +16,7 @@ import time
 from typing import TYPE_CHECKING
 
 import common.models as M
+from common.config import host_claude_env, merge_claude_secrets
 from common.models import Budget
 from common.text import split_text
 from worker.cli_builder import build_argv, claude_config_dir
@@ -370,10 +371,10 @@ class WorkerPool:
     def _claude_env(self) -> dict:
         env = os.environ.copy()
         if self._cfg is not None:
-            env.update(self._cfg.secrets)
-            # 与 runner 一致：机制化隔离宿主 ~/.claude（agents/stop/resume 子进程
-            # 也是 claude CLI，同样受宿主配置穿透影响）。开关语义同 runner 的
-            # isolate_claude_config（默认关，见 runner 注释）。
+            env.update(merge_claude_secrets(self._cfg.secrets, host_claude_env()))
+            # 与 runner 一致：宿主 settings.json 动态凭据优先、secrets.env 兜底
+            # （agents/stop/resume 子进程也是 claude CLI，同样需要凭据）。
+            # isolate_claude_config 开关语义同 runner。
             if getattr(self._cfg, "worker", {}).get("isolate_claude_config", False):
                 env["CLAUDE_CONFIG_DIR"] = claude_config_dir(self._cfg.repo_root)
         return env
