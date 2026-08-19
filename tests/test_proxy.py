@@ -379,6 +379,19 @@ async def test_mcp_off_atomic_no_tmp_leftover(db, tmp_path):
     assert list((tmp_path / "claude").glob("*.tmp")) == []
 
 
+async def test_mcp_list_shows_system_entries(db, tmp_path):
+    """余项 B：/mcp 列表呈现系统条目（恒装载，不受 on/off 管辖）。"""
+    _write_mcp(tmp_path, _MCP_SRV)
+    reply = await execute_proxy(db, _route("mcp"), FakeCfg(tmp_path))
+    assert "系统条目（恒装载）：daoyu（审批/发图）· daoyu-ocr（本地 OCR）" in reply
+
+
+async def test_mcp_list_system_entries_when_no_static_servers(db, tmp_path):
+    _write_mcp(tmp_path, {})
+    reply = await execute_proxy(db, _route("mcp"), FakeCfg(tmp_path))
+    assert "daoyu-ocr（本地 OCR）" in reply
+
+
 # ---- /config set 白名单写入 ----
 
 def _read_gateway_config(root):

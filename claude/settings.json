@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "mcp__daoyu__send_image"
+      "mcp__daoyu__send_image",
+      "mcp__daoyu-ocr__ocr"
     ],
     "deny": [
       "Read(//etc/**)", "Read(~/.ssh/**)", "Read(~/.claude/**)",

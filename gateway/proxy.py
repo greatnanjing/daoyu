@@ -188,13 +188,15 @@ def _mcp(db, config, args: str) -> str:
                            parts[0], parts[1])
 
     if not servers:
-        return "claude/mcp.json 中没有配置 MCP server。"
+        return ("claude/mcp.json 中没有配置 MCP server。\n"
+                "系统条目（恒装载）：daoyu（审批/发图）· daoyu-ocr（本地 OCR）")
     lines = ["🔌 mcpServers（claude/mcp.json；启停下一任务生效）："]
     for i, (name, svc) in enumerate(servers.items(), 1):
         cmd = svc.get("command", "?") if isinstance(svc, dict) else "?"
         first_arg = f" {svc['args'][0]}" if isinstance(svc, dict) and svc.get("args") else ""
         mark = "⛔" if name in disabled else "✅"
         lines.append(f"  {i}. {name} {mark} — {cmd}{first_arg}")
+    lines.append("系统条目（恒装载）：daoyu（审批/发图）· daoyu-ocr（本地 OCR）")
     lines.append(MCP_USAGE)
     return "\n".join(lines)
 

@@ -33,6 +33,11 @@ def claude_config_dir(repo_root) -> str:
 APPROVAL_MCP_SERVER = "daoyu"
 APPROVAL_PROMPT_TOOL = f"mcp__{APPROVAL_MCP_SERVER}__approve"
 
+# 能力面 server 键（runner 临时 mcp config 恒注入，不受 /mcp on/off 管辖——
+# 同 APPROVAL_MCP_SERVER 一样是系统条目，但无 DB/env 依赖）。
+OCR_MCP_SERVER = "daoyu-ocr"
+OCR_TOOL = f"mcp__{OCR_MCP_SERVER}__ocr"   # claude/settings.json allow 引用同一形态
+
 # bypass 档工具级兜底（bypass 下 permissions.deny 生效性未实测，TRD §8 要求叠加）。
 # 与 claude/settings.json 的 deny 清单逐项对齐。路径用 // 绝对锚定：官方 permissions
 # 文档规定 Read/Edit 单前导 / 锚定到规则来源目录（--settings <file> → 该文件所在目录，

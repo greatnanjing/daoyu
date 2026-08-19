@@ -45,4 +45,5 @@ def test_claude_allow_rules_cover_daoyu_send_image():
     perms = json.loads((root / "claude" / "settings.json").read_text(
         encoding="utf-8"))["permissions"]
     assert "mcp__daoyu__send_image" in perms.get("allow", [])
+    assert "mcp__daoyu-ocr__ocr" in perms.get("allow", [])
     assert not any("approve" in r for r in perms.get("allow", []))

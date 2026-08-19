@@ -331,9 +331,9 @@ async def test_daoyu_mcp_merged_all_policies(db, cfg, tmp_path, monkeypatch):
 
 
 async def test_daoyu_mcp_config_bad_static_json_fails_open(db, cfg, tmp_path, monkeypatch):
-    """I-2/F2：静态 mcp.json 存在但 JSON 损坏 → 按空清单合并（daoyu-only），
-    任务不因解析异常穿透而 failed——四档全任务都走该装配路径，坏文件须与
-    缺文件同策略 fail-open。"""
+    """I-2/F2：静态 mcp.json 存在但 JSON 损坏 → 按空清单合并（仅 daoyu 系统
+    条目），任务不因解析异常穿透而 failed——四档全任务都走该装配路径，坏文件
+    须与缺文件同策略 fail-open。"""
     args_log = tmp_path / "mcp_bad_args.log"
     monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
     claude_dir = cfg.repo_root / "claude"
@@ -347,7 +347,8 @@ async def test_daoyu_mcp_config_bad_static_json_fails_open(db, cfg, tmp_path, mo
     assert db.get_task(t).state == "done"          # 任务不失败（fail-open）
     log = json.loads(args_log.read_text(encoding="utf-8"))
     servers = log["mcp_config"]["mcpServers"]      # fake_claude 已快照文件内容
-    assert set(servers) == {"daoyu"}               # 坏清单按空合并，无残留条目
+    # 坏清单按空合并，无残留条目；系统条目（daoyu + daoyu-ocr）恒注入
+    assert set(servers) == {"daoyu", "daoyu-ocr"}
     assert servers["daoyu"]["env"]["DAOYU_TOOLS"] == "send_image"   # auto 档
 
 
@@ -434,3 +435,33 @@ async def test_mcp_disabled_non_string_elements_fail_open(
     assert "ghost" not in servers                  # 真实条目名照常被过滤
     assert "context7" in servers                   # 其余条目照常
     assert "daoyu" in servers                      # 系统条目恒在
+
+
+async def test_mcp_config_includes_ocr_system_entry(
+        db, cfg, tmp_path, monkeypatch):
+    """余项 B：daoyu-ocr 系统条目恒注入（sys.executable + 绝对路径、env 空）；
+    即使静态 mcp.json 的 disabled 误列同名也不受影响（注入在过滤之后）。"""
+    args_log = tmp_path / "mcp_b1.log"
+    monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
+    claude_dir = cfg.repo_root / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "mcp.json").write_text(json.dumps({
+        "mcpServers": {},
+        "disabled": ["daoyu-ocr"],     # 误写同名：系统条目不受管辖
+    }), encoding="utf-8")
+    s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+    t = db.create_task(None, s.id, "hi", kind="chat")
+    runner = TaskRunner(db, cfg, process_registry={})
+    await runner.run(db.get_task(t), s)
+
+    assert db.get_task(t).state == "done"
+    log = json.loads(args_log.read_text(encoding="utf-8"))
+    servers = log["mcp_config"]["mcpServers"]
+    ocr = servers["daoyu-ocr"]
+    assert ocr["command"] == sys.executable            # 同解释器绝对路径
+    # 注入条目 args 锚 runner 自身目录（真实 repo 的 worker/，与 approval_mcp
+    # 同款），非 FakeConfig 的 tmp repo_root——按真实路径断言。
+    assert ocr["args"] == [str(
+        Path(__file__).resolve().parents[1] / "worker" / "ocr_mcp.py")]
+    assert ocr["env"] == {}                            # 无 DB/任务 env 依赖
+    assert "daoyu" in servers                          # 控制面条目照常

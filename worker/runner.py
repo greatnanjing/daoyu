@@ -11,8 +11,8 @@ from pathlib import Path
 
 from common.text import split_text
 from worker.cli_builder import (APPROVAL_MCP_SERVER, BYPASS_DISALLOWED_TOOLS,
-                                POLICY_MODE, build_argv, claude_config_dir,
-                                expand_platform)
+                                OCR_MCP_SERVER, POLICY_MODE, build_argv,
+                                claude_config_dir, expand_platform)
 from worker.stream import StreamParser, Throttle
 
 log = logging.getLogger(__name__)
@@ -337,7 +337,8 @@ class TaskRunner:
     def _write_daoyu_mcp_config(self, task, session, static_path: Path, tools: str) -> str:
         """四档通用临时 mcp config：静态 mcp.json 的 mcpServers 过滤 disabled、
         按平台展开（Windows npx/uvx 包 cmd /c）后合并 daoyu server 条目
-        （tools 按档传 approve,send_image 或 send_image）。daoyu server 是
+        （tools 按档传 approve,send_image 或 send_image）与 daoyu-ocr 能力面
+        条目（恒注入，无 env）。daoyu server 是
         claude 拉起的孙进程，env 经 config 条目注入（claude 子进程 env 无需感知）；
         command 用 sys.executable（runner 与 server 同解释器，Windows 下为 venv
         python 绝对路径，可靠无 PATH 依赖）。返回临时文件路径（NamedTemporaryFile
@@ -376,6 +377,14 @@ class TaskRunner:
                     "DAOYU_TO_USER": session.wechat_user,
                     "DAOYU_TOOLS": tools,
                 },
+            },
+            # 余项 B：daoyu-ocr 能力面系统条目——恒注入（disabled 不管辖）、
+            # 无 DB/env 依赖（ocr_mcp.py 自举 repo 根、引擎 lazy）。
+            OCR_MCP_SERVER: {
+                "type": "stdio",
+                "command": sys.executable,
+                "args": [str(Path(__file__).resolve().parent / "ocr_mcp.py")],
+                "env": {},
             },
         }}
         with tempfile.NamedTemporaryFile(prefix=_MCP_TMP_PREFIX, suffix=".json",
