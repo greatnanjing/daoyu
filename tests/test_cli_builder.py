@@ -48,7 +48,7 @@ def test_budget_and_stream_flags_always_present():
                           mcp_config=Path("/mcp.json"), settings=Path("/settings.json"))
         assert argv[argv.index("--max-turns") + 1] == "30"
         assert argv[argv.index("--max-budget-usd") + 1] == "1.5"
-        assert "--bare" in argv
+        assert "--bare" not in argv   # 2026-08-19：--bare 剥离 WebFetch/WebSearch，已移除
         assert argv[argv.index("--output-format") + 1] == "stream-json"
         assert "--verbose" in argv
         assert "--include-partial-messages" in argv

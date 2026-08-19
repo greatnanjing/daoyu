@@ -69,7 +69,12 @@ def build_argv(*, session_uuid: str, resume: bool, policy: str, budget: Budget,
         argv += ["--permission-prompt-tool", APPROVAL_PROMPT_TOOL]
     if policy == "bypass":
         argv += ["--disallowedTools", ",".join(BYPASS_DISALLOWED_TOOLS)]
-    argv += ["--bare"]
+    # 不带 --bare（2026-08-19 实测：--bare 会剥离 WebFetch/WebSearch/Write/Glob/
+    # Grep 等全部扩展工具，只留 Bash/Edit/Read+MCP——智谱端点下模型彻底丧失
+    # 联网搜索能力。去掉后 WebSearch 经智谱服务端适配（web_search_prime）实测
+    # 可用；WebFetch 因抓取前的 claude.ai 域名验证在国内服务器不可达而失败，
+    # 模型会自行 fallback 到 web-reader MCP。代价仅系统提示词变长（减载收益
+    # 让位于能力面），配置隔离仍由 CLAUDE_CONFIG_DIR 机制承担（与 --bare 无关）。
     argv += ["--max-turns", str(budget.max_turns)]
     argv += ["--max-budget-usd", str(budget.max_usd)]
     if mcp_config is not None:
