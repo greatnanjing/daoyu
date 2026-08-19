@@ -129,7 +129,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 ## 开发
 
 ```bash
-python -m pytest                        # 全量测试（281 个）
+python -m pytest                        # 全量测试（290 个）
 python -m pytest tests/test_e2e.py -v   # E2E：fake iLink + fake claude 子进程全链路
 python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```
@@ -139,7 +139,7 @@ python -m gateway.app                   # 前台调试运行（不进 systemd）
 │              # proxy 配置代理命令 / outbound 出站节流重试 / media 媒体 CDN AES 上传下载解密 /
 │              # reconnect 24h 连接守护 / login 扫码
 ├── worker/    # pool 会话串行调度+bg 后台监视 / cli_builder argv 组装 / runner 子进程执行 /
-│              # stream 解析 / approval_mcp daoyu MCP server（审批+发图，stdio）
+│              # stream 解析 / approval_mcp daoyu MCP server（审批+发图，stdio） / ocr_mcp 本地 OCR（daoyu-ocr）
 ├── common/    # db（SQLite 五表+approvals+state KV）/ config / models / text（分页）
 ├── claude/    # settings.json + mcp.json（进 git）、secrets.env（gitignore）
 ├── tests/     # 单测 + E2E（fixtures/ 模拟 claude 子进程：-p 流回放与 --bg 两种形态）
@@ -152,7 +152,7 @@ python -m gateway.app                   # 前台调试运行（不进 systemd）
 - **strict 档 `/bg` 不走审批且更严**：`--bg` 不传审批工具；strict 档权限模式为 default——后台任务中需审批的工具（Bash/写文件）会被**直接拒绝**（fail-safe），仅适合只读任务。deny 清单经 `--settings` 照常生效（与 `-p` 一致，真机已验），回执会明示。长任务要审批就先 `-p` 同步跑，或切 auto/bypass 档再 `/bg`。
 - **`/bg` 不装载 MCP 工具**（真机实证）：`--mcp-config` 与 `--bg` 结构性不兼容（后台 daemon 异步读配置与临时文件即删竞态），已摘除——后台任务无 `send_image` 等 MCP 能力，需要时同步跑；回执明示。
 - **bypass 档 `/bg` 带 `--disallowedTools` 工具级兜底**（与 `-p` 同源常量；`--bg` 下 acceptEdits 与 Bash 正常放行已真机实证）。
-- **OCR / 视觉 MCP**（tesseract-ocr / ai-vision）：媒体入站打通后 Claude 用 Read 原生看图，按实际体验再评估；当前已装 chrome-devtools / context7 / web-reader 三台。
+- **OCR**：daoyu-ocr（RapidOCR 本地封装，中英混识）随任务恒装载（系统条目，不受 /mcp 启停管辖）；视觉理解由 Claude 模型原生视觉承担（Read 看图）。静态三台 chrome-devtools / context7 / web-reader 可经 /mcp 启停。
 - **`/mcp`、`/config`**：/mcp 列表 + on/off 启停（下一任务生效，停用不丢配置）；/config 概览 + set 改常用键（throttle/budget/concurrency 七键，重启生效）。whitelist 等不开放，改 gateway/config.json。
 - **语音/文件/视频收发**：仍为二期（图片收发 M3 已实现，见下节）。
 

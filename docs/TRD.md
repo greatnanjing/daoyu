@@ -197,14 +197,13 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 | server | 用途 | 启用 |
 |---|---|---|
 | chrome-devtools | 浏览器操控/截屏/网络/性能 | 默认 |
-| tesseract-ocr | 截图文字提取（本地封装） | 默认 |
-| ai-vision | 截图内容理解 | 默认 |
+| daoyu-ocr | 图片文字提取（RapidOCR 本地封装；runner 恒注入，不受 /mcp 启停管辖） | 系统（恒装载） |
 | web-reader | 网页抓取阅读 | 默认 |
 | context7 | 库文档实时查询 | 默认 |
 | playwright | 浏览器自动化备选 | 可选，默认关 |
 
 - 会话级变更（`/model` 等）：转发官方命令，只影响当前会话；
-- 持久级变更（`/config` `/permissions` `/mcp`）：写 `claude/settings.json` / `mcp.json`，下次调用生效；文件在 git 内 → 天然版本化、可回滚、可审计（配合 audit_log）。/mcp on/off 启停（写 mcp.json 顶层 disabled、下一任务生效）与 /config set 七键白名单写入（写 gateway/config.json、重启生效）已提供（2026-08-19 余项 A，spec `2026-08-19-mcp-config-writable-design`）。
+- 持久级变更（`/config` `/permissions` `/mcp`）：写 `claude/settings.json` / `mcp.json`，下次调用生效；文件在 git 内 → 天然版本化、可回滚、可审计（配合 audit_log）。/mcp on/off 启停（写 mcp.json 顶层 disabled、下一任务生效）与 /config set 七键白名单写入（写 gateway/config.json、重启生效）已提供（2026-08-19 余项 A，spec `2026-08-19-mcp-config-writable-design`）。daoyu-ocr 为系统条目恒注入（2026-08-19 余项 B，spec `2026-08-19-ocr-mcp-design`）。
 
 ## 8. 安全设计
 
@@ -242,10 +241,10 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 |---|---|---|
 | `/init` 在 headless 下的确切行为 | 官方文档未明说 | M1 期间实测；以 `system/init` 的 `slash_commands` 实际清单为准 |
 | bypass 档下 `permissions.deny` 是否仍生效 | 未实测 | M2 实测；若不生效则以 `--disallowedTools` + 文件系统权限双兜底 |
-| ClawBot 媒体（CDN 加密上传） | 未实现 | 二期；一期以 OCR 文字 + AI 视觉描述替代 |
+| ClawBot 媒体（CDN 加密上传） | 已实现（M3 图片双向，真机验收 2026-08-19） | — |
 | 重连二维码的无人值守推送渠道 | 待部署时选定（邮件/server酱） | M2 |
 | 微信文本单条长度上限 | 未实测 | M1 实测后定分页阈值 |
-| OCR MCP 具体 server 选型/封装 | 待实现时定（Tesseract 本地封装为主） | M2 |
+| OCR MCP 具体 server 选型/封装 | 已落定：RapidOCR 本地封装（daoyu-ocr，rapidocr-onnxruntime 1.4.4，模型随包、bytes 直传） | 已实现（2026-08-19 余项 B） |
 | Claude Code 版本漂移（flag 行为随版本变） | 持续风险 | 固定版本 + 升级前跑 E2E 回归 |
 
 ## 12. 实现顺序建议（对应 PRD 里程碑）

@@ -66,8 +66,7 @@
 | MCP server | 能力 |
 |---|---|
 | chrome-devtools | 操控浏览器：导航/点击/填表/执行 JS/网络抓包/**截屏**/性能分析 |
-| OCR（Tesseract 封装） | 从截图提取文字 |
-| AI 视觉 | 看懂截图内容（补充 OCR 只能提文字的不足） |
+| daoyu-ocr（RapidOCR 本地封装） | 从图片提取文字（中英混识，本地推理，runner 恒注入的系统条目） |
 | web-reader | 抓取阅读网页 |
 | context7 | 实时查库文档 |
 | playwright（可选） | 浏览器自动化备选 |
