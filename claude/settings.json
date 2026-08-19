@@ -8,7 +8,14 @@
       "mcp__chrome-devtools__*",
       "mcp__context7__*",
       "mcp__web-reader__*",
-      "Bash(curl *)"
+      "Bash(curl *)",
+      "Bash(wc *)",
+      "Bash(grep *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(ls *)",
+      "Bash(file *)",
+      "Bash(wget *)"
     ],
     "deny": [
       "Read(//etc/**)", "Read(~/.ssh/**)", "Read(~/.claude/**)",

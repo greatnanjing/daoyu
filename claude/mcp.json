@@ -19,5 +19,5 @@
       "env": {}
     }
   },
-  "disabled": []
+  "disabled": ["chrome-devtools"]
 }
