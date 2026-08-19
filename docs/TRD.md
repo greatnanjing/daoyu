@@ -17,7 +17,7 @@
                      │                                             │
   ① gateway 前端     │  ClawBot 适配层 (Python)                    │
      (ClawBot)       │  iLink 长轮询收 / sendmessage 发 / sendtyping│
-       │             │  统一命令路由 / 24h 自动重连                  │
+       │             │  统一命令路由 / 连接守护（被动重连）              │
        ▼             │      │ 入站落盘+去重                          │
   ② SQLite (WAL)    │  messages / tasks / outbox / sessions 表    │
        │             │      │ 派发                                   │
@@ -38,7 +38,7 @@
 
 | 组件 | 形态 | 职责 |
 |---|---|---|
-| gateway | Python asyncio，fork `weixin-ClawBot-API` 收发层 | iLink 长轮询；入站落盘去重；命令路由（本地秒回 / 入队）；出站发送（含重试、分页、节流）；sendtyping；24h 重连 |
+| gateway | Python asyncio，fork `weixin-ClawBot-API` 收发层 | iLink 长轮询；入站落盘去重；命令路由（本地秒回 / 入队）；出站发送（含重试、分页、节流）；sendtyping；连接守护（token 失效自动重连 + 长周期主动续期） |
 | worker | 同一服务内 asyncio task 池（并发 2~3） | 取任务；组装 claude 命令行；子进程执行；解析 stream-json；节流推进度；写 outbox；审批 MCP 宿主 |
 | claude CLI | 子进程 `claude -p ...` / `claude --bg` | 全部智能行为 |
 | SQLite | 单文件 `data/daoyu.db`，WAL 模式 | 唯一事实源 |
@@ -52,7 +52,7 @@
 - 腾讯 2026 年经 OpenClaw 平台官方开放的个人微信 Bot API（微信 ClawBot 插件功能），协议 iLink，域名 `ilinkai.weixin.qq.com`，官方 sanctioned、无逆向封号风险。
 - 长轮询 `getupdates`（服务器 hold 35s）——**无公众号式 5 秒必须返回的死线**，天然适配慢 agent 任务。
 - 支持 `sendtyping`（"正在输入"状态）。
-- 连接有效期 **24 小时**；每次扫码登录 Bot ID 会变化（平台设计）。
+- 连接（bot_token）生命周期：**无官方 TTL**（官方 README 仅定义 `errcode -14 = session timeout`，不承诺时长；实证活跃存活 >2.6 天——2026-08-19 本机实例，"24h 过期"系社区讹传）；每次扫码登录 Bot ID 会变化（平台设计）；协议无免扫码续期路径（`binded_redirect` 是扫码时已绑定状态）。
 - 媒体消息（图片）M3 已支持：CDN AES-128-ECB 加密上传/下载（协议细节见
   `docs/superpowers/specs/2026-08-19-m3-media-design.md` §2，源：官方
   @tencent-weixin/openclaw-weixin v2.4.6 dist 源码）；语音/文件/视频未实现。
@@ -64,7 +64,7 @@
 |---|---|
 | `sendmessage` 字段不全 → HTTP 200 但**静默不投递** | 封装单一发送函数，字段全填；出站走 outbox，带投递确认校验与重试 |
 | `context_token` 复用旧值 → 不投递 | token 随入站消息落盘，**只使用当前会话最新入站消息的 token**，绝不复用历史值 |
-| 24h 连接过期 | 自动重连流程：剩余 2h 预警（推送到微信）→ 用户确认/最后 30 分钟强制 → 新二维码（终端展示 + 备用渠道推送）→ 扫码后 token 原子替换 |
+| token 失效（errcode -14 / HTTP 401） | **被动重连**：poll_loop 双路检测（应用层 `errcode`/`ret=-14` 连续 5 次防抖 ≈25s；HTTP 401/403 连续 5 次）清 token → 推 ⚠️+二维码链接到微信（点链接确认即恢复）→ 扫码/确认后 token 原子替换；主动续期周期默认 30 天（`session_duration_s`），续期时静默优先（`local_token_list` 带旧 token 轮询 `silent_grace_s` 30s，超窗才推码） |
 | 重连后消息重投 | 按 `msg_id` 幂等去重 |
 
 ### 3.3 出站节流（风控防护）
@@ -79,7 +79,7 @@
 
 | 类别 | 用到的项 |
 |---|---|
-| **options** | `--resume <UUID>`（会话）；`--permission-mode <auto档: acceptEdits \| strict档: acceptEdits+审批MCP \| bypass \| plan>`；`--allowedTools` / `--disallowedTools`（按 policy 档装配）；`--mcp-config`；`--bare`（不加载 `~/.claude`，行为一致）；`--max-turns` / `--max-budget-usd`（预算闸）；`--output-format stream-json --verbose --include-partial-messages`；工作目录 = 子进程 cwd（`--add-dir` 仅显式放行的额外目录） |
+| **options** | `--resume <UUID>`（会话）；`--permission-mode <auto档: acceptEdits \| strict档: default+审批MCP \| bypass \| plan>`；`--allowedTools` / `--disallowedTools`（按 policy 档装配）；`--mcp-config`；`--max-turns` / `--max-budget-usd`（预算闸）；`--output-format stream-json --verbose --include-partial-messages`；工作目录 = 子进程 cwd（`--add-dir` 仅显式放行的额外目录）。**不带 `--bare`**（实测它剥离 WebFetch/WebSearch/Write/Glob/Grep 全部扩展工具——智谱端点 WebSearch 可用，2026-08-19；宿主隔离由 CLAUDE_CONFIG_DIR 承担，与 --bare 无关；bg 分支保守集保留） |
 | **prompt** | 用户微信消息文本（含 `/命令`）经 **stdin** 传入（避免 shell 转义问题），`claude -p` 从 stdin 读 |
 | **command** | 长任务用 `claude --bg` 后台执行 + `claude logs <id>` 轮询（`-p` 结束 5s 会杀后台 bash、subagent 默认上限 10min，长任务必须走此路） |
 
@@ -92,7 +92,7 @@ claude -p \
   --allowedTools "Read,Grep,Glob,Bash(git *)" \
   --permission-prompt-tool mcp__daoyu__approve \
   --mcp-config /path/to/daoyu/mcp.json \
-  --bare --max-turns 50 --max-budget-usd 5 \
+  --bare --max-turns 50 --max-budget-usd 5 \   # 注：-p 路径现已不带 --bare（见上表）；此处示例为 bg 分支形态
   --output-format stream-json --verbose --include-partial-messages
 # cwd = 绑定的工作目录; prompt 经 stdin 传入
 ```
@@ -102,7 +102,8 @@ claude -p \
 - `sessions` 表维护 (微信用户, cwd) → Claude session UUID 映射；
 - 首次调用用 `--session-id <预生成UUID>` 固定，之后 `--resume`；
 - **约束**：resume 必须在同一 cwd（Claude 按 cwd + git worktree 作用域）；`/cd` 切目录 = 换绑另一会话；
-- 会话上下文跨进程重启保持（Claude 本地会话存储）。
+- 会话上下文跨进程重启保持（Claude 本地会话存储）；
+- **`/adopt [uuid前缀]`**：收养终端 TUI 创建的外部会话为当前话题（终端须用 `CLAUDE_CONFIG_DIR=<repo>/data/claude-home claude` 创建；扫描 claude-home projects 未管理 transcript，无参取 mtime 最新、≥8 位唯一前缀指定；收养行置 `claude_session_inited:<uuid>` 走 `--resume`）——微信 ↔ 终端交叉接续同一话题。
 
 ### 4.3 流式进度
 
@@ -125,7 +126,8 @@ worker 内宿主一个本地 MCP server，暴露 `approve` 工具，配 `--permi
 
 ```
 收到 "/xxx args"
-  1. 若 xxx ∈ 桥命令(仅 /cancel /tasks /status /cd /policy) → gateway 本地执行, 秒回
+  1. 若 xxx ∈ 桥命令(/cancel /tasks /status /cd /sessions /policy /bg /new /adopt)
+     → gateway 本地执行, 秒回
      (另有继承自 ClawBot 库的 iLink 运维命令 /time /重新连接, 在 gateway 处理)
   2. 若 xxx ∈ headless 可用命令集(启动时从 system/init slash_commands 同步,
      含官方命令/skills/自定义命令) → 原样作为 prompt 转发给 claude
@@ -135,7 +137,7 @@ worker 内宿主一个本地 MCP server，暴露 `approve` 工具，配 `--permi
 ```
 
 - 第 3 步的"TUI 交互专属集"为静态维护清单（源自官方 commands 文档），Claude Code 升级时对照更新；
-- 代理命令操作的是刀鱼专属配置文件（见 §7），而非用户 `~/.claude`（因 `--bare` 隔离）——效果等价、配置可版本化。
+- 代理命令操作的是刀鱼专属配置文件（见 §7），而非用户 `~/.claude`（因 `CLAUDE_CONFIG_DIR` 隔离）——效果等价、配置可版本化。
 - `/help` 由三层合并动态生成，与实际能力永一致。
 
 ## 6. 数据模型（SQLite）
@@ -177,7 +179,7 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 
 ## 7. 配置体系
 
-刀鱼专属、与用户 `~/.claude` 隔离（`--bare` + 显式传入）：
+刀鱼专属、与用户 `~/.claude` 隔离（`CLAUDE_CONFIG_DIR` 重定向 + 显式传入）：
 
 ```
 ~/proj/daoyu/
@@ -215,7 +217,7 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 | 审批 | strict 档经 `--permission-prompt-tool` 走微信 Y/N，5 分钟超时拒绝 |
 | 白名单 | gateway 仅响应白名单微信账号 |
 | secret | `secrets.env`（gitignore）+ 环境变量注入；日志脱敏 |
-| 进程边界 | claude 子进程 cwd 锁定绑定目录；`--bare` 防误加载宿主配置 |
+| 进程边界 | claude 子进程 cwd 锁定绑定目录；`CLAUDE_CONFIG_DIR` 重定向防误加载宿主配置 |
 
 注：bypass 档即官方 `bypassPermissions`；预算闸与其独立、恒生效；deny 兜底见上表"硬 deny"行与 §11 开放问题。
 

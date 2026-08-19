@@ -138,7 +138,7 @@ python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```
 ├── gateway/   # app 入口 / ilink 协议 / router 命令路由 / bridge 桥命令 /
 │              # proxy 配置代理命令 / outbound 出站节流重试 / media 媒体 CDN AES 上传下载解密 /
-│              # reconnect 24h 连接守护 / login 扫码
+│              # reconnect 连接守护（被动重连）/ login 扫码
 ├── worker/    # pool 会话串行调度+bg 后台监视 / cli_builder argv 组装 / runner 子进程执行 /
 │              # stream 解析 / approval_mcp daoyu MCP server（审批+发图，stdio） / ocr_mcp 本地 OCR（daoyu-ocr）
 ├── common/    # db（SQLite 五表+approvals+state KV）/ config / models / text（分页）

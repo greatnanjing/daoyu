@@ -55,7 +55,7 @@
 `/help` 动态生成，列出当前实际可用命令（从 Claude 的 `system/init` 事件同步），永远与真实能力一致。
 
 ### FR-3 会话管理
-每个"用户 ↔ 工作目录"对绑定一个持久 Claude 会话（UUID）；`/cd` 切目录即切会话；历史会话可查、可恢复。
+每个"用户 ↔ 工作目录"对绑定一个持久 Claude 会话（UUID）；`/cd` 切目录即切会话；历史会话可查、可恢复；`/adopt` 可收养终端（TUI）创建的会话为微信话题——微信与服务器终端可交叉接续同一话题。
 
 ### FR-4 软件开发能力
 在真实仓库上：读写代码、执行 shell、git 操作、代码审查（`/review` `/code-review` `/security-review`）、特性开发（`/feature-dev` 及 architect/explorer/reviewer 子代理）、TDD、superpowers 工作流全套（brainstorming → writing-plans → executing-plans → finishing-branch 等）。
@@ -65,7 +65,7 @@
 
 | MCP server | 能力 |
 |---|---|
-| chrome-devtools | 操控浏览器：导航/点击/填表/执行 JS/网络抓包/**截屏**/性能分析 |
+| chrome-devtools | 操控浏览器：导航/点击/填表/执行 JS/网络抓包/**截屏**/性能分析（Linux 服务器经 runner 注入 headless Chrome——SPA 渲染可达，2026-08-19 实证） |
 | daoyu-ocr（RapidOCR 本地封装） | 从图片提取文字（中英混识，本地推理，runner 恒注入的系统条目） |
 | web-reader | 抓取阅读网页 |
 | context7 | 实时查库文档 |
@@ -103,7 +103,7 @@
 - 进程重启自动回放未完成任务与未投递消息。
 
 ### FR-10 状态查询
-`/status`（系统整体状态：队列深度、死信数、当日费用）、`/tasks`（任务列表）、`/time`（iLink 连接剩余时间，24h 周期）。
+`/status`（系统整体状态：队列深度、死信数、当日费用）、`/tasks`（任务列表）、`/time`（iLink 连接剩余时间）。
 
 ## 6. 非功能需求
 
@@ -128,7 +128,7 @@
 | 风险 | 影响 | 缓解 |
 |---|---|---|
 | ClawBot 为腾讯新开放能力，无 SLA，可变更/终止 | 微信通道可能失效 | 适配层接口抽象，可替换为 wxauto/企业微信等 |
-| iLink 连接 24h 过期，重连需扫码 | 每日一次运维动作 | 到期前预警 + 自动发起重连；二维码经终端/备用渠道展示 |
+| iLink token 失效需人工确认（协议无免扫码路径） | 低频（实证 >2.6 天，主动续期 30 天） | 失效自动检测（errcode -14 / HTTP 401 双路）→ ⚠️ + 二维码链接推微信，点链接确认即恢复 |
 | ClawBot 媒体通道仅图片可用（M3，CDN 加密收发） | 语音/文件/视频发不了 | 图片走 CDN 加密通道；其余形态二期再评估 |
 | 腾讯保留内容过滤/限速权利 | 消息可能被限 | 出站节流、内容拟人化、熔断暂停 |
 | Claude API 成本 | 失控烧钱 | 预算闸 + `/usage` 可查 |
