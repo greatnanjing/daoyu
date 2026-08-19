@@ -1,6 +1,8 @@
 {
   "permissions": {
     "allow": [
+      "WebSearch",
+      "WebFetch",
       "mcp__daoyu__send_image",
       "mcp__daoyu-ocr__ocr",
       "mcp__chrome-devtools__*",
