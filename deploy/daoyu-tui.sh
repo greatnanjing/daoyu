@@ -4,10 +4,18 @@
 # 后微信发 /adopt 即可收养该会话交叉接续。
 # 服务器 shell 已知坑：死代理（127.0.0.1:7897 未监听）不清掉则瞬间
 # ConnectionRefused——这里无条件 unset。
+# 自检：DAOYU_TUI_DRYRUN=1 打印解析后的环境不启动 claude。
 set -e
-cd "$(dirname "$0")/.."                     # repo 根（secrets.env 与 claude-home 相对它）
+cd "$(dirname "$0")/.."
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
-set -a; source claude/secrets.env; set +a   # 与 runner 注入子进程同一来源
+set -a; source claude/secrets.env; set +a
 export CLAUDE_CONFIG_DIR="$PWD/data/claude-home"
 mkdir -p "$CLAUDE_CONFIG_DIR"
+if [ "${DAOYU_TUI_DRYRUN:-0}" = "1" ]; then
+    echo "cwd=$PWD"
+    echo "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR"
+    echo "ANTHROPIC_BASE_URL=$ANTHROPIC_BASE_URL"
+    echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:0:8}..."
+    exit 0
+fi
 exec claude "$@"
