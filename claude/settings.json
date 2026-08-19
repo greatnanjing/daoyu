@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "mcp__daoyu__send_image",
-      "mcp__daoyu-ocr__ocr"
+      "mcp__daoyu-ocr__ocr",
+      "mcp__chrome-devtools__*",
+      "mcp__context7__*",
+      "mcp__web-reader__*"
     ],
     "deny": [
       "Read(//etc/**)", "Read(~/.ssh/**)", "Read(~/.claude/**)",
