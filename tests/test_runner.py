@@ -331,9 +331,9 @@ async def test_daoyu_mcp_merged_all_policies(db, cfg, tmp_path, monkeypatch):
 
 
 async def test_daoyu_mcp_config_bad_static_json_fails_open(db, cfg, tmp_path, monkeypatch):
-    """I-2/F2：静态 mcp.json 存在但 JSON 损坏 → 按空清单合并（仅 daoyu 系统
-    条目），任务不因解析异常穿透而 failed——四档全任务都走该装配路径，坏文件
-    须与缺文件同策略 fail-open。"""
+    """I-2/F2：静态 mcp.json 存在但 JSON 损坏 → 按空清单合并（仅 daoyu/daoyu-ocr
+    两个系统条目），任务不因解析异常穿透而 failed——四档全任务都走该装配路径，
+    坏文件须与缺文件同策略 fail-open。"""
     args_log = tmp_path / "mcp_bad_args.log"
     monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
     claude_dir = cfg.repo_root / "claude"

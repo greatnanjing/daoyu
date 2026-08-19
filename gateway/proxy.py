@@ -161,6 +161,12 @@ def _permissions(db, config, args: str) -> str:
 
 # ---- /mcp：列 claude/mcp.json + on/off 启停（顶层 disabled 标记）----
 
+# 系统条目（runner 临时 mcp config 恒注入，不受 /mcp on/off 管辖）。gateway 不
+# import worker（层次边界），此处字面镜像——键名以 worker/cli_builder.py 的
+# APPROVAL_MCP_SERVER / OCR_MCP_SERVER 为准，两处测试字面钉死防漂移。
+_SYSTEM_MCP = frozenset({"daoyu", "daoyu-ocr"})
+
+
 def _load_mcp(config):
     """读 mcp.json；返回 (path, raw dict)。文件缺失返回 (path, None)。"""
     path = config.repo_root / "claude" / "mcp.json"
@@ -202,7 +208,10 @@ def _mcp(db, config, args: str) -> str:
 
 
 def _mcp_toggle(db, path, raw, servers, disabled, op, target) -> str:
-    """on/off 单个 server：名字精确匹配优先，否则 1-based 序号（与列表一致）。"""
+    """on/off 单个 server：名字精确匹配优先，否则 1-based 序号（与列表一致）。
+    系统条目入口即拦（恒装载，disabled 不管辖——写了也是空操作）。"""
+    if target in _SYSTEM_MCP:
+        return f"{target} 是系统条目（恒装载），不支持启停。"
     name = None
     if target in servers:
         name = target

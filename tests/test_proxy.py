@@ -392,6 +392,16 @@ async def test_mcp_list_system_entries_when_no_static_servers(db, tmp_path):
     assert "daoyu-ocr（本地 OCR）" in reply
 
 
+async def test_mcp_toggle_system_entry_rejected(db, tmp_path):
+    """T2②：系统条目恒装载，/mcp off|on 给专门文案（而非「没有这个 server」），文件不动。"""
+    _write_mcp(tmp_path, _MCP_SRV)
+    reply = await execute_proxy(db, _route("mcp", "off daoyu-ocr"), FakeCfg(tmp_path))
+    assert reply == "daoyu-ocr 是系统条目（恒装载），不支持启停。"
+    reply = await execute_proxy(db, _route("mcp", "on daoyu"), FakeCfg(tmp_path))
+    assert reply == "daoyu 是系统条目（恒装载），不支持启停。"
+    assert _read_mcp(tmp_path) == {"mcpServers": _MCP_SRV}   # mcp.json 未动
+
+
 # ---- /config set 白名单写入 ----
 
 def _read_gateway_config(root):

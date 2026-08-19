@@ -44,12 +44,14 @@ def _tools():
 
 
 def _ocr(args) -> str:
-    from gateway.media import sniff_image
+    from gateway.media import MAX_IMAGE_BYTES, sniff_image
     path = str(args.get("path", ""))
     try:
         raw = Path(path).read_bytes()
     except OSError as e:
         return f"识别失败: 读文件失败 {e}"
+    if len(raw) > MAX_IMAGE_BYTES:   # M-1：与入站/send_image 同一 20MB 上限，防巨图喂引擎
+        return f"识别失败: 图片超过 {MAX_IMAGE_BYTES // 1024 // 1024}MB 上限"
     ext = sniff_image(raw)            # 白名单 PNG/JPEG/GIF/WebP（magic bytes）
     if ext not in ("png", "jpg"):     # 收紧：GIF/WebP 动图非 OCR 合理输入
         return f"识别失败: 不支持的图片格式 {ext}（OCR 仅支持 PNG/JPEG）"

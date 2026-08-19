@@ -343,9 +343,10 @@ class TaskRunner:
         command 用 sys.executable（runner 与 server 同解释器，Windows 下为 venv
         python 绝对路径，可靠无 PATH 依赖）。返回临时文件路径（NamedTemporaryFile
         前缀 daoyu-mcp-、delete=False，调用方负责删除；kill 残留由 runner 启动时
-        按前缀清扫）。静态清单缺文件或坏 JSON/不可读时按空清单合并（daoyu-only）
-        + log.warning——与缺文件同策略 fail-open，不因 mcp.json 异常拖垮任务
-        主路径（M3 起四档 + bg 全任务都走此装配，静默全灭不可接受）。"""
+        按前缀清扫）。静态清单缺文件或坏 JSON/不可读时按空清单合并（仅
+        daoyu/daoyu-ocr 系统条目）+ log.warning——与缺文件同策略 fail-open，
+        不因 mcp.json 异常拖垮任务主路径（M3 起四档 + bg 全任务都走此装配，
+        静默全灭不可接受）。"""
         if static_path.exists():
             try:
                 static = json.loads(static_path.read_text(encoding="utf-8"))
@@ -354,7 +355,8 @@ class TaskRunner:
                             static_path, e)
                 static = {}
         else:
-            log.warning("静态 mcp.json 缺席，按空清单合并（daoyu-only）: %s", static_path)
+            log.warning("静态 mcp.json 缺席，按空清单合并（仅 daoyu/daoyu-ocr "
+                        "系统条目）: %s", static_path)
             static = {}
         # 余项 A：disabled 条目过滤（不进临时文件 = claude 视为不存在）；
         # disabled 为非 list（坏文件）按空处理，list 内非字符串元素（含不可哈希）

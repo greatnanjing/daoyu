@@ -52,6 +52,19 @@ def test_ocr_no_text(monkeypatch, tmp_path):
     assert ocr_mcp._ocr({"path": str(_png(tmp_path))}) == "识别失败: 未识别出文字"
 
 
+def test_ocr_rejects_oversize_image(monkeypatch, tmp_path):
+    """M-1：超上限的图读入后即拒（与入站/send_image 同一 MAX_IMAGE_BYTES 阈值），
+    不喂引擎——阈值临时调小到 1MB、假图 1MB+1 字节造最小用例。"""
+    import gateway.media
+    monkeypatch.setattr(gateway.media, "MAX_IMAGE_BYTES", 1024 * 1024)
+    fake = _FakeEngine([])
+    monkeypatch.setattr(ocr_mcp, "_get_engine", lambda: fake)
+    p = tmp_path / "big.png"
+    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * (1024 * 1024))
+    assert ocr_mcp._ocr({"path": str(p)}) == "识别失败: 图片超过 1MB 上限"
+    assert fake.calls == []                      # 未喂引擎
+
+
 def test_ocr_lazy_import_server_module_only():
     """lazy 契约：import server 模块不加载 rapidocr（子进程隔离验证，防本进程污染）。"""
     code = (f"import sys; sys.path.insert(0, r'{ROOT}'); "
