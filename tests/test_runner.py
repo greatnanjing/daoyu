@@ -405,3 +405,32 @@ async def test_mcp_disabled_absent_means_all_enabled(
 
     log = json.loads(args_log.read_text(encoding="utf-8"))
     assert "context7" in log["mcp_config"]["mcpServers"]
+
+
+async def test_mcp_disabled_non_string_elements_fail_open(
+        db, cfg, tmp_path, monkeypatch):
+    """审查 Minor-3：disabled 为 list 且含非字符串元素（5 可哈希、{} 不可
+    哈希）时只收字符串——不抛 TypeError（与该层 fail-open 语义一致），
+    真实条目名照常过滤、其余条目与 daoyu 系统条目不受影响。"""
+    args_log = tmp_path / "mcp_a2c.log"
+    monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
+    claude_dir = cfg.repo_root / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "mcp.json").write_text(json.dumps({
+        "mcpServers": {
+            "ghost": {"type": "stdio", "command": "x", "args": []},
+            "context7": {"type": "stdio", "command": "x", "args": []},
+        },
+        "disabled": ["ghost", 5, {}],   # 混合：真名 + 可哈希/不可哈希非字符串
+    }), encoding="utf-8")
+    s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+    t = db.create_task(None, s.id, "hi", kind="chat")
+    runner = TaskRunner(db, cfg, process_registry={})
+    await runner.run(db.get_task(t), s)   # 旧实现 set([{}, ...]) 在此抛 TypeError
+
+    assert db.get_task(t).state == "done"          # 不因坏元素失败
+    log = json.loads(args_log.read_text(encoding="utf-8"))
+    servers = log["mcp_config"]["mcpServers"]      # fake_claude 快照的文件内容
+    assert "ghost" not in servers                  # 真实条目名照常被过滤
+    assert "context7" in servers                   # 其余条目照常
+    assert "daoyu" in servers                      # 系统条目恒在

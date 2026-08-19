@@ -200,6 +200,15 @@ async def test_mcp_top_level_not_object(db, tmp_path):
     assert "配置文件格式异常" in reply and "mcp.json" in reply
 
 
+async def test_mcp_bad_json(db, tmp_path):
+    # 语法级坏 JSON（截断）：JSONDecodeError 经 execute_proxy 兜底为
+    # 解析失败文案，而非异常逃逸到 poll_loop（审查 Minor-6a）
+    (tmp_path / "claude").mkdir()
+    (tmp_path / "claude" / "mcp.json").write_text('{"mcpServers": ', encoding="utf-8")
+    reply = await execute_proxy(db, _route("mcp"), FakeCfg(tmp_path))
+    assert "claude/mcp.json 解析失败" in reply
+
+
 # ---- /config 概览（脱敏） ----
 
 def _write_gateway_config(root):
@@ -309,6 +318,10 @@ async def test_mcp_off_by_name_then_on_by_index(db, tmp_path):
     reply = await execute_proxy(db, _route("mcp", "on 2"), FakeCfg(tmp_path))
     assert "已启用" in reply
     assert _read_mcp(tmp_path)["disabled"] == []
+    # 审查 Minor-6c：on 路径 audit detail 断言（off 已有）——detail 记解析后
+    # 的实际名字（"mcp on web-reader"），而非用户输入原文 "on 2"
+    assert _audit_details(db, "config_change") == [
+        "mcp off web-reader", "mcp on web-reader"]
 
 
 async def test_mcp_off_by_index(db, tmp_path):

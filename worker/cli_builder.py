@@ -84,7 +84,8 @@ _WINDOWS_WRAP = {"npx", "uvx"}
 
 def expand_platform(servers: dict, windows: bool) -> dict:
     """静态 mcpServers → 实际拉起形态（纯函数，平台由参数传入可测）。
-    不就地修改入参（浅拷贝条目）；非 dict 条目原样透传（防御坏文件）。"""
+    windows=False 时原样返回传入对象（调用方当只读）；仅 windows=True 分支
+    对白名单条目浅拷贝改写、其余条目原引用。非 dict 条目原样透传（防御坏文件）。"""
     if not windows:
         return servers
     out = {}

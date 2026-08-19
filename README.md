@@ -109,7 +109,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 回复 Y 允许 / N 拒绝
 ```
 
-回 **Y** 允许（Claude 继续执行）、回 **N** 拒绝（Claude 收到拒绝后自行调整）；**5 分钟不回自动拒绝**（fail-safe）。一次只审最早的一条（超过 5.5 分钟的陈旧请求不再劫持回复），其余文本不拦截、照常当聊天处理。注意：`/bg` 后台任务不走微信审批（`--bg` 与审批 flag 组合未实测，保守不传）；strict 档下后台任务的需审批工具会被直接拒绝（仅适合只读任务，详见下文边界）。
+回 **Y** 允许（Claude 继续执行）、回 **N** 拒绝（Claude 收到拒绝后自行调整）；**5 分钟不回自动拒绝**（fail-safe）。一次只审最早的一条（超过 5.5 分钟的陈旧请求不再劫持回复），其余文本不拦截、照常当聊天处理。注意：`/bg` 后台任务不走微信审批（`--permission-prompt-tool` 与 `--bg` 的组合已真机实测落定：bg 不传审批工具）；strict 档下后台任务的需审批工具会被直接拒绝（仅适合只读任务，详见下文边界）。
 
 ### 监控告警（M2）
 
@@ -129,7 +129,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 ## 开发
 
 ```bash
-python -m pytest                        # 全量测试（249 个）
+python -m pytest                        # 全量测试（281 个）
 python -m pytest tests/test_e2e.py -v   # E2E：fake iLink + fake claude 子进程全链路
 python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```

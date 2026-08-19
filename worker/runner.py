@@ -356,9 +356,10 @@ class TaskRunner:
             log.warning("静态 mcp.json 缺席，按空清单合并（daoyu-only）: %s", static_path)
             static = {}
         # 余项 A：disabled 条目过滤（不进临时文件 = claude 视为不存在）；
-        # disabled 为非 list（坏文件）按空处理，与 fail-open 策略一致。
+        # disabled 为非 list（坏文件）按空处理，list 内非字符串元素（含不可哈希）
+        # 一并忽略——整层与 fail-open 策略一致，不因坏文件拖垮任务。
         disabled = static.get("disabled")
-        disabled = set(disabled) if isinstance(disabled, list) else set()
+        disabled = {d for d in disabled if isinstance(d, str)} if isinstance(disabled, list) else set()
         servers = {k: v for k, v in static.get("mcpServers", {}).items()
                    if k not in disabled}
         # 平台无关条目 → 实际拉起形态（Windows 白名单命令包 cmd /c）
