@@ -285,31 +285,31 @@ async def test_watcher_result_paginated(db):
 
 
 def _fork_fail(pool):
-    """blocked 旧路径（fork 失败→超时兜底）测试用：_resume_summary 恒失败
+    """blocked 旧路径（取结果持续失败→超时兜底）测试用：_resume_summary 恒失败
     （置 error detail 返回 ""），watcher 不得完结、走计时/超时。"""
-    def boom(cwd, sid, fork=False):
-        pool._resume_error_detail = "fork cli down"
+    def boom(cwd, sid):
+        pool._resume_error_detail = "resume cli down"
         return ""
     pool._resume_summary = boom
 
 
-async def test_watcher_blocked_forks_result_and_completes(db):
+async def test_watcher_blocked_takes_result_and_completes(db):
     """真机实证（2026-08-19，2.1.233，task #12）：blocked = 会话等用户输入
-    （bg 无输入通道即永久挂起）→ 首次观察即 fork 副本取结果完结 + stop 条目
-    （防孤儿）。fork 用 --fork-session（原会话被 daemon 持有，直接 resume 报错）。"""
+    （bg 无输入通道即永久挂起）→ 首次观察即取结果完结 + stop 条目（防孤儿）。
+    _resume_summary 恒 fork（bg 会话被 daemon 持有，直接 resume 被拒）。"""
     t = _make_bg_task(db)
     pool = make_watch_pool(db)
     stopped = []
     pool._stop_bg = lambda bg_id: stopped.append(bg_id) or ""
     calls = []
-    pool._resume_summary = lambda cwd, sid, fork=False: \
-        calls.append((cwd, sid, fork)) or "目录不是 git 仓库"
+    pool._resume_summary = lambda cwd, sid: \
+        calls.append((cwd, sid)) or "目录不是 git 仓库"
     pool._agents_json = lambda: [_entry(state="blocked")]
 
     await pool._bg_watch_round()
     assert db.get_task(t).state == "done"
-    assert calls == [("/repo", "S-UUID-1", True)]   # fork=True 取 blocked 会话结果
-    assert stopped == ["ab12cd34"]                  # 结果已 fork 出来 → stop 条目
+    assert calls == [("/repo", "S-UUID-1")]        # 取 blocked 会话结果
+    assert stopped == ["ab12cd34"]                 # 结果已取到 → stop 条目
     assert any("补充信息" in x and "目录不是 git 仓库" in x for x in _texts(db))
     assert db.get_state(f"bg_blocked_since:{t}") is None   # 计时已清
 

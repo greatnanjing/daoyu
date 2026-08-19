@@ -299,12 +299,11 @@ class WorkerPool:
             # 真机实证（2026-08-19，2.1.233，task #12）：blocked = 会话回合结束
             # 等待用户后续输入（Claude 结尾反问是常态）——bg 无输入通道，一旦
             # blocked 即永久挂起，任务其实已有产出。原 30min 超时对用户等于无
-            # 回应。改为首次观察即 fork 副本取结果完结（原会话被 daemon 持有，
-            # 直接 --resume 报错，必须 --fork-session，实测）；取到后 stop 条目
-            # 防孤儿累积（M2）。fork 失败（CLI 故障）不完结：走下方超时兜底，
-            # 下一轮再试。
+            # 回应。改为首次观察即取结果完结（_resume_summary 恒 fork，原会话
+            # 被 daemon 持有直接 --resume 会被拒）；取到后 stop 条目防孤儿累积
+            # （M2）。取结果失败（CLI 故障）不完结：走下方超时兜底，下一轮再试。
             result = await asyncio.to_thread(
-                self._resume_summary, cwd, entry.get("sessionId") or "", fork=True)
+                self._resume_summary, cwd, entry.get("sessionId") or "")
             err = self._resume_error_detail
             self._resume_error_detail = ""
             if result or not err:
@@ -403,14 +402,15 @@ class WorkerPool:
                             capture_output=True, timeout=30, env=self._claude_env())
         return (cp.stdout + b"\n" + cp.stderr).decode("utf-8", "replace").strip()
 
-    def _resume_summary(self, cwd: str, claude_uuid: str, fork: bool = False) -> str:
+    def _resume_summary(self, cwd: str, claude_uuid: str) -> str:
         """结果获取的常态路径：真机 done 条目无输出字段（2.1.233 采样，见
-        _BG_RESULT_KEYS 注释）→ 回原 Claude 会话（--resume，cwd 同会话绑定目录）
-        要一份 ≤500 字总结。blocked 条目取结果用 fork=True（原会话被 daemon
-        持有，直接 --resume 报错，实测 2.1.233）。同步 subprocess（watcher 经
-        to_thread 调）；异常/空 → ""（调用方以占位文案完结，避免每轮无限重试）。
-        异常细节写 self._resume_error_detail（线程内不碰 db，调用方审计，M1）。
-        policy 固定 auto：只读回总结，不带审批 MCP（bg 档不传审批工具）。"""
+        _BG_RESULT_KEYS 注释）→ 回原 Claude 会话要一份 ≤500 字总结。
+        恒 --fork-session：bg 会话（含 done/blocked 条目）被 daemon 持有时
+        直接 --resume 被拒（实测 2.1.233，错误只在输出里、rc 还是 0 → 静默
+        空结果，task #13 实证）；fork 总能分叉副本，daemon 已退出时同样可用。
+        同步 subprocess（watcher 经 to_thread 调）；异常/空 → ""。无 result
+        行（被拒/超时/输出形态漂移）置 _resume_error_detail 供调用方审计
+        （线程内不碰 db，M1）。policy 固定 auto：只读回总结，不带审批 MCP。"""
         try:
             argv = build_argv(
                 session_uuid=claude_uuid, resume=True, policy="auto",
@@ -418,7 +418,7 @@ class WorkerPool:
                 budget=Budget(max_turns=2, max_usd=self._cfg.budget.max_usd),
                 mcp_config=self._cfg.repo_root / "claude" / "mcp.json",
                 settings=self._cfg.repo_root / "claude" / "settings.json",
-                fork_session=fork)
+                fork_session=True)
             cp = subprocess.run([*self._claude_prefix(), *argv],
                                 input=_BG_SUMMARY_PROMPT.encode("utf-8"),
                                 capture_output=True, timeout=300,
@@ -429,6 +429,10 @@ class WorkerPool:
                 ev = parser.feed_line(line)
                 if ev is not None and ev.type == "result":
                     result = ev.text
+            if not result:
+                self._resume_error_detail = (
+                    f"resume 无 result 行（rc={cp.returncode}）: "
+                    + (cp.stdout + b"\n" + cp.stderr).decode("utf-8", "replace")[-200:])
             return result
         except Exception as e:
             self._resume_error_detail = repr(e)
