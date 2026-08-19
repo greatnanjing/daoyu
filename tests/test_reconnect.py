@@ -222,3 +222,67 @@ async def test_cleared_token_uses_last_known_copy(db):
     await t._do_reconnect()
     assert ilink.local_tokens_history and ilink.local_tokens_history[0] == ["LAST"]
     assert token_ref["token"] == "NEW"
+
+
+class _StaleTokenILink:
+    """getupdates 恒返回 200 + errcode -14（session timeout）的替身。"""
+
+    def __init__(self, n_max=100):
+        self.n = 0
+        self._n_max = n_max
+
+    async def getupdates(self, buf, token, base_url=None):
+        self.n += 1
+        if self.n > self._n_max:
+            raise asyncio.CancelledError   # 足够轮数后结束测试循环
+        return {"ret": -14, "errcode": -14, "errmsg": "session timeout"}
+
+
+async def test_poll_loop_clears_token_on_repeated_errcode_14(db, monkeypatch):
+    # 官方语义（openclaw-weixin README/monitor.js）：token 失效 = 200 响应体
+    # errcode/ret = -14（session timeout），HTTP 仍 200。连续 5 次防抖后清
+    # token 走重连；只盯 HTTP 401 的旧实现会静默空转。
+    from gateway import app as app_mod
+    _fast_sleep(monkeypatch)
+    ilink = _StaleTokenILink()
+    db.set_state("bot_token", "VALID")
+    token_ref = {"token": "VALID", "base_url": ""}
+    task = asyncio.create_task(
+        app_mod.poll_loop(db, None, ilink, None, None, token_ref))
+
+    async def cleared():
+        while token_ref["token"]:
+            await _orig_sleep(0.01)
+    await asyncio.wait_for(cleared(), 5)
+    assert db.get_state("bot_token") == ""
+    assert ilink.n >= 5   # 第 5 次防抖阈值即触发（清空后循环续跑到取消，n 可略多）
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_poll_loop_errcode_14_debounce_and_other_codes(db, monkeypatch):
+    # 防抖：非连续 5 次 -14 不清；非 -14 的错误码（ret/errcode 其他值）不清。
+    from gateway import app as app_mod
+    _fast_sleep(monkeypatch)
+
+    class Flaky:
+        def __init__(self):
+            self.n = 0
+
+        async def getupdates(self, buf, token, base_url=None):
+            self.n += 1
+            if self.n > 12:
+                raise asyncio.CancelledError
+            # 4 次 -14 + 1 次正常 + 1 次 -14 + …：永远凑不满连续 5 次
+            seq = [{"errcode": -14}, {"ret": 0, "msgs": []}, {"ret": -14},
+                   {"errcode": -99}]
+            return seq[self.n % 4]
+
+    ilink = Flaky()
+    token_ref = {"token": "VALID", "base_url": ""}
+    task = asyncio.create_task(
+        app_mod.poll_loop(db, None, ilink, None, None, token_ref))
+    await _orig_sleep(0.3)
+    assert token_ref["token"] == "VALID"   # 防抖生效未误清
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)

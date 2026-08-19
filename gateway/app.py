@@ -169,9 +169,30 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
 
 
 async def poll_loop(db, cfg, ilink, pool, outbound, token_ref) -> None:
-    """iLink 长轮询收消息。token 失效（连续 401/403）时清空，触发重新扫码路径。"""
+    """iLink 长轮询收消息。token 失效的两条路径都触发清空重连：
+    HTTP 401/403 异常、应用层 errcode/ret = -14（官方语义 "session timeout"，
+    HTTP 仍 200——openclaw-weixin README/monitor.js 实证，只盯 401 会在
+    token 真死时静默空转）。"""
     buf = db.get_state("get_updates_buf", "")
     fails = 0
+    stale = 0
+
+    def _kill_token(reason: str) -> None:
+        # 幂等门：token 已被清空后每轮失败不再重复清/重复告警
+        if not token_ref["token"]:
+            return
+        log.error("bot_token 已失效（%s），清空等待重新登录", reason)
+        db.set_state("bot_token", "")
+        token_ref["token"] = ""
+        # 监控告警（M2）：连接失效推全部白名单用户（自动重连随
+        # ReconnectTimer 的空 token 兜底启动；enqueue 同步 DB 写安全）
+        for user in sorted(getattr(cfg, "whitelist", None) or ()):
+            db.enqueue(None, user,
+                       "⚠️ 微信连接已失效（" + reason + "），正在自动重连——"
+                       "可能需要重新扫码（终端/二维码见服务器）")
+        if outbound:
+            outbound.notify()
+
     while True:
         try:
             result = await ilink.getupdates(buf, token_ref["token"],
@@ -179,25 +200,26 @@ async def poll_loop(db, cfg, ilink, pool, outbound, token_ref) -> None:
         except Exception as e:
             fails += 1
             log.warning("getupdates 失败（连续 %d 次），5s 后重试: %s", fails, e)
+            # 精确匹配 "HTTP 401/403"（ILinkError 文案形如 "POST ... HTTP 401: ..."），
+            # 避免响应体里恰含 "401" 子串的普通错误误清仍有效的 token。
             if fails >= 5 and ("HTTP 401" in str(e) or "HTTP 403" in str(e)):
-                # 幂等门：token 已被清空后每轮失败不再重复清；精确匹配 "HTTP 401/403"
-                # （ILinkError 文案形如 "POST ... HTTP 401: ..."），避免响应体里
-                # 恰含 "401" 子串的普通错误误清仍有效的 token。
-                if token_ref["token"]:
-                    log.error("连续 %d 次 401/403：bot_token 已失效，清空等待重新登录", fails)
-                    db.set_state("bot_token", "")
-                    token_ref["token"] = ""
-                    # 监控告警（M2）：连接失效推全部白名单用户（自动重连随
-                    # ReconnectTimer 的空 token 兜底启动；enqueue 同步 DB 写安全）
-                    for user in sorted(getattr(cfg, "whitelist", None) or ()):
-                        db.enqueue(None, user,
-                                   "⚠️ 微信连接已失效，正在自动重连——"
-                                   "可能需要重新扫码（终端/二维码见服务器）")
-                    if outbound:
-                        outbound.notify()
+                _kill_token("连续 401/403")
             await asyncio.sleep(5)
             continue
         fails = 0
+        # 应用层 -14：ret 正常为 0，errcode 仅错误时出现（可能为 null）。
+        # 连续 5 次防抖（≈25s）与 401 路径一致，防服务端瞬时抖动误杀活 token。
+        code = result.get("errcode")
+        if code is None:
+            code = result.get("ret")
+        if code == -14:
+            stale += 1
+            log.warning("getupdates 返回 -14 session timeout（连续 %d 次）", stale)
+            if stale >= 5:
+                _kill_token("session timeout -14")
+            await asyncio.sleep(5)
+            continue
+        stale = 0
         new_buf = result.get("get_updates_buf")
         if new_buf:
             buf = new_buf
