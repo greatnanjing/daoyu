@@ -349,3 +349,59 @@ async def test_daoyu_mcp_config_bad_static_json_fails_open(db, cfg, tmp_path, mo
     servers = log["mcp_config"]["mcpServers"]      # fake_claude 已快照文件内容
     assert set(servers) == {"daoyu"}               # 坏清单按空合并，无残留条目
     assert servers["daoyu"]["env"]["DAOYU_TOOLS"] == "send_image"   # auto 档
+
+
+async def test_mcp_disabled_filtered_and_platform_expanded(
+        db, cfg, tmp_path, monkeypatch):
+    """余项 A：静态 mcp.json 的 disabled 条目不进临时 mcp config；
+    Windows 白名单命令（npx）在合并层包 cmd /c，Linux 直传。
+    fake_claude 快照的是合并后文件内容——disabled 键本身绝不进临时文件。"""
+    args_log = tmp_path / "mcp_a2.log"
+    monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
+    monkeypatch.setattr("worker.runner.sys.platform", "win32")
+    claude_dir = cfg.repo_root / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "mcp.json").write_text(json.dumps({
+        "mcpServers": {
+            "context7": {"type": "stdio", "command": "npx",
+                          "args": ["-y", "@upstash/context7-mcp"], "env": {}},
+            "web-reader": {"type": "stdio", "command": "uvx",
+                            "args": ["mcp-server-fetch"], "env": {}},
+        },
+        "disabled": ["web-reader", "ghost"],   # ghost：残留名静默忽略
+    }), encoding="utf-8")
+    s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+    t = db.create_task(None, s.id, "hi", kind="chat")
+    runner = TaskRunner(db, cfg, process_registry={})
+    await runner.run(db.get_task(t), s)
+
+    assert db.get_task(t).state == "done"
+    log = json.loads(args_log.read_text(encoding="utf-8"))
+    raw = log["mcp_config"]                      # fake_claude 快照的文件内容
+    servers = raw["mcpServers"]
+    assert "context7" in servers                 # 启用条目保留
+    assert servers["context7"]["command"] == "cmd"          # Windows 包装
+    assert servers["context7"]["args"][0] == "/c"
+    assert "web-reader" not in servers           # disabled 过滤
+    assert "ghost" not in servers                # 残留名忽略（本就不在清单）
+    assert "disabled" not in raw                 # disabled 键不进临时文件
+    assert "daoyu" in servers                    # 系统条目恒注入
+
+
+async def test_mcp_disabled_absent_means_all_enabled(
+        db, cfg, tmp_path, monkeypatch):
+    """旧文件无 disabled 键 → 全部启用（幂等兼容）。"""
+    args_log = tmp_path / "mcp_a2b.log"
+    monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
+    claude_dir = cfg.repo_root / "claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "mcp.json").write_text(json.dumps({"mcpServers": {
+        "context7": {"type": "stdio", "command": "x", "args": []}}}),
+        encoding="utf-8")
+    s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+    t = db.create_task(None, s.id, "hi", kind="chat")
+    runner = TaskRunner(db, cfg, process_registry={})
+    await runner.run(db.get_task(t), s)
+
+    log = json.loads(args_log.read_text(encoding="utf-8"))
+    assert "context7" in log["mcp_config"]["mcpServers"]

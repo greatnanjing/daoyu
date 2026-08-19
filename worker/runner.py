@@ -11,7 +11,8 @@ from pathlib import Path
 
 from common.text import split_text
 from worker.cli_builder import (APPROVAL_MCP_SERVER, BYPASS_DISALLOWED_TOOLS,
-                                POLICY_MODE, build_argv, claude_config_dir)
+                                POLICY_MODE, build_argv, claude_config_dir,
+                                expand_platform)
 from worker.stream import StreamParser, Throttle
 
 log = logging.getLogger(__name__)
@@ -334,8 +335,9 @@ class TaskRunner:
         self._push(task, session.wechat_user, receipt)
 
     def _write_daoyu_mcp_config(self, task, session, static_path: Path, tools: str) -> str:
-        """四档通用临时 mcp config：静态 mcp.json 的 mcpServers 合并 daoyu server
-        条目（tools 按档传 approve,send_image 或 send_image）。daoyu server 是
+        """四档通用临时 mcp config：静态 mcp.json 的 mcpServers 过滤 disabled、
+        按平台展开（Windows npx/uvx 包 cmd /c）后合并 daoyu server 条目
+        （tools 按档传 approve,send_image 或 send_image）。daoyu server 是
         claude 拉起的孙进程，env 经 config 条目注入（claude 子进程 env 无需感知）；
         command 用 sys.executable（runner 与 server 同解释器，Windows 下为 venv
         python 绝对路径，可靠无 PATH 依赖）。返回临时文件路径（NamedTemporaryFile
@@ -353,8 +355,16 @@ class TaskRunner:
         else:
             log.warning("静态 mcp.json 缺席，按空清单合并（daoyu-only）: %s", static_path)
             static = {}
+        # 余项 A：disabled 条目过滤（不进临时文件 = claude 视为不存在）；
+        # disabled 为非 list（坏文件）按空处理，与 fail-open 策略一致。
+        disabled = static.get("disabled")
+        disabled = set(disabled) if isinstance(disabled, list) else set()
+        servers = {k: v for k, v in static.get("mcpServers", {}).items()
+                   if k not in disabled}
+        # 平台无关条目 → 实际拉起形态（Windows 白名单命令包 cmd /c）
+        servers = expand_platform(servers, sys.platform == "win32")
         merged = {"mcpServers": {
-            **static.get("mcpServers", {}),
+            **servers,
             APPROVAL_MCP_SERVER: {
                 "type": "stdio",
                 "command": sys.executable,
