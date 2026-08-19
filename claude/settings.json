@@ -7,7 +7,8 @@
       "mcp__daoyu-ocr__ocr",
       "mcp__chrome-devtools__*",
       "mcp__context7__*",
-      "mcp__web-reader__*"
+      "mcp__web-reader__*",
+      "Bash(curl *)"
     ],
     "deny": [
       "Read(//etc/**)", "Read(~/.ssh/**)", "Read(~/.claude/**)",
