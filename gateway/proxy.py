@@ -235,10 +235,11 @@ def _mcp_toggle(db, path, raw, servers, disabled, op, target) -> str:
 # ---- /config：概览 + set 白名单写入 gateway/config.json（脱敏，不回显任何 secret 值） ----
 
 _THROTTLE_LABELS = (
-    ("min_send_interval_s", "发送间隔"),
-    ("progress_window_s", "进度窗口"),
-    ("page_char_limit", "分页字数"),
-    ("daily_send_limit", "日发送上限"),
+    # 标签附短键名：概览（中文标签）与 set（英文键名）互相可对照
+    ("min_send_interval_s", "发送间隔(min_send_interval_s)"),
+    ("progress_window_s", "进度窗口(progress_window_s)"),
+    ("page_char_limit", "分页字数(page_char_limit)"),
+    ("daily_send_limit", "日发送上限(daily_send_limit)"),
 )
 
 # /config set 白名单：key -> (解析器, 校验器, 类型名)。范围外的键拒绝（whitelist

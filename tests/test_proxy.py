@@ -233,6 +233,8 @@ async def test_config_overview_redacts_secrets(db, tmp_path):
     assert "/srv/proj" in reply
     assert "max_turns=50" in reply and "max_usd=$5.0" in reply
     assert "2000" in reply and "500" in reply
+    # 概览标签附短键名：与 /config set 的英文键名可对照（真机验收 UX 修复）
+    assert "分页字数(page_char_limit)" in reply
     assert "已配置 2 项" in reply
     # 脱敏红线：任何 secret 值不得出现在输出
     assert "sk-" not in reply
