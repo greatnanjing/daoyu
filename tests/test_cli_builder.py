@@ -91,3 +91,47 @@ def test_bypass_disallowed_tools_use_absolute_anchor():
     assert "Read(/etc/**)" not in BYPASS_DISALLOWED_TOOLS
     assert "Edit(/etc/**)" not in BYPASS_DISALLOWED_TOOLS
     assert "Edit(./data/**)" not in BYPASS_DISALLOWED_TOOLS
+
+
+# ---- expand_platform：静态 mcp.json 平台无关 → 实际拉起形态 ----
+
+def _svc(command="npx", args=None):
+    return {"type": "stdio", "command": command, "args": args or [], "env": {}}
+
+
+def test_expand_platform_windows_wraps_npx():
+    from worker.cli_builder import expand_platform
+    servers = {"context7": _svc("npx", ["-y", "@upstash/context7-mcp"]),
+               "web-reader": _svc("uvx", ["--with", "mcp~=1.0", "mcp-server-fetch"])}
+    out = expand_platform(servers, windows=True)
+    assert out["context7"]["command"] == "cmd"
+    assert out["context7"]["args"] == ["/c", "npx", "-y", "@upstash/context7-mcp"]
+    assert out["web-reader"]["command"] == "cmd"
+    assert out["web-reader"]["args"][0] == "/c" and out["web-reader"]["args"][1] == "uvx"
+
+
+def test_expand_platform_linux_passes_through():
+    from worker.cli_builder import expand_platform
+    servers = {"context7": _svc("npx", ["x"])}
+    out = expand_platform(servers, windows=False)
+    assert out["context7"]["command"] == "npx"
+    assert out["context7"]["args"] == ["x"]
+
+
+def test_expand_platform_non_whitelist_command_untouched():
+    # sys.executable / 自定义二进制等白名单外命令：两平台都不包装（Windows 也不）
+    from worker.cli_builder import expand_platform
+    servers = {"daoyu": _svc("C:/venv/Scripts/python.exe", ["worker/approval_mcp.py"])}
+    for win in (True, False):
+        out = expand_platform(servers, windows=win)
+        assert out["daoyu"]["command"] == "C:/venv/Scripts/python.exe", win
+        assert out["daoyu"]["args"] == ["worker/approval_mcp.py"], win
+
+
+def test_expand_platform_does_not_mutate_input():
+    # 原始 dict 不被就地修改（调用方是读文件所得，但防御拷贝语义要显式）
+    from worker.cli_builder import expand_platform
+    servers = {"context7": _svc("npx", ["x"])}
+    expand_platform(servers, windows=True)
+    assert servers["context7"]["command"] == "npx"
+    assert servers["context7"]["args"] == ["x"]

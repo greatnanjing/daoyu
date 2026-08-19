@@ -2,21 +2,22 @@
   "mcpServers": {
     "chrome-devtools": {
       "type": "stdio",
-      "command": "cmd",
-      "args": ["/c", "npx", "chrome-devtools-mcp@latest"],
+      "command": "npx",
+      "args": ["chrome-devtools-mcp@latest"],
       "env": {}
     },
     "context7": {
       "type": "stdio",
-      "command": "cmd",
-      "args": ["/c", "npx", "-y", "@upstash/context7-mcp"],
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
       "env": {}
     },
     "web-reader": {
       "type": "stdio",
-      "command": "cmd",
-      "args": ["/c", "uvx", "--with", "mcp~=1.0", "mcp-server-fetch"],
+      "command": "uvx",
+      "args": ["--with", "mcp~=1.0", "mcp-server-fetch"],
       "env": {}
     }
-  }
+  },
+  "disabled": []
 }

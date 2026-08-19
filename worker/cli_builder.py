@@ -74,3 +74,23 @@ def build_argv(*, session_uuid: str, resume: bool, policy: str, budget: Budget,
     argv += ["--output-format", "stream-json", "--verbose",
              "--include-partial-messages"]
     return argv
+
+
+# 静态 mcp.json 平台无关命令的 Windows 包装白名单：npm 系命令在 Windows 是
+# .cmd shim，asyncio create_subprocess_exec 直启会 FileNotFoundError → 包
+# cmd /c。Linux 直传。白名单外（sys.executable 等绝对路径）两平台都直传。
+_WINDOWS_WRAP = {"npx", "uvx"}
+
+
+def expand_platform(servers: dict, windows: bool) -> dict:
+    """静态 mcpServers → 实际拉起形态（纯函数，平台由参数传入可测）。
+    不就地修改入参（浅拷贝条目）；非 dict 条目原样透传（防御坏文件）。"""
+    if not windows:
+        return servers
+    out = {}
+    for name, svc in servers.items():
+        if isinstance(svc, dict) and svc.get("command") in _WINDOWS_WRAP:
+            svc = {**svc, "command": "cmd",
+                   "args": ["/c", svc["command"], *svc.get("args", [])]}
+        out[name] = svc
+    return out

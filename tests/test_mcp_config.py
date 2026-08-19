@@ -1,7 +1,6 @@
 """claude/mcp.json 静态 MCP 清单 schema 测试：三个 server 键存在、stdio 传输、
-command/args 非空。仅校验结构（命令能否真拉起属真机实测，见 task-4-report）。
-清单的 command 是 Windows 形态（cmd /c npx …）；Linux 部署时改为 npx/uvx 直连、
-去掉 /c 前缀（README 部署节注明），schema 断言两种形态都兼容。"""
+command/args 非空。清单为平台无关形态（command 直写 npx/uvx），实际拉起形态
+由 runner 合并层按平台展开（Windows 包 cmd /c，见 worker/cli_builder.py）。"""
 import json
 from pathlib import Path
 
@@ -34,3 +33,10 @@ def test_mcp_servers_are_stdio_with_nonempty_command_and_args():
         assert all(isinstance(a, str) and a for a in args), f"{name} args 元素均非空字符串"
         env = entry.get("env", {})
         assert isinstance(env, dict), f"{name} env 应为对象（可为空）"
+
+
+def test_mcp_disabled_key_is_optional_list_of_names():
+    raw = json.loads(MCP_JSON.read_text(encoding="utf-8"))
+    disabled = raw.get("disabled", [])
+    assert isinstance(disabled, list), "disabled 应为 list（缺省视为空）"
+    assert all(isinstance(d, str) and d for d in disabled)
