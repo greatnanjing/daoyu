@@ -16,6 +16,14 @@ import sys
 import time
 from pathlib import Path
 
+# 本 server 由 `python <repo>/worker/approval_mcp.py` 拉起：sys.path[0] 是
+# worker/，函数内 `from gateway.media import ...`（send_image）需要 repo 根。
+# 生产 venv 若 pip install -e 过可隐式满足，但部署形态不该决定能否 import
+# （M3 验收在本机系统 Python 下即暴露）→ 自举，幂等。
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 POLL_S = 2
 TIMEOUT_S = int(os.environ.get("DAOYU_APPROVAL_TIMEOUT", "300"))
 
