@@ -2,11 +2,12 @@
 
 /permissions 读写 claude/settings.json（刀鱼专属配置——宿主 ~/.claude 已由
 CLAUDE_CONFIG_DIR 机制隔离，改的就是刀鱼这份），/mcp 列表 + on/off 启停（顶层
-disabled 标记，下一任务生效），/config 只读脱敏；其余 proxy 命令提示暂未提供。
+disabled 标记，下一任务生效），/config 概览 + set 白名单写入（脱敏）；其余 proxy 命令提示暂未提供。
 全部 gateway 本地秒回，不经 Claude。写回统一
 ensure_ascii=False, indent=2 + 临时文件原子替换，效果等价 TUI、天然可版本化。
 """
 import json
+import math
 import os
 import tempfile
 
@@ -231,7 +232,7 @@ def _mcp_toggle(db, path, raw, servers, disabled, op, target) -> str:
     return f"已启用 {name}，下一任务生效。"
 
 
-# ---- /config：只读 gateway/config.json（脱敏，不回显任何 secret 值） ----
+# ---- /config：概览 + set 白名单写入 gateway/config.json（脱敏，不回显任何 secret 值） ----
 
 _THROTTLE_LABELS = (
     ("min_send_interval_s", "发送间隔"),
@@ -243,7 +244,8 @@ _THROTTLE_LABELS = (
 # /config set 白名单：key -> (解析器, 校验器, 类型名)。范围外的键拒绝（whitelist
 # 从微信改 = 放别人进服务器，安全不开放——其余提示改文件）。
 def _is_int(s: str) -> bool:
-    return s.lstrip("-").isdigit()
+    t = s[1:] if s[:1] == "-" else s
+    return s.isascii() and t.isdigit()
 
 
 def _is_float(s: str) -> bool:
@@ -290,7 +292,7 @@ def _config(config, args: str) -> str:
     if parts:
         if parts[0] != "set":
             return f"未知子命令：{parts[0]}\n{CONFIG_USAGE}"
-        return _config_set(config, path, raw, parts[1:])
+        return _config_set(path, raw, parts[1:])
 
     # 概览（现状不变，仅标题改写 + 尾行加用法）
     throttle = raw.get("throttle") or {}
@@ -313,7 +315,7 @@ def _config(config, args: str) -> str:
     ])
 
 
-def _config_set(config, path, raw, rest) -> str:
+def _config_set(path, raw, rest) -> str:
     """set <键> <值>：白名单 + 类型 + 范围校验，读原文改键整体原子写回。
     成功时回执以「已写入」开头——execute_proxy 据此记 audit。"""
     if len(rest) != 2:
@@ -327,6 +329,8 @@ def _config_set(config, path, raw, rest) -> str:
     if not (_is_int(val) if parser is int else _is_float(val)):
         return f"值 {val} 不是合法{type_name}。"
     v = parser(val)
+    if parser is float and not math.isfinite(v):
+        return f"值 {val} 不是有限数值。"
     if not check(v):
         return f"值 {v} 超出允许范围（{key} 的合法范围见 /config 用法行与文档）。"
 

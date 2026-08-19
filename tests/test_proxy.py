@@ -462,3 +462,33 @@ async def test_config_set_atomic_no_tmp_leftover(db, tmp_path):
     await execute_proxy(
         db, _route("config", "set worker.concurrency 2"), FakeCfg(tmp_path))
     assert list((tmp_path / "gateway").glob("*.tmp")) == []
+
+
+async def test_config_set_rejects_weird_numerics(db, tmp_path):
+    """I1/I2：--3/² 在类型层拦（不误报文件损坏）；inf/1e999 拒（预算闸安全底线）。"""
+    _write_gateway_config(tmp_path)
+    weird_int = [("budget.max_turns", "--3"), ("budget.max_turns", "²"),
+                 ("budget.max_turns", "1.5")]
+    for key, val in weird_int:
+        reply = await execute_proxy(db, _route("config", f"set {key} {val}"),
+                                    FakeCfg(tmp_path))
+        assert "整数" in reply and "解析失败" not in reply, (key, val)
+    for key, val in [("budget.max_usd", "inf"), ("budget.max_usd", "1e999"),
+                     ("budget.max_usd", "+infinity")]:
+        reply = await execute_proxy(db, _route("config", f"set {key} {val}"),
+                                    FakeCfg(tmp_path))
+        assert "不是有限数值" in reply, (key, val)
+    assert _read_gateway_config(tmp_path)["budget"] == {"max_turns": 50,
+                                                        "max_usd": 5.0}
+
+
+async def test_config_set_rejects_non_object_section(db, tmp_path):
+    """M1：目标节存在但不是对象 → 明确报错，不改文件。"""
+    (tmp_path / "gateway").mkdir()
+    (tmp_path / "gateway" / "config.json").write_text(
+        json.dumps({"whitelist": ["u@im.wechat"], "worker": "x"}),
+        encoding="utf-8")
+    reply = await execute_proxy(
+        db, _route("config", "set worker.concurrency 2"), FakeCfg(tmp_path))
+    assert "不是对象" in reply and "改 gateway/config.json" in reply
+    assert _read_gateway_config(tmp_path)["worker"] == "x"
