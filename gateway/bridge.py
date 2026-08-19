@@ -2,12 +2,14 @@
 import json
 import os
 import time
+from pathlib import Path
 
 BRIDGE_HELP = {
     "cancel": "/cancel <任务号> — 取消任务",
     "tasks": "/tasks — 查看 running/pending 任务",
     "status": "/status — 队列深度、死信数、当日费用、连接剩余",
     "new": "/new — 在当前目录开新话题（新 Claude 会话，上下文从零开始）",
+    "adopt": "/adopt [uuid前缀] — 收养终端里创建的 Claude 会话为当前话题（无参数=最新一个）",
     "cd": "/cd <目录|#序号> — 切目录或切话题（#序号见 /sessions）",
     "sessions": "/sessions — 按目录列出全部话题（/cd #n 切换、/new 开新）",
     "policy": "/policy <auto|strict|bypass|plan> — 当前话题的权限档位",
@@ -31,6 +33,84 @@ POLICIES = ("auto", "strict", "bypass", "plan")
 def _active_session(db, from_user: str, default_cwd: str):
     """当前话题绑定（chat /policy /bg /cancel 共用；get_active_binding 语义）。"""
     return db.get_active_binding(from_user, default_cwd)
+
+
+def _scan_external_transcripts(db, repo_root) -> list[dict]:
+    """/adopt 候选：claude-home projects 下未被刀鱼管理的会话 transcript，
+    按 mtime 降序（uuid 字典序决胜，同秒确定）。目录不存在（未启用隔离配置/
+    从未跑过任务）返回空。跨项目目录 glob——slug 格式平台有异（Linux 连字符、
+    Windows 盘符形态），不猜测、直接全扫。"""
+    projects = Path(repo_root) / "data" / "claude-home" / "projects"
+    if not projects.is_dir():
+        return []
+    out = []
+    for f in projects.glob("*/*.jsonl"):
+        if db.get_session_by_uuid(f.stem) is None:
+            out.append({"uuid": f.stem, "path": f, "mtime": f.stat().st_mtime})
+    out.sort(key=lambda c: (-c["mtime"], c["uuid"]))
+    return out
+
+
+def _transcript_meta(path) -> tuple[str | None, str]:
+    """transcript 首段提取 (cwd, 首条用户消息预览≤30字)。cwd 取首个带 cwd 字段
+    的行；预览取首条 type==user 且 content 为纯字符串的行（数组形态是
+    tool_result 等结构，非人类 prompt）。坏行跳过；首段全无则 cwd=None、
+    预览兜底。只读前 200 行，外部长会话不整文件解析。"""
+    cwd = None
+    preview = None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for i, line in enumerate(fh):
+            if i >= 200:
+                break
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if cwd is None and isinstance(ev.get("cwd"), str):
+                cwd = ev["cwd"]
+            if preview is None and ev.get("type") == "user":
+                content = (ev.get("message") or {}).get("content")
+                if isinstance(content, str) and content.strip():
+                    preview = " ".join(content.split())[:30]
+            if cwd is not None and preview is not None:
+                break
+    return cwd, preview or "（外部会话）"
+
+
+def _adopt(db, arg: str, from_user: str, config) -> str:
+    """收养外部会话：候选扫描 → 命中建话题行并切为当前话题。参数支持完整 uuid
+    或 ≥8 位唯一前缀（手机输入完整 36 位不现实）；无参数取最新。收养前提是
+    transcript 在刀鱼隔离配置目录（CLAUDE_CONFIG_DIR 同源），宿主 ~/.claude 下
+    的会话对 runner 不可见，提示里给创建命令。"""
+    cands = _scan_external_transcripts(db, getattr(config, "repo_root", "."))
+    if arg:
+        arg = arg.lower()
+        hit = next((c for c in cands if c["uuid"] == arg), None)
+        if hit is None and len(arg) >= 8:
+            prefixed = [c for c in cands if c["uuid"].startswith(arg)]
+            if len(prefixed) == 1:
+                hit = prefixed[0]
+            elif len(prefixed) > 1:
+                return (f"前缀 {arg} 匹配到 {len(prefixed)} 个会话，请加长：\n"
+                        + "\n".join(f"  ·{c['uuid'][:8]}" for c in prefixed[:5]))
+        if hit is None:
+            if db.get_session_by_uuid(arg):
+                return "该会话已是刀鱼话题（/sessions 查看）。"
+            return f"未找到 uuid 为 {arg} 的可收养会话（须在刀鱼配置目录下创建）。"
+    else:
+        if not cands:
+            return ("未找到可收养的外部会话。终端里须用刀鱼隔离配置目录创建：\n"
+                    "CLAUDE_CONFIG_DIR=<repo>/data/claude-home claude\n"
+                    "（宿主 ~/.claude 下建的会话刀鱼不可见）")
+        hit = cands[0]
+    cwd, preview = _transcript_meta(hit["path"])
+    if cwd is None:
+        return f"会话 {hit['uuid'][:8]} 的 transcript 无法解析出工作目录，收养中止。"
+    db.adopt_session(from_user, cwd, hit["uuid"])
+    db.set_active_cwd(from_user, cwd)
+    db.audit("adopt", f"user={from_user} uuid={hit['uuid']} cwd={cwd}")
+    return (f"已收养外部会话为当前话题（目录 {cwd}）：{preview}\n"
+            f"（uuid ·{hit['uuid'][:8]}；该会话若仍在终端中打开，先退出再发消息）")
 
 
 async def execute_bridge(db, pool, route, from_user: str, config) -> str:
@@ -120,9 +200,12 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
             for idx, s in items:
                 mark = "▶" if s.id == active.id else "  "
                 summary = db.last_task_summary(s.id) or "（无任务）"
-                lines.append(f"{mark} #{idx}  {summary}  {_rel_time(s.last_active_at)}")
-        lines.append("切换：/cd #序号（话题）或 /cd <目录>；/new 开新话题")
+                lines.append(f"{mark} #{idx}  {summary}  {_rel_time(s.last_active_at)}"
+                             f"  ·{s.claude_uuid[:8]}")
+        lines.append("切换：/cd #序号（话题）或 /cd <目录>；/new 开新；/adopt 收养终端会话")
         return "\n".join(lines)
+    if cmd == "adopt":
+        return _adopt(db, route.args.strip(), from_user, config)
     if cmd == "policy":
         arg = route.args.strip().lower()
         s = _active_session(db, from_user, config.default_cwd)

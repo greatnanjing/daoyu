@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），297 个测试全绿（`python -m pytest`）；M2 已实现（2026-08-16）。M3 全部完成、真机验收通过（2026-08-19，余项 B 四项全过：OCR 主链路 / /mcp 列表呈现系统条目 / /mcp off 系统条目拦截 / /bg 回归）：媒体收发（图片双向）+ /mcp 启停与 /config 写入（余项 A，spec 2026-08-19-mcp-config-writable-design）+ OCR MCP（余项 B，spec 2026-08-19-ocr-mcp-design）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
+**M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），304 个测试全绿（`python -m pytest`）；M2 已实现（2026-08-16）。M3 全部完成、真机验收通过（2026-08-19，余项 B 四项全过：OCR 主链路 / /mcp 列表呈现系统条目 / /mcp off 系统条目拦截 / /bg 回归）：媒体收发（图片双向）+ /mcp 启停与 /config 写入（余项 A，spec 2026-08-19-mcp-config-writable-design）+ OCR MCP（余项 B，spec 2026-08-19-ocr-mcp-design）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
 
 - [docs/PRD.md](docs/PRD.md) — 产品需求（功能 FR-1~10、非功能需求、里程碑 M1/M2/M3、范围外）
 - [docs/TRD.md](docs/TRD.md) — 技术设计（架构、SQLite 数据模型、claude CLI 调用规范、命令路由、安全设计、测试策略）
@@ -21,7 +21,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **MCP 装载**：`claude/mcp.json` 已装 chrome-devtools / context7 / web-reader 三台（平台无关形态——command 直写 npx/uvx，runner 合并层 Windows 包 cmd /c（白名单 {npx,uvx}）+ 过滤 disabled；Linux 侧 chrome-devtools 由 `inject_linux_chrome` 按约定路径注入 headless Chrome 装配——`~/.cache/puppeteer/chrome-headless-shell/linux-*`（npmmirror 装，手动拼 URL 会 404 必须走 `@puppeteer/browsers`）+ `~/chrome-libs` 解包 libasound 免 sudo，注入 `--headless --isolated --executablePath` + LD_LIBRARY_PATH + 清死代理；2026-08-19 真机验证 Next.js SPA 完整渲染，未安装 no-op fail-open）；另有 daoyu-ocr 系统条目（RapidOCR 本地 OCR，runner 恒注入、不受 /mcp 启停管辖，余项 B）。
 - **配置代理命令**：[gateway/proxy.py](gateway/proxy.py) — `/permissions`（列表 + deny add/del + allow add，写 `claude/settings.json`）、`/mcp`（列表 + on/off 启停，写 mcp.json 顶层 disabled）、`/config`（概览 + set 七键白名单写 gateway/config.json，重启生效）。
 - **同目录多话题**：sessions 表 `UNIQUE(wechat_user, cwd, claude_uuid)`（ensure_schema 对旧表做无损迁移：建 v2 → 搬行 → 换名，幂等）。`/new` 当前目录开新话题；`/sessions` 两级展示（目录分组 + 组内全局序号，序号按 last_active_at DESC）；`/cd #n` 切话题、`/cd <路径>` 切目录（指向该目录最新话题，无则建）；当前话题指针在 state KV `active_session:<wechat_user>`（[common/db.py](common/db.py) `get_active_binding`，chat/policy/bg/cancel 均走它；老库无指针时经旧 `cwd:` 指针回退并回写）。`/policy` 每话题独立。
-- **`/sessions`**：会话列表（目录 + 最近任务摘要）与 `/cd #n` 序号切换（见上一条：现为话题两级展示）。
+- **`/sessions`**：会话列表（目录 + 最近任务摘要 + uuid 短码）与 `/cd #n` 序号切换（见上一条：现为话题两级展示）。
+- **`/adopt [uuid前缀]`**：收养终端 TUI 创建的 Claude 会话为当前话题（[gateway/bridge.py](gateway/bridge.py) 扫描 `data/claude-home/projects/*/*.jsonl` 未管理 transcript，mtime 降序无参取最新、≥8 位唯一前缀指定；从 transcript 首段提取 cwd 与首条 prompt 做标签；`db.adopt_session` 建 sessions 行并置 `claude_session_inited:<uuid>`——已存在 uuid 必须走 `--resume`，`--session-id` 会报错）。前提：终端会话用 `CLAUDE_CONFIG_DIR=<repo>/data/claude-home claude` 创建（微信 ↔ 终端交叉接续同一话题的反向通道；宿主 `~/.claude` 会话对 runner 不可见）。同会话并发 `--resume` 冲突硬约束不变——终端仍开着该会话时先退出。
 - **监控告警**：死信 / 日限熔断 / 预算耗尽死信 / 连接失效清 token 四处自动推微信 ⚠️（复用出站通道，发全部白名单）。
 
 **M3 功能清单**（媒体收发，图片双向；**真机验收通过 2026-08-19**，spec §5 五项全过。验收期实测修正三处：出站 `media.aes_key` 形态 = base64(hex32 ASCII)（传 base64(raw16B) 微信端空白图）；MCP 工具需 settings allow（acceptEdits 不放行 MCP 工具、headless 无确认通道直接 deny）；bg 摘除 `--mcp-config`（daemon 异步读与临时文件即删竞态，见硬性约束））：
@@ -84,7 +85,7 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 
 微信命令与 Claude Code CLI **同一套语法、同一个命名空间**，不发明第二套命令体系。路由顺序：
 
-1. **桥命令**（`/cancel` `/tasks` `/status` `/cd` `/sessions` `/policy` `/bg` `/new`）→ gateway 本地执行，秒回。另有 iLink 运维命令 `/time` `/重新连接`（管连接本身，与 Claude 无关）。
+1. **桥命令**（`/cancel` `/tasks` `/status` `/cd` `/sessions` `/policy` `/bg` `/new` `/adopt`）→ gateway 本地执行，秒回。另有 iLink 运维命令 `/time` `/重新连接`（管连接本身，与 Claude 无关）。
 2. **代理**：TUI 交互专属命令（静态维护清单：/permissions /hooks /plugins /login /config /mcp /vim /terminal-setup）→ 拦截后以相同命令名与参数格式操作同一底层配置，输出文字版。已实现 /permissions（读写）、/mcp（列表 + on/off 启停）、/config（概览 + set 白名单键）；其余提示暂未提供。**代理先于转发判定**——实测 init `slash_commands` 含 `config`/`mcp`，若转发优先会把代理命令截走原样发给 headless claude。
 3. **转发**：headless 可用命令集（启动时从 `system/init` 事件的 `slash_commands` 同步）→ 原样作为 prompt 传给 claude。
 4. 都不是 → 未知命令提示 + 最接近命令建议。

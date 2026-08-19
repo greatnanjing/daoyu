@@ -86,7 +86,8 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 | | `/bg <任务描述>` | 转入后台长任务（`claude --bg`）：秒回执，完成后自动分页推送结果 |
 | | `/cd <目录\|#序号>` | 切目录（指向该目录最新话题，无则自动建）或按 `/sessions` 全局序号切话题；无参查看当前目录话题 |
 | | `/new` | 在当前目录开新话题（新 Claude 会话，上下文从零开始） |
-| | `/sessions` | 按目录两级列出全部话题（全局序号 + ▶ 当前 + 最近任务摘要 + 活跃时间），`/cd #n` 切换 |
+| | `/adopt [uuid前缀]` | 收养终端里创建的 Claude 会话为当前话题（无参 = 最新一个；会话须用 `CLAUDE_CONFIG_DIR=<repo>/data/claude-home claude` 创建，微信 ↔ 终端 TUI 由此可交叉接续同一话题） |
+| | `/sessions` | 按目录两级列出全部话题（全局序号 + ▶ 当前 + 最近任务摘要 + 活跃时间 + uuid 短码），`/cd #n` 切换 |
 | | `/policy <auto\|strict\|bypass\|plan>` | 查看或切换当前话题的权限档位（每话题独立） |
 | 配置代理（改刀鱼专属配置，效果同 TUI） | `/permissions` | 查看 deny/allow/ask 列表；`/permissions deny add <规则>`、`/permissions deny del <序号>`、`/permissions allow add <规则>` 读写 `claude/settings.json` |
 | | `/mcp` | 列出 `claude/mcp.json` 已装 MCP server（✅/⛔ 状态）；`/mcp off|on <序号|名字>` 启停（下一任务生效，停用不丢配置） |

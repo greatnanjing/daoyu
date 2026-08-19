@@ -247,6 +247,29 @@ class Database:
         self.set_active_session(wechat_user, binding.id)
         return binding
 
+    def get_session_by_uuid(self, claude_uuid: str) -> SessionBinding | None:
+        """按 claude_uuid 查话题行（/adopt 判重用；uuid 全局唯一，无用户维度）。"""
+        row = self._conn.execute("SELECT * FROM sessions WHERE claude_uuid=?",
+                                 (claude_uuid,)).fetchone()
+        return SessionBinding(**dict(row)) if row else None
+
+    def adopt_session(self, wechat_user: str, cwd: str, claude_uuid: str) -> SessionBinding:
+        """/adopt 收养外部会话：以既有 claude_uuid 建话题行并设为当前话题。
+        与 create_topic 两点差异：uuid 不新生成；必须置 claude_session_inited:
+        <uuid>——该会话已有 transcript，runner 首次调用要走 --resume 而非
+        --session-id（对已存在 uuid 用 --session-id 会报错）。"""
+        now = int(time.time())
+        cur = self._conn.execute(
+            "INSERT INTO sessions(wechat_user, cwd, claude_uuid, policy, created_at, last_active_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (wechat_user, cwd, claude_uuid, "auto", now, now))
+        self._conn.commit()
+        row = self._conn.execute("SELECT * FROM sessions WHERE id=?", (cur.lastrowid,)).fetchone()
+        self.set_state(f"claude_session_inited:{claude_uuid}", "1")
+        binding = SessionBinding(**dict(row))
+        self.set_active_session(wechat_user, binding.id)
+        return binding
+
     def latest_topic_in(self, wechat_user: str, cwd: str) -> SessionBinding | None:
         """该目录最新话题行（/cd <路径> 指向用）；目录无话题返回 None。"""
         row = self._conn.execute(

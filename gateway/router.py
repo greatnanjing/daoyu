@@ -5,7 +5,7 @@ headless 下非预期行为），永远到不了 proxy 实现。"""
 import difflib
 from dataclasses import dataclass
 
-BRIDGE_COMMANDS = {"cancel", "tasks", "status", "cd", "sessions", "policy", "bg", "new"}
+BRIDGE_COMMANDS = {"cancel", "tasks", "status", "cd", "sessions", "policy", "bg", "new", "adopt"}
 ILINK_COMMANDS = {"time", "重新连接", "help"}
 # TUI 交互专属（静态维护，官方 commands 文档），M2 提供完整代理实现
 PROXY_COMMANDS = {"permissions", "hooks", "plugins", "login", "config", "mcp",

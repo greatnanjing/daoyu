@@ -232,3 +232,105 @@ async def test_ilink_ops(db):
                                     "u@im.wechat", cfg, None)
     assert "确认" in reconn
     assert db.get_state("reconnect_confirm") == "u@im.wechat"
+
+
+# ---- /adopt：收养终端创建的外部会话 ----
+
+class AdoptCfg(FakeCfg):
+    """FakeCfg 补 repo_root（/adopt 扫描 data/claude-home/projects 用）。"""
+
+    def __init__(self, repo_root):
+        super().__init__()
+        self.repo_root = repo_root
+
+
+def _write_transcript(tmp_path, uid: str, cwd: str, prompt: str, mtime=None):
+    import os as _os
+    import time as _time
+    d = tmp_path / "data/claude-home/projects/-some-slug"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"{uid}.jsonl"
+    lines = [
+        '{"type":"system","subtype":"init","cwd":"%s","session_id":"%s"}' % (cwd, uid),
+        '{"type":"user","message":{"role":"user","content":"%s"},"cwd":"%s"}' % (prompt, cwd),
+        '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}',
+    ]
+    f.write_text("\n".join(lines), encoding="utf-8")
+    if mtime is not None:
+        _os.utime(f, (mtime, mtime))
+    return f
+
+
+async def test_adopt_newest_external(db, tmp_path):
+    cfg = AdoptCfg(tmp_path)
+    _write_transcript(tmp_path, "11111111-aaaa-bbbb-cccc-000000000001",
+                      "/home/u/proj", "帮我看看这个报错", mtime=1000)
+    _write_transcript(tmp_path, "11111111-aaaa-bbbb-cccc-000000000002",
+                      "/home/u/other", "更早的一个话题", mtime=500)
+    db.get_or_create_session("u@im.wechat", "/repo")
+    reply = await execute_bridge(db, FakePool([]), _route("adopt", ""),
+                                 "u@im.wechat", cfg)
+    assert "帮我看看这个报错" in reply and "/home/u/proj" in reply
+    # 当前话题已切到收养行；inited 状态已置（runner 将走 --resume）
+    s = db.get_active_binding("u@im.wechat", "/repo", touch=False)
+    assert s.claude_uuid == "11111111-aaaa-bbbb-cccc-000000000001"
+    assert s.cwd == "/home/u/proj"
+    assert db.get_state("claude_session_inited:11111111-aaaa-bbbb-cccc-000000000001") == "1"
+    assert db.get_active_cwd("u@im.wechat", "/d") == "/home/u/proj"
+
+
+async def test_adopt_by_unique_prefix(db, tmp_path):
+    cfg = AdoptCfg(tmp_path)
+    _write_transcript(tmp_path, "99999999-aaaa-bbbb-cccc-000000000001",
+                      "/home/u/proj", "最新话题", mtime=2000)
+    _write_transcript(tmp_path, "abcdef12-3333-4444-5555-666666666666",
+                      "/home/u/old", "指定要这个", mtime=100)
+    reply = await execute_bridge(db, FakePool([]), _route("adopt", "ABCDEF12"),
+                                 "u@im.wechat", cfg)
+    assert "指定要这个" in reply
+    assert db.get_active_binding("u@im.wechat", "/repo", touch=False).claude_uuid \
+        == "abcdef12-3333-4444-5555-666666666666"
+
+
+async def test_adopt_prefix_ambiguous(db, tmp_path):
+    cfg = AdoptCfg(tmp_path)
+    _write_transcript(tmp_path, "abcdef12-0000-0000-0000-000000000001",
+                      "/a", "第一个", mtime=100)
+    _write_transcript(tmp_path, "abcdef12-0000-0000-0000-000000000002",
+                      "/b", "第二个", mtime=200)
+    reply = await execute_bridge(db, FakePool([]), _route("adopt", "abcdef12"),
+                                 "u@im.wechat", cfg)
+    assert "匹配到 2 个" in reply
+
+
+async def test_adopt_already_managed(db, tmp_path):
+    cfg = AdoptCfg(tmp_path)
+    s = db.get_or_create_session("u@im.wechat", "/repo")
+    reply = await execute_bridge(db, FakePool([]), _route("adopt", s.claude_uuid),
+                                 "u@im.wechat", cfg)
+    assert "已是刀鱼话题" in reply
+
+
+async def test_adopt_no_candidates(db, tmp_path):
+    cfg = AdoptCfg(tmp_path)
+    db.get_or_create_session("u@im.wechat", "/repo")
+    reply = await execute_bridge(db, FakePool([]), _route("adopt", ""),
+                                 "u@im.wechat", cfg)
+    assert "CLAUDE_CONFIG_DIR" in reply
+
+
+async def test_adopt_short_prefix_rejected(db, tmp_path):
+    # <8 位前缀不启用匹配（误命中面太大），走未找到路径
+    cfg = AdoptCfg(tmp_path)
+    _write_transcript(tmp_path, "abcdef12-0000-0000-0000-000000000001",
+                      "/a", "第一个", mtime=100)
+    reply = await execute_bridge(db, FakePool([]), _route("adopt", "abcd"),
+                                 "u@im.wechat", cfg)
+    assert "未找到" in reply
+
+
+async def test_sessions_shows_uuid_hint(db, tmp_path):
+    db.get_or_create_session("u@im.wechat", "/repo")
+    reply = await execute_bridge(db, FakePool([]), _route("sessions", ""),
+                                 "u@im.wechat", FakeCfg())
+    assert "·" in reply and "/adopt" in reply
