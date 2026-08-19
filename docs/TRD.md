@@ -204,7 +204,7 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 | playwright | 浏览器自动化备选 | 可选，默认关 |
 
 - 会话级变更（`/model` 等）：转发官方命令，只影响当前会话；
-- 持久级变更（`/config` `/permissions` `/mcp`）：写 `claude/settings.json` / `mcp.json`，下次调用生效；文件在 git 内 → 天然版本化、可回滚、可审计（配合 audit_log）。
+- 持久级变更（`/config` `/permissions` `/mcp`）：写 `claude/settings.json` / `mcp.json`，下次调用生效；文件在 git 内 → 天然版本化、可回滚、可审计（配合 audit_log）。/mcp on/off 启停（写 mcp.json 顶层 disabled、下一任务生效）与 /config set 七键白名单写入（写 gateway/config.json、重启生效）已提供（2026-08-19 余项 A，spec `2026-08-19-mcp-config-writable-design`）。
 
 ## 8. 安全设计
 

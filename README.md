@@ -54,7 +54,7 @@ journalctl -u daoyu -f        # 看到「刀鱼已启动（gateway+worker 同进
 
 Windows 开发机（Git Bash）仅 venv 内路径不同：`.venv/Scripts/python`、`.venv/Scripts/daoyu-login`（Linux 生产为 `.venv/bin/…`），其余步骤一致。
 
-`claude/mcp.json`（MCP server 清单，进 git）内置条目为 Windows 形态（`command: "cmd"` + `args: ["/c", "npx", …]`）；Linux 服务器部署时需把各条目的 `command` 改为 `npx` / `uvx`、`args` 去掉 `/c` 前缀，并确认已装 Node.js（含 npx）与 [uv](https://docs.astral.sh/uv/)（提供 uvx）。
+`claude/mcp.json`（MCP server 清单，进 git）为平台无关形态（各条目 `command` 直写 `npx` / `uvx`）：Windows 下由 runner 合并层自动包一层 `cmd /c`（白名单 {npx,uvx}），Linux 直传、部署无需手改清单；只需确认已装 Node.js（含 npx）与 [uv](https://docs.astral.sh/uv/)（提供 uvx）。
 
 **MCP 冷缓存预热**：Linux 首次调用时 npx/uvx 要现下载包（分钟级，期间 Claude 可能等不到 server 就绪）。部署后先手动各跑一次、等下载完成再 Ctrl+C 中断，即可把包缓存好：
 
@@ -89,8 +89,8 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 | | `/sessions` | 按目录两级列出全部话题（全局序号 + ▶ 当前 + 最近任务摘要 + 活跃时间），`/cd #n` 切换 |
 | | `/policy <auto\|strict\|bypass\|plan>` | 查看或切换当前话题的权限档位（每话题独立） |
 | 配置代理（改刀鱼专属配置，效果同 TUI） | `/permissions` | 查看 deny/allow/ask 列表；`/permissions deny add <规则>`、`/permissions deny del <序号>`、`/permissions allow add <规则>` 读写 `claude/settings.json` |
-| | `/mcp` | 列出 `claude/mcp.json` 已装 MCP server（只读） |
-| | `/config` | 查看 gateway 配置概要（节流/预算/白名单数，secret 只计个数不回显） |
+| | `/mcp` | 列出 `claude/mcp.json` 已装 MCP server（✅/⛔ 状态）；`/mcp off|on <序号|名字>` 启停（下一任务生效，停用不丢配置） |
+| | `/config` | 查看 gateway 配置概要（节流/预算/白名单数，secret 只计个数不回显）；`set <键> <值>` 改七键白名单（throttle/budget/worker.concurrency，重启生效） |
 | iLink 运维 | `/help` | 全部可用命令（按实际能力动态生成） |
 | | `/time` | 连接剩余时间 |
 | | `/重新连接` | 立即重新扫码连接（Y/N 确认） |
@@ -153,7 +153,7 @@ python -m gateway.app                   # 前台调试运行（不进 systemd）
 - **`/bg` 不装载 MCP 工具**（真机实证）：`--mcp-config` 与 `--bg` 结构性不兼容（后台 daemon 异步读配置与临时文件即删竞态），已摘除——后台任务无 `send_image` 等 MCP 能力，需要时同步跑；回执明示。
 - **bypass 档 `/bg` 带 `--disallowedTools` 工具级兜底**（与 `-p` 同源常量；`--bg` 下 acceptEdits 与 Bash 正常放行已真机实证）。
 - **OCR / 视觉 MCP**（tesseract-ocr / ai-vision）：媒体入站打通后 Claude 用 Read 原生看图，按实际体验再评估；当前已装 chrome-devtools / context7 / web-reader 三台。
-- **`/mcp`、`/config` 只读**：启停单个 MCP server、运行时改 gateway 配置后续提供（改文件 + 重启即生效）。
+- **`/mcp`、`/config`**：/mcp 列表 + on/off 启停（下一任务生效，停用不丢配置）；/config 概览 + set 改常用键（throttle/budget/concurrency 七键，重启生效）。whitelist 等不开放，改 gateway/config.json。
 - **语音/文件/视频收发**：仍为二期（图片收发 M3 已实现，见下节）。
 
 ## M3 媒体收发（图片双向，已真机验收 2026-08-19）

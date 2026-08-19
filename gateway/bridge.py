@@ -22,8 +22,8 @@ ILINK_HELP = {
 # 不列——/help 只列当前实际可用命令）
 PROXY_HELP = {
     "permissions": "/permissions — 查看权限规则；deny add/del、allow add 读写",
-    "mcp": "/mcp — 列出已装 MCP server（只读）",
-    "config": "/config — 查看 gateway 配置概要（脱敏，只读）",
+    "mcp": "/mcp — 列出 MCP server；off/on <序号|名字> 启停（下一任务生效）",
+    "config": "/config — gateway 配置概览；set <键> <值> 改常用键（重启生效）",
 }
 POLICIES = ("auto", "strict", "bypass", "plan")
 

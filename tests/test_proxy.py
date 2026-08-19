@@ -1,4 +1,4 @@
-"""M2 Task 5: 配置代理命令文字版（/permissions 读写 /mcp /config 只读）。"""
+"""配置代理命令文字版（/permissions 读写 /mcp 列表+启停 /config 概览+set）。"""
 import json
 
 from gateway.app import handle_inbound
@@ -172,7 +172,7 @@ async def test_permissions_deny_del_non_numeric(db, tmp_path):
     assert "用法" in reply
 
 
-# ---- /mcp 只读 ----
+# ---- /mcp 列表 ----
 
 async def test_mcp_lists_servers(db, tmp_path):
     (tmp_path / "claude").mkdir()
@@ -200,7 +200,7 @@ async def test_mcp_top_level_not_object(db, tmp_path):
     assert "配置文件格式异常" in reply and "mcp.json" in reply
 
 
-# ---- /config 只读脱敏 ----
+# ---- /config 概览（脱敏） ----
 
 def _write_gateway_config(root):
     (root / "gateway").mkdir(exist_ok=True)

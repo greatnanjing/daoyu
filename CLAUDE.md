@@ -18,8 +18,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **strict 档审批**：`/policy strict` 后任务带 `--permission-prompt-tool mcp__daoyu__approve`；[worker/approval_mcp.py](worker/approval_mcp.py)（stdio JSON-RPC server，经临时合并 mcp config 由 claude 拉起、任务结束即删）写 approvals 行 + outbox 🔐 推微信；gateway `handle_inbound` 拦截 Y/N 单字 decide（300s 超时 = expired = 拒绝）。
 - **`/bg` 长任务**：桥命令建 bg 任务 → runner `claude --bg` 启动分支（bg_id 落盘即回执）→ [worker/pool.py](worker/pool.py) `_bg_watcher` 轮询 `claude agents --json --all` 推进（真机 2.1.233 三终态：`done`=完成/`blocked`=等用户输入，均 fork 取结果推送完结、`failed`=失败重试；条目无输出字段，结果靠 `--fork-session` 回原会话取——直接 `--resume` 被 daemon 持有拒绝且 rc=0；消失取消）；`/cancel` 走 `claude stop`。
-- **MCP 装载**：`claude/mcp.json` 已装 chrome-devtools / context7 / web-reader 三台（实测 connected；Windows 形态 cmd /c，Linux 部署改直用 npx/uvx + 冷缓存预热）。
-- **配置代理命令**：[gateway/proxy.py](gateway/proxy.py) — `/permissions`（列表 + deny add/del + allow add，写 `claude/settings.json`）、`/mcp`、`/config`（只读脱敏）。
+- **MCP 装载**：`claude/mcp.json` 已装 chrome-devtools / context7 / web-reader 三台（实测 connected；平台无关形态——command 直写 npx/uvx，runner 合并层 Windows 包 cmd /c（白名单 {npx,uvx}）+ 过滤 disabled，Linux 直传 + 冷缓存预热）。
+- **配置代理命令**：[gateway/proxy.py](gateway/proxy.py) — `/permissions`（列表 + deny add/del + allow add，写 `claude/settings.json`）、`/mcp`（列表 + on/off 启停，写 mcp.json 顶层 disabled）、`/config`（概览 + set 七键白名单写 gateway/config.json，重启生效）。
 - **同目录多话题**：sessions 表 `UNIQUE(wechat_user, cwd, claude_uuid)`（ensure_schema 对旧表做无损迁移：建 v2 → 搬行 → 换名，幂等）。`/new` 当前目录开新话题；`/sessions` 两级展示（目录分组 + 组内全局序号，序号按 last_active_at DESC）；`/cd #n` 切话题、`/cd <路径>` 切目录（指向该目录最新话题，无则建）；当前话题指针在 state KV `active_session:<wechat_user>`（[common/db.py](common/db.py) `get_active_binding`，chat/policy/bg/cancel 均走它；老库无指针时经旧 `cwd:` 指针回退并回写）。`/policy` 每话题独立。
 - **`/sessions`**：会话列表（目录 + 最近任务摘要）与 `/cd #n` 序号切换（见上一条：现为话题两级展示）。
 - **监控告警**：死信 / 日限熔断 / 预算耗尽死信 / 连接失效清 token 四处自动推微信 ⚠️（复用出站通道，发全部白名单）。
@@ -84,7 +84,7 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 微信命令与 Claude Code CLI **同一套语法、同一个命名空间**，不发明第二套命令体系。路由顺序：
 
 1. **桥命令**（`/cancel` `/tasks` `/status` `/cd` `/sessions` `/policy` `/bg` `/new`）→ gateway 本地执行，秒回。另有 iLink 运维命令 `/time` `/重新连接`（管连接本身，与 Claude 无关）。
-2. **代理**：TUI 交互专属命令（静态维护清单：/permissions /hooks /plugins /login /config /mcp /vim /terminal-setup）→ 拦截后以相同命令名与参数格式操作同一底层配置，输出文字版。已实现 /permissions（读写）、/mcp、/config（只读）；其余提示暂未提供。**代理先于转发判定**——实测 init `slash_commands` 含 `config`/`mcp`，若转发优先会把代理命令截走原样发给 headless claude。
+2. **代理**：TUI 交互专属命令（静态维护清单：/permissions /hooks /plugins /login /config /mcp /vim /terminal-setup）→ 拦截后以相同命令名与参数格式操作同一底层配置，输出文字版。已实现 /permissions（读写）、/mcp（列表 + on/off 启停）、/config（概览 + set 白名单键）；其余提示暂未提供。**代理先于转发判定**——实测 init `slash_commands` 含 `config`/`mcp`，若转发优先会把代理命令截走原样发给 headless claude。
 3. **转发**：headless 可用命令集（启动时从 `system/init` 事件的 `slash_commands` 同步）→ 原样作为 prompt 传给 claude。
 4. 都不是 → 未知命令提示 + 最接近命令建议。
 
@@ -115,8 +115,8 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 ## 实现顺序（勿颠倒依赖）
 
 - **M1（MVP）✅**：SQLite schema → gateway 收发+落盘去重 → worker 调 `claude -p`（会话绑定、stream 解析、节流推送）→ 命令总线 → 崩溃恢复 → E2E。
-- **M2 ✅**：审批（`--permission-prompt-tool` **实测在 2.1.233 仍存在可用**——注意 `--help` 不列全 flag，勿以 help 缺失判断移除）→ `--bg` 长任务（启动 `claude --bg "<prompt>"` 返回任务 id；轮询 `claude agents --json`；停止 `claude stop <id>`；`claude logs` 是 TUI 流不可解析）→ MCP 装载（chrome-devtools/context7/web-reader；tesseract-ocr/ai-vision 推迟 M3）→ 配置代理命令全套（/permissions 读写、/mcp、/config 只读）→ `/policy` strict 档审批 → `/sessions` → 监控告警。已移交：kill 需进程组（MCP 孙进程继承管道）、出站按页计数熔断。
-- **M3 ✅（余项见下）**：媒体收发（图片双向，CDN AES-128-ECB）代码完成并**真机验收通过**（2026-08-19，spec §5 五项全过；协议源 @tencent-weixin/openclaw-weixin v2.4.6 dist）；验收期修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config、resume 恒 fork、取结果 prompt 逐项列出。余下：OCR/视觉 MCP 选型、/mcp 启停与 /config 写入。
+- **M2 ✅**：审批（`--permission-prompt-tool` **实测在 2.1.233 仍存在可用**——注意 `--help` 不列全 flag，勿以 help 缺失判断移除）→ `--bg` 长任务（启动 `claude --bg "<prompt>"` 返回任务 id；轮询 `claude agents --json`；停止 `claude stop <id>`；`claude logs` 是 TUI 流不可解析）→ MCP 装载（chrome-devtools/context7/web-reader；tesseract-ocr/ai-vision 推迟 M3）→ 配置代理命令全套（/permissions 读写、/mcp 列表+启停、/config 概览+set）→ `/policy` strict 档审批 → `/sessions` → 监控告警。已移交：kill 需进程组（MCP 孙进程继承管道）、出站按页计数熔断。
+- **M3 ✅（余项见下）**：媒体收发（图片双向，CDN AES-128-ECB）代码完成并**真机验收通过**（2026-08-19，spec §5 五项全过；协议源 @tencent-weixin/openclaw-weixin v2.4.6 dist）；验收期修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config、resume 恒 fork、取结果 prompt 逐项列出。余下：OCR/视觉 MCP 选型（/mcp 启停与 /config 写入已完成，spec 2026-08-19-mcp-config-writable-design）。
 
 ## 开放问题（涉及前先实测，勿凭假设实现）
 
