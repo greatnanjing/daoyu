@@ -548,10 +548,7 @@ def _mcp_toggle(db, path, raw, servers, disabled, op, target) -> str:
     if name not in disabled:
         return f"{name} 已处于启用状态。"
     disabled = [d for d in disabled if d != name]
-    if disabled:
-        raw["disabled"] = disabled
-    else:
-        raw.pop("disabled", None)      # 空数组不留键（与手写文件同形态）
+    raw["disabled"] = disabled      # 空数组也留键（与静态 mcp.json 初始形态一致）
     _atomic_write_json(path, raw)
     db.audit("config_change", f"mcp on {name}")
     return f"已启用 {name}，下一任务生效。"
