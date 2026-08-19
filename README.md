@@ -74,7 +74,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 | `throttle` | 节流：最小发送间隔 / 进度窗口 / 单条分页字符上限 / 每日发送上限 |
 | `budget` | 预算闸：`max_turns` + `max_usd`，与权限档位独立、恒生效 |
 | `worker` | 任务池并发数与轮询间隔 |
-| `reconnect` | iLink 24h 连接过期的预警/强制重连参数 |
+| `reconnect` | iLink 24h 连接守护参数（`silent_grace_s`：静默续期窗口，超窗才推二维码扫码） |
 
 ## 日常使用（微信里发）
 
@@ -94,7 +94,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 | | `/config` | 查看 gateway 配置概要（节流/预算/白名单数，secret 只计个数不回显）；`set <键> <值>` 改七键白名单（throttle/budget/worker.concurrency，重启生效） |
 | iLink 运维 | `/help` | 全部可用命令（按实际能力动态生成） |
 | | `/time` | 连接剩余时间 |
-| | `/重新连接` | 立即重新扫码连接（Y/N 确认） |
+| | `/重新连接` | 立即重连（静默优先免扫码，需扫码时推二维码；Y/N 确认） |
 | 转发 | `/review`、`/compact` 等 | Claude Code headless 可用的斜杠命令原样转发执行（可用集从 `system/init` 事件同步缓存） |
 | 对话 | 任意文本 | 直接作为 prompt 发给当前会话的 Claude |
 

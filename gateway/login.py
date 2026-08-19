@@ -26,6 +26,7 @@ async def terminal_login(db, ilink, base_url: str | None = None) -> dict:
         result = await ilink.poll_login_status(data["qrcode"])
         if result.get("bot_token"):
             db.set_state("bot_token", result["bot_token"])
+            db.set_state("bot_token_last", result["bot_token"])
             db.set_state("bot_base_url", result.get("baseurl") or "")
             db.set_state("login_at", str(time.time()))
             print("[OK] 登录成功，token 已落盘")   # 不用 emoji：非 UTF-8 管道下 print 会崩
@@ -44,6 +45,7 @@ async def terminal_login(db, ilink, base_url: str | None = None) -> dict:
             result = await ilink.poll_login_status(data["qrcode"], verify)
             if result.get("bot_token"):
                 db.set_state("bot_token", result["bot_token"])
+                db.set_state("bot_token_last", result["bot_token"])
                 db.set_state("bot_base_url", result.get("baseurl") or "")
                 db.set_state("login_at", str(time.time()))
                 print("[OK] 登录成功，token 已落盘")

@@ -1,10 +1,11 @@
 """reconnect 守护与 poll_loop 401 清 token 测试。
 
-覆盖三处审查修复：
+覆盖审查修复与静默续期：
 - I-1 空 token 死窗：poll 清 token 后 timer 自动重走扫码流程（不等 24h 计时）。
-- M-1 warning 确认挂首个白名单用户（单用户产品，不再循环覆盖 state 键）。
 - M-2 扫码超时清 reconnect_warned，下轮 warning 可重发。
 - M-3 poll_loop 精确匹配 "HTTP 401/403" 才清 token，且清一次后幂等。
+- 静默续期：local_token_list 命中免扫码（grace 窗内不推二维码）、超窗回退
+  推码、bot_token 清空后从 bot_token_last 副本续、预警窗直接自动尝试。
 """
 import asyncio
 import time
@@ -19,9 +20,11 @@ class FakeILink:
     def __init__(self, status=None):
         self._status = status or {}
         self.qr_calls = 0
+        self.local_tokens_history = []   # 每次 get_bot_qrcode 收到的 local_token_list
 
     async def get_bot_qrcode(self, local_tokens, base_url=None):
         self.qr_calls += 1
+        self.local_tokens_history.append(list(local_tokens))
         return {"qrcode": f"https://qr/{self.qr_calls}",
                 "qrcode_img_content": f"https://qr/{self.qr_calls}"}
 
@@ -74,14 +77,15 @@ async def test_empty_token_triggers_reconnect_automatically(db):
     await asyncio.gather(task, return_exceptions=True)
 
 
-def test_warning_confirm_pins_first_whitelist_user(db):
-    # M-1：Y/N 确认挂 sorted 首个白名单用户，不再被 for 循环覆盖成最后一人。
+def test_warning_triggers_auto_reconnect_attempt(db):
+    # 预警窗行为变更（后台自动续期）：不再挂 Y/N 确认，直接置 reconnect_now；
+    # 静默/推码分流由 _do_reconnect 处理（另有专门用例）。
     cfg = _cfg()
-    cfg.whitelist = {"b@im.wechat", "a@im.wechat"}
     db.set_state("login_at", str(time.time() - (86400 - 3600)))   # remain=3600s ∈ 预警窗
     _timer(db, cfg, FakeILink(), {"token": "T", "base_url": ""})._check_deadline()
-    assert db.get_state("reconnect_confirm") == "a@im.wechat"
+    assert db.get_state("reconnect_now") == "1"
     assert db.get_state("reconnect_warned") == "1"
+    assert not db.get_state("reconnect_confirm")
 
 
 async def test_scan_timeout_clears_warned_for_next_round(db):
@@ -157,3 +161,64 @@ async def test_poll_loop_keeps_token_on_bare_401_substring(db, monkeypatch):
     assert db.get_state("bot_token") == "VALID"
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
+
+
+def _outbox_texts(db):
+    cols = [r[1] for r in db._conn.execute("PRAGMA table_info(outbox)")]
+    return [dict(zip(cols, r))["text"] for r in db._conn.execute("SELECT * FROM outbox")]
+
+
+async def test_silent_renew_no_qr_pushed(db):
+    # 静默续期命中：服务端秒回 bot_token，grace 窗内不推二维码、
+    # 回执是"免扫码"文案；bot_token_last 副本同步落盘。
+    db.set_state("bot_token", "OLD")
+    token_ref = {"token": "OLD", "base_url": ""}
+    t = _timer(db, _cfg(silent_grace_s=10), FakeILink({"bot_token": "NEW",
+                                                       "baseurl": "https://b"}), token_ref)
+    await t._do_reconnect()
+    assert token_ref["token"] == "NEW"
+    texts = _outbox_texts(db)
+    assert any("免扫码" in x for x in texts)
+    assert not any("扫码（或打开链接）" in x for x in texts)
+    assert db.get_state("bot_token_last") == "NEW"
+
+
+async def test_silent_already_connected_no_qr_pushed(db):
+    # 服务端确认仍连接（binded_redirect）：静默刷新计时，不推二维码。
+    db.set_state("bot_token", "OLD")
+    token_ref = {"token": "OLD", "base_url": ""}
+    t = _timer(db, _cfg(silent_grace_s=10), FakeILink({"already_connected": True}),
+               token_ref)
+    await t._do_reconnect()
+    assert token_ref["token"] == "OLD"                     # token 未换
+    assert float(db.get_state("login_at")) > time.time() - 10
+    texts = _outbox_texts(db)
+    assert any("连接仍有效" in x for x in texts)
+    assert not any("扫码（或打开链接）" in x for x in texts)
+
+
+async def test_qr_fallback_after_silent_grace(db, monkeypatch):
+    # 静默窗口耗尽仍未确认 → 回退推二维码（现行扫码路径不变）。
+    # poll 间隔固定睡 2s 会越过缩小的 deadline：换即时让步（同 _fast_sleep 模式）。
+    async def _sleep(_t):
+        await _orig_sleep(0)
+    monkeypatch.setattr("gateway.reconnect.asyncio.sleep", _sleep)
+    db.set_state("bot_token", "OLD")
+    token_ref = {"token": "OLD", "base_url": ""}
+    t = _timer(db, _cfg(silent_grace_s=0.05, qrcode_scan_timeout_s=0.3),
+               FakeILink({}), token_ref)
+    await t._do_reconnect()
+    assert any("扫码（或打开链接）" in x for x in _outbox_texts(db))
+
+
+async def test_cleared_token_uses_last_known_copy(db):
+    # bot_token 被 401 清空 → local_token_list 从 bot_token_last 副本取，
+    # 静默续期通道不因清空丢失。
+    db.set_state("bot_token", "")
+    db.set_state("bot_token_last", "LAST")
+    token_ref = {"token": "", "base_url": ""}
+    ilink = FakeILink({"bot_token": "NEW", "baseurl": "https://b"})
+    t = _timer(db, _cfg(silent_grace_s=10), ilink, token_ref)
+    await t._do_reconnect()
+    assert ilink.local_tokens_history and ilink.local_tokens_history[0] == ["LAST"]
+    assert token_ref["token"] == "NEW"
