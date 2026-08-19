@@ -362,3 +362,103 @@ async def test_mcp_off_atomic_no_tmp_leftover(db, tmp_path):
     _write_mcp(tmp_path, _MCP_SRV)
     await execute_proxy(db, _route("mcp", "off web-reader"), FakeCfg(tmp_path))
     assert list((tmp_path / "claude").glob("*.tmp")) == []
+
+
+# ---- /config set 白名单写入 ----
+
+def _read_gateway_config(root):
+    return json.loads(
+        (root / "gateway" / "config.json").read_text(encoding="utf-8"))
+
+
+async def test_config_set_all_seven_keys(db, tmp_path):
+    _write_gateway_config(tmp_path)
+    cases = [
+        ("throttle.min_send_interval_s", "0.5", 0.5),
+        ("throttle.progress_window_s", "3", 3.0),
+        ("throttle.page_char_limit", "1500", 1500),
+        ("throttle.daily_send_limit", "300", 300),
+        ("budget.max_turns", "30", 30),
+        ("budget.max_usd", "2.5", 2.5),
+        ("worker.concurrency", "2", 2),
+    ]
+    for key, val, expect in cases:
+        reply = await execute_proxy(db, _route("config", f"set {key} {val}"),
+                                    FakeCfg(tmp_path))
+        assert "已写入" in reply and "重启生效" in reply, key
+    doc = _read_gateway_config(tmp_path)
+    assert doc["throttle"]["min_send_interval_s"] == 0.5
+    assert doc["throttle"]["progress_window_s"] == 3.0
+    assert doc["throttle"]["page_char_limit"] == 1500
+    assert doc["throttle"]["daily_send_limit"] == 300
+    assert doc["budget"]["max_turns"] == 30
+    assert doc["budget"]["max_usd"] == 2.5
+    assert doc["worker"]["concurrency"] == 2
+    # 白名单外原样保留
+    assert doc["whitelist"] == ["u@im.wechat"]
+    assert doc["default_cwd"] == "/srv/proj"
+    assert len(_audit_details(db, "config_change")) == 7
+
+
+async def test_config_set_creates_missing_section(db, tmp_path):
+    # worker 节在原文件缺失 → set 自动建节，其余键保留
+    (tmp_path / "gateway").mkdir()
+    (tmp_path / "gateway" / "config.json").write_text(
+        '{"whitelist": ["u@im.wechat"]}', encoding="utf-8")
+    reply = await execute_proxy(
+        db, _route("config", "set worker.concurrency 4"), FakeCfg(tmp_path))
+    assert "已写入" in reply
+    doc = _read_gateway_config(tmp_path)
+    assert doc["worker"]["concurrency"] == 4
+    assert doc["whitelist"] == ["u@im.wechat"]
+
+
+async def test_config_set_rejects_non_whitelist_key(db, tmp_path):
+    _write_gateway_config(tmp_path)
+    for key in ("whitelist", "claude_bin", "reconnect.session_duration_s",
+                "default_cwd"):
+        reply = await execute_proxy(db, _route("config", f"set {key} 1"),
+                                    FakeCfg(tmp_path))
+        assert "不开放" in reply and "直接改 gateway/config.json" in reply, key
+    assert "whitelist" in _read_gateway_config(tmp_path)   # 文件未动
+
+
+async def test_config_set_rejects_bad_type(db, tmp_path):
+    _write_gateway_config(tmp_path)
+    reply = await execute_proxy(
+        db, _route("config", "set budget.max_turns 1.5"), FakeCfg(tmp_path))
+    assert "整数" in reply
+    reply = await execute_proxy(
+        db, _route("config", "set throttle.min_send_interval_s fast"), FakeCfg(tmp_path))
+    assert "数值" in reply
+
+
+async def test_config_set_rejects_out_of_range(db, tmp_path):
+    _write_gateway_config(tmp_path)
+    bad = [("throttle.min_send_interval_s", "0"),        # > 0
+           ("throttle.progress_window_s", "-1"),
+           ("throttle.page_char_limit", "199"),          # ≥ 200
+           ("throttle.daily_send_limit", "0"),           # ≥ 1
+           ("budget.max_turns", "0"),                    # ≥ 1
+           ("budget.max_usd", "0"),
+           ("worker.concurrency", "11"),                 # 1~10
+           ("worker.concurrency", "0")]
+    for key, val in bad:
+        reply = await execute_proxy(db, _route("config", f"set {key} {val}"),
+                                    FakeCfg(tmp_path))
+        assert "范围" in reply, (key, val)
+        assert _read_gateway_config(tmp_path)["budget"]["max_turns"] == 50  # 未动
+
+
+async def test_config_set_bad_usage(db, tmp_path):
+    _write_gateway_config(tmp_path)
+    for args in ("set", "set throttle.page_char_limit", "bump x y"):
+        reply = await execute_proxy(db, _route("config", args), FakeCfg(tmp_path))
+        assert "用法" in reply, args
+
+
+async def test_config_set_atomic_no_tmp_leftover(db, tmp_path):
+    _write_gateway_config(tmp_path)
+    await execute_proxy(
+        db, _route("config", "set worker.concurrency 2"), FakeCfg(tmp_path))
+    assert list((tmp_path / "gateway").glob("*.tmp")) == []

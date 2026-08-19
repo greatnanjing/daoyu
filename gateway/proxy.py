@@ -13,6 +13,10 @@ import tempfile
 PERMISSIONS_USAGE = ("用法：/permissions deny add <规则> | "
                      "/permissions deny del <序号> | /permissions allow add <规则>")
 MCP_USAGE = "用法：/mcp — 列表；/mcp off <序号|名字> 停用；/mcp on <序号|名字> 启用"
+CONFIG_USAGE = ("用法：/config — 概览；/config set <键> <值>（可改键："
+                "throttle.min_send_interval_s/progress_window_s/"
+                "page_char_limit/daily_send_limit、budget.max_turns/max_usd、"
+                "worker.concurrency；重启生效）")
 _SCOPES = ("deny", "allow")
 
 
@@ -38,7 +42,11 @@ async def execute_proxy(db, route, config) -> str:
             return f"claude/mcp.json 解析失败：{e}"
     if cmd == "config":
         try:
-            return _config(config)
+            reply = _config(config, route.args.strip())
+            if reply.startswith("已写入"):
+                db.audit("config_change",
+                         f"config set {'='.join(route.args.split()[1:3])}")
+            return reply
         except NotJsonObjectError as e:
             return f"配置文件格式异常（顶层不是对象）：{e}"
         except ValueError as e:
@@ -232,6 +240,30 @@ _THROTTLE_LABELS = (
     ("daily_send_limit", "日发送上限"),
 )
 
+# /config set 白名单：key -> (解析器, 校验器, 类型名)。范围外的键拒绝（whitelist
+# 从微信改 = 放别人进服务器，安全不开放——其余提示改文件）。
+def _is_int(s: str) -> bool:
+    return s.lstrip("-").isdigit()
+
+
+def _is_float(s: str) -> bool:
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
+CONFIG_KEYS = {
+    "throttle.min_send_interval_s": (float, lambda v: v > 0, "数值"),
+    "throttle.progress_window_s": (float, lambda v: v > 0, "数值"),
+    "throttle.page_char_limit": (int, lambda v: v >= 200, "整数"),
+    "throttle.daily_send_limit": (int, lambda v: v >= 1, "整数"),
+    "budget.max_turns": (int, lambda v: v >= 1, "整数"),
+    "budget.max_usd": (float, lambda v: v > 0, "数值"),
+    "worker.concurrency": (int, lambda v: 1 <= v <= 10, "整数"),
+}
+
 
 def _secrets_count(config) -> int:
     path = config.repo_root / "claude" / "secrets.env"
@@ -246,13 +278,21 @@ def _secrets_count(config) -> int:
     return n
 
 
-def _config(config) -> str:
+def _config(config, args: str) -> str:
     path = config.repo_root / "gateway" / "config.json"
     if not path.is_file():
         return "未找到 gateway/config.json。"
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise NotJsonObjectError(path)
+
+    parts = args.split()
+    if parts:
+        if parts[0] != "set":
+            return f"未知子命令：{parts[0]}\n{CONFIG_USAGE}"
+        return _config_set(config, path, raw, parts[1:])
+
+    # 概览（现状不变，仅标题改写 + 尾行加用法）
     throttle = raw.get("throttle") or {}
     thr = " · ".join(f"{label} {throttle.get(key, '默认')}"
                      for key, label in _THROTTLE_LABELS)
@@ -261,7 +301,7 @@ def _config(config) -> str:
     secrets_line = (f"secrets：已配置 {n} 项（claude/secrets.env，值不回显）" if n
                     else "secrets：未配置（claude/secrets.env）")
     return "\n".join([
-        "🛠 gateway/config.json（只读，改文件后重启生效）：",
+        "🛠 gateway/config.json（概览；set 可改常用键，重启生效）：",
         f"白名单：{len(raw.get('whitelist') or [])} 个账号",
         f"默认目录：{raw.get('default_cwd') or str(config.repo_root)}",
         f"预算：max_turns={budget.get('max_turns', '未设置')} / "
@@ -269,4 +309,32 @@ def _config(config) -> str:
         f"节流：{thr}",
         secrets_line,
         "Claude 实例配置：claude/settings.json · claude/mcp.json",
+        CONFIG_USAGE,
     ])
+
+
+def _config_set(config, path, raw, rest) -> str:
+    """set <键> <值>：白名单 + 类型 + 范围校验，读原文改键整体原子写回。
+    成功时回执以「已写入」开头——execute_proxy 据此记 audit。"""
+    if len(rest) != 2:
+        return CONFIG_USAGE
+    key, val = rest
+    spec = CONFIG_KEYS.get(key)
+    if spec is None:
+        return (f"键 {key} 不开放微信修改，请直接改 gateway/config.json"
+                f"（可改键见 /config 用法行）")
+    parser, check, type_name = spec
+    if not (_is_int(val) if parser is int else _is_float(val)):
+        return f"值 {val} 不是合法{type_name}。"
+    v = parser(val)
+    if not check(v):
+        return f"值 {v} 超出允许范围（{key} 的合法范围见 /config 用法行与文档）。"
+
+    section, _, leaf = key.partition(".")
+    raw.setdefault(section, {})
+    if not isinstance(raw[section], dict):
+        return f"配置节 {section} 不是对象，请直接改 gateway/config.json。"
+    raw[section][leaf] = v
+    _atomic_write_json(path, raw)
+    return (f"已写入 {key}={v}，重启生效（systemctl restart daoyu）。"
+            f"当前运行中的旧值继续使用。")
