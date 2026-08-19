@@ -47,9 +47,18 @@ BYPASS_DISALLOWED_TOOLS = [
 
 def build_argv(*, session_uuid: str, resume: bool, policy: str, budget: Budget,
                mcp_config: Path | None, settings: Path | None,
-               approval_mcp: bool = False) -> list[str]:
+               approval_mcp: bool = False,
+               fork_session: bool = False) -> list[str]:
     argv = ["-p"]
-    argv += ["--resume", session_uuid] if resume else ["--session-id", session_uuid]
+    if resume:
+        argv += ["--resume", session_uuid]
+        if fork_session:
+            # 会话仍被 bg daemon 持有时 --resume 会报错（实测 2.1.233："Session
+            # ... is currently running as a background agent"）→ fork 副本接续，
+            # 原条目不受影响。pool 对 blocked 条目取结果即用此形态。
+            argv += ["--fork-session"]
+    else:
+        argv += ["--session-id", session_uuid]
     argv += ["--permission-mode", POLICY_MODE[policy]]
     if policy == "strict" and approval_mcp:
         argv += ["--permission-prompt-tool", APPROVAL_PROMPT_TOOL]

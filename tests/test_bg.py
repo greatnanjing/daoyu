@@ -284,13 +284,44 @@ async def test_watcher_result_paginated(db):
     assert db.get_task(t).state == "done"
 
 
+def _fork_fail(pool):
+    """blocked 旧路径（fork 失败→超时兜底）测试用：_resume_summary 恒失败
+    （置 error detail 返回 ""），watcher 不得完结、走计时/超时。"""
+    def boom(cwd, sid, fork=False):
+        pool._resume_error_detail = "fork cli down"
+        return ""
+    pool._resume_summary = boom
+
+
+async def test_watcher_blocked_forks_result_and_completes(db):
+    """真机实证（2026-08-19，2.1.233，task #12）：blocked = 会话等用户输入
+    （bg 无输入通道即永久挂起）→ 首次观察即 fork 副本取结果完结 + stop 条目
+    （防孤儿）。fork 用 --fork-session（原会话被 daemon 持有，直接 resume 报错）。"""
+    t = _make_bg_task(db)
+    pool = make_watch_pool(db)
+    stopped = []
+    pool._stop_bg = lambda bg_id: stopped.append(bg_id) or ""
+    calls = []
+    pool._resume_summary = lambda cwd, sid, fork=False: \
+        calls.append((cwd, sid, fork)) or "目录不是 git 仓库"
+    pool._agents_json = lambda: [_entry(state="blocked")]
+
+    await pool._bg_watch_round()
+    assert db.get_task(t).state == "done"
+    assert calls == [("/repo", "S-UUID-1", True)]   # fork=True 取 blocked 会话结果
+    assert stopped == ["ab12cd34"]                  # 结果已 fork 出来 → stop 条目
+    assert any("补充信息" in x and "目录不是 git 仓库" in x for x in _texts(db))
+    assert db.get_state(f"bg_blocked_since:{t}") is None   # 计时已清
+
+
 async def test_watcher_blocked_timeout_fails(db):
-    """blocked 超时（以"首次观察到 blocked"计时，I2）→ 失败可重试；且先
-    claude stop 旧条目再 finish（M2，不留 daemon 孤儿）。"""
+    """blocked fork 持续失败 → 超时（以"首次观察到 blocked"计时，I2）→ 失败
+    可重试；且先 claude stop 旧条目再 finish（M2，不留 daemon 孤儿）。"""
     t = _make_bg_task(db)
     pool = make_watch_pool(db)                    # bg_blocked_timeout_s=1800
     stopped = []
     pool._stop_bg = lambda bg_id: stopped.append(bg_id) or ""
+    _fork_fail(pool)
     pool._agents_json = lambda: [_entry(state="blocked")]
     # 预置首次观察到 blocked 在 31 分钟前（此后持续 blocked 未恢复）
     db.set_state(f"bg_blocked_since:{t}", str(time.time() - 31 * 60))
@@ -304,6 +335,7 @@ async def test_watcher_blocked_timeout_fails(db):
 async def test_watcher_blocked_fresh_keeps_running(db):
     t = _make_bg_task(db)
     pool = make_watch_pool(db)
+    _fork_fail(pool)
     pool._agents_json = lambda: [_entry(state="blocked")]   # 刚开始 blocked
     await pool._bg_watch_round()
     assert db.get_task(t).state == "running"
@@ -326,12 +358,13 @@ async def test_watcher_failed_entry_fails_task(db):
 
 
 async def test_watcher_blocked_timer_counts_from_first_sight(db):
-    """I2：长任务（startedAt 40 分钟前）刚进 blocked 不得立即误杀——计时从
-    首次观察到 blocked 的本地时刻起算，持续 blocked 满 timeout 下一轮才杀。"""
+    """I2：长任务（startedAt 40 分钟前）刚进 blocked 且 fork 失败 → 只记时刻不杀
+    （计时从首次观察到 blocked 的本地时刻起算），持续失败满 timeout 下一轮才杀。"""
     t = _make_bg_task(db)
     pool = make_watch_pool(db)                    # bg_blocked_timeout_s=1800
     stopped = []
     pool._stop_bg = lambda bg_id: stopped.append(bg_id) or ""
+    _fork_fail(pool)
     old = NOW_MS() - 40 * 60 * 1000               # 任务 40 分钟前启动（主用例形态）
     states = [_entry(state="blocked", started_ms=old)]
     pool._agents_json = lambda: states
@@ -353,6 +386,7 @@ async def test_watcher_blocked_timer_resets_on_recovery(db):
     """I2：blocked→working 恢复清计时；再进 blocked 从零重计，不累计旧值。"""
     t = _make_bg_task(db)
     pool = make_watch_pool(db)
+    _fork_fail(pool)
     states = [_entry(state="blocked")]
     pool._agents_json = lambda: states
 

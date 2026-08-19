@@ -4,7 +4,8 @@
 
 bg 长任务另有两条通道（M2）：启动走 runner 的 --bg 分支（run() 立即返回），
 完结走本模块 _bg_watcher——每 bg_poll_s 轮询 claude agents --json --all，
-按条目状态推进（completed → 取结果完结 / blocked 超时 → 失败 / 消失 → 取消）。
+按条目状态推进：done/completed → 取结果完结 / blocked（=等待用户输入，
+2.1.233 实测）→ fork 副本取结果完结 / failed → 失败 / 消失 → 取消。
 轮询失败（None 哨兵）≠ 空列表：失败整轮跳过，绝不进消失判定（防集体误杀）。
 """
 import asyncio
@@ -236,6 +237,7 @@ class WorkerPool:
         entry = next((a for a in agents if str(a.get("id")) == t.claude_bg_id), None)
         session = self._db.get_session(t.session_id)
         to_user = session.wechat_user if session else ""
+        cwd = session.cwd if session else os.getcwd()   # done/blocked 取结果都在会话 cwd
         blocked_key = f"bg_blocked_since:{t.id}"
         if entry is None:
             if now - t.updated_at >= _BG_MISSING_GRACE_S:
@@ -260,7 +262,6 @@ class WorkerPool:
         if state in ("completed", "done"):
             result = _extract_bg_result(entry)
             if result is None:
-                cwd = session.cwd if session else os.getcwd()
                 result = await asyncio.to_thread(
                     self._resume_summary, cwd, entry.get("sessionId") or "")
                 if not result and self._resume_error_detail:
@@ -295,6 +296,40 @@ class WorkerPool:
             self._db.enqueue(t.id, to_user,
                              f"❌ 后台任务 #{t.id} 在后台执行失败（daemon 报 failed）。")
         elif state == "blocked":
+            # 真机实证（2026-08-19，2.1.233，task #12）：blocked = 会话回合结束
+            # 等待用户后续输入（Claude 结尾反问是常态）——bg 无输入通道，一旦
+            # blocked 即永久挂起，任务其实已有产出。原 30min 超时对用户等于无
+            # 回应。改为首次观察即 fork 副本取结果完结（原会话被 daemon 持有，
+            # 直接 --resume 报错，必须 --fork-session，实测）；取到后 stop 条目
+            # 防孤儿累积（M2）。fork 失败（CLI 故障）不完结：走下方超时兜底，
+            # 下一轮再试。
+            result = await asyncio.to_thread(
+                self._resume_summary, cwd, entry.get("sessionId") or "", fork=True)
+            err = self._resume_error_detail
+            self._resume_error_detail = ""
+            if result or not err:
+                # 取到总结（或总结为空但 fork 本身成功）→ 完结
+                # 两个 await 窗口（fork/stop）里 /cancel 可能已落终态 → 先落者胜
+                if self._db.get_task(t.id).state != "running":
+                    return
+                try:
+                    await asyncio.to_thread(self._stop_bg, t.claude_bg_id)
+                except Exception as e:
+                    self._db.audit("bg_stop_error", f"task={t.id} err={e!r}")
+                if self._db.get_task(t.id).state != "running":
+                    return
+                self._db.delete_state(blocked_key)
+                header = (f"⏸ 后台任务 #{t.id} 已完成当前部分、正等待你的补充"
+                          f"信息（结果如下；要继续请发新指令）：\n")
+                for page in split_text(header + (result or "(结果摘要为空)"),
+                                       self._page_limit()):
+                    self._db.enqueue(t.id, to_user, page)
+                self._db.finish_task(t.id, "done")
+                if session:
+                    self._db.touch_session(session.id)
+                return
+            self._db.audit("bg_resume_error", err)   # fork 失败：下轮重试
+            # ---- 超时兜底（fork 持续失败时的最终出路）----
             since = self._db.get_state(blocked_key)
             if since is None:
                 # 首次观察到 blocked：以本地此刻计时（I2）。agents 条目只有
@@ -303,9 +338,8 @@ class WorkerPool:
                 self._db.set_state(blocked_key, str(now))
                 return
             if now - float(since) >= self._bg_blocked_timeout_s:
-                # 宿主旧后台会话可能占位排队 → blocked 超时按失败处理（可重试
-                # 语义）。先 stop 再 finish：条目还在 daemon 里，不 stop 会留
-                # 孤儿，配合重试多次超时可累积多个 blocked 孤儿（M2）。
+                # fork 持续失败超时：先 stop 再 finish，条目还在 daemon 里，
+                # 不 stop 会留孤儿，配合重试多次超时可累积多个 blocked 孤儿（M2）。
                 try:
                     await asyncio.to_thread(self._stop_bg, t.claude_bg_id)
                 except Exception as e:
@@ -369,12 +403,13 @@ class WorkerPool:
                             capture_output=True, timeout=30, env=self._claude_env())
         return (cp.stdout + b"\n" + cp.stderr).decode("utf-8", "replace").strip()
 
-    def _resume_summary(self, cwd: str, claude_uuid: str) -> str:
+    def _resume_summary(self, cwd: str, claude_uuid: str, fork: bool = False) -> str:
         """结果获取的常态路径：真机 done 条目无输出字段（2.1.233 采样，见
         _BG_RESULT_KEYS 注释）→ 回原 Claude 会话（--resume，cwd 同会话绑定目录）
-        要一份 ≤500 字总结。同步 subprocess（watcher 经 to_thread 调）；异常/空
-        → ""（调用方以占位文案完结，避免每轮无限重试）。异常细节写
-        self._resume_error_detail（线程内不碰 db，调用方审计，M1）。
+        要一份 ≤500 字总结。blocked 条目取结果用 fork=True（原会话被 daemon
+        持有，直接 --resume 报错，实测 2.1.233）。同步 subprocess（watcher 经
+        to_thread 调）；异常/空 → ""（调用方以占位文案完结，避免每轮无限重试）。
+        异常细节写 self._resume_error_detail（线程内不碰 db，调用方审计，M1）。
         policy 固定 auto：只读回总结，不带审批 MCP（bg 档不传审批工具）。"""
         try:
             argv = build_argv(
@@ -382,7 +417,8 @@ class WorkerPool:
                 # --max-turns 2（TRD 兜底规范）：总结一次即答，防兜底自己跑飞
                 budget=Budget(max_turns=2, max_usd=self._cfg.budget.max_usd),
                 mcp_config=self._cfg.repo_root / "claude" / "mcp.json",
-                settings=self._cfg.repo_root / "claude" / "settings.json")
+                settings=self._cfg.repo_root / "claude" / "settings.json",
+                fork_session=fork)
             cp = subprocess.run([*self._claude_prefix(), *argv],
                                 input=_BG_SUMMARY_PROMPT.encode("utf-8"),
                                 capture_output=True, timeout=300,
