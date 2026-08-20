@@ -5,7 +5,9 @@ scheduler_loop 每分钟整分对齐醒来、现读 cron_jobs 表决定动作（
 outbox（发白名单全部用户），异常时建 Claude 分析任务挂 ops 话题（固定
 UUID，分析历史上下文延续）。scheduler 绝不直接调 iLink、不自己跑 Claude。
 """
+import json
 import time
+from pathlib import Path
 
 from common.models import CronJob
 
@@ -48,3 +50,110 @@ def next_run_time(job: CronJob, now: int) -> int | None:
     if job.interval_min:
         return (job.last_run_at or now) + job.interval_min * 60
     return None
+
+
+def _broadcast(db, cfg, text: str) -> None:
+    """发白名单全部用户（outbound._alert_all 同构：同步 enqueue 落 outbox，
+    投递由出站循环 0.5s 轮询接管；whitelist 缺席（测试替身）静默跳过）。"""
+    for user in sorted(getattr(cfg, "whitelist", None) or ()):
+        db.enqueue(None, user, text)
+
+
+def ensure_ops_session(db, cfg) -> int:
+    """ops 话题（固定 UUID）：分析任务的挂靠点——历史聚一处、Claude 有先前
+    分析上下文。无白名单（异常配置/测试）兜底本地用户名。"""
+    s = db.get_session_by_uuid(OPS_UUID)
+    if s is not None:
+        return s.id
+    user = min(cfg.whitelist) if getattr(cfg, "whitelist", None) else "ops@local"
+    return db.create_fixed_session(user, cfg.default_cwd, OPS_UUID).id
+
+
+def _media_mb(cfg) -> float:
+    base = Path(getattr(cfg, "repo_root", ".")) / "data" / "media"
+    try:
+        total = sum(f.stat().st_size for f in base.rglob("*") if f.is_file())
+    except OSError:
+        return 0.0
+    return total / 1048576.0
+
+
+def collect_daily_data(db, cfg, now: int, sample: dict) -> dict:
+    """日报三板块数据（统计窗口 = 昨日全天；生产 CST 无夏令时，-86400 无漂移）。"""
+    lt = time.localtime(now)
+    day_end = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+    day_start = day_end - 86400
+    return {
+        "date": time.strftime("%Y-%m-%d", time.localtime(day_start)),
+        "tasks": db.daily_task_stats(day_start, day_end),
+        "cost_usd": db.daily_cost(day_start, day_end),
+        "cpu": sample.get("cpu", 0.0), "mem": sample.get("mem", 0.0),
+        "disks": sample.get("disks", {}), "boot_days": sample.get("boot_days", 0.0),
+        "sent": db.outbox_sent_count(day_start, day_end),
+        "backlog": db.queue_depth(),
+        "dead_outbox": db.dead_letter_count(),
+        "online": bool(db.get_state("bot_token")),
+        "media_mb": _media_mb(cfg),
+    }
+
+
+def render_daily_report(data: dict) -> str:
+    t = data["tasks"]
+    disk = " / ".join(f"{p} {v:.0f}%" for p, v in sorted(data["disks"].items())) or "—"
+    lines = [
+        f"🌅 刀鱼日报 {data['date']}",
+        f"📊 任务：昨日 {t['total']} 个（成功 {t['done']} / 取消 {t['canceled']}"
+        f" / 死信 {t['dead']}），费用 ${data['cost_usd']:.2f}",
+        f"🖥 服务器：CPU {data['cpu']:.0f}% / 内存 {data['mem']:.0f}% / 磁盘 {disk}，"
+        f"已运行 {data['boot_days']:.1f} 天",
+        f"🐟 刀鱼：出站 {data['sent']} 条 / 队列 {data['backlog']} / "
+        f"死信 {data['dead_outbox']} / "
+        f"{'连接正常' if data['online'] else '⚠️ 连接未建立'} / "
+        f"media {data['media_mb']:.0f}MB",
+    ]
+    return "\n".join(lines)
+
+
+def daily_anomalies(data: dict, cron_cfg: dict) -> list[str]:
+    """异常升级判定（spec §4）：死信新增 / 健康快照超阈 / 队列积压 / 掉线。"""
+    out = []
+    if data["tasks"]["dead"] > 0:
+        out.append(f"昨日新增死信任务 {data['tasks']['dead']} 个")
+    for path, pct in sorted(data["disks"].items()):
+        if pct > cron_cfg["disk_threshold_pct"]:
+            out.append(f"磁盘 {path} {pct:.0f}%（阈值 "
+                       f"{cron_cfg['disk_threshold_pct']}%）")
+    if data["cpu"] > cron_cfg["cpu_threshold_pct"]:
+        out.append(f"CPU {data['cpu']:.0f}%（阈值 {cron_cfg['cpu_threshold_pct']}%）")
+    if data["mem"] > cron_cfg["mem_threshold_pct"]:
+        out.append(f"内存 {data['mem']:.0f}%（阈值 {cron_cfg['mem_threshold_pct']}%）")
+    if data["backlog"] > cron_cfg["queue_backlog_warn"]:
+        out.append(f"队列积压 {data['backlog']}（预警 {cron_cfg['queue_backlog_warn']}）")
+    if not data["online"]:
+        out.append("iLink token 缺失（连接未建立）")
+    return out
+
+
+def run_daily(db, cfg, now: int, sample: dict) -> str:
+    """日报主流程：收集→模板→推送；异常时追加分析任务（挂 ops 话题）。
+    模板先推、分析后到——分析失败日报照样在。"""
+    data = collect_daily_data(db, cfg, now, sample)
+    text = render_daily_report(data)
+    anomalies = daily_anomalies(data, cfg.cron)
+    if not anomalies:
+        _broadcast(db, cfg, text)
+        return "正常，推送 1 条"
+    text += "\n⏳ 检测到异常，分析进行中…"
+    prompt = ("刀鱼巡检系统自动任务：昨日运行数据存在异常，请分析原因并给出"
+              "简要结论与建议。\n\n异常项：\n- " + "\n- ".join(anomalies) +
+              "\n\n数据：" + json.dumps(
+                  {"tasks": data["tasks"], "cost_usd": data["cost_usd"],
+                   "backlog": data["backlog"], "dead_outbox": data["dead_outbox"],
+                   "media_mb": round(data["media_mb"], 1)}, ensure_ascii=False) +
+              "\n可执行只读命令查看 data/daoyu.db（audit_log/tasks 表）辅助分析，"
+              "结论一屏以内。")
+    sid = ensure_ops_session(db, cfg)
+    db.create_task(None, sid, prompt, kind="chat")
+    _broadcast(db, cfg, text)
+    db.audit("cron_daily", f"anomalies={len(anomalies)}")
+    return f"异常 {len(anomalies)} 项，已推送并建分析任务"

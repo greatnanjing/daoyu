@@ -181,3 +181,81 @@ async def test_cron_cmd(db):
 def test_router_cron_bridge():
     from gateway.router import route
     assert route("/cron", set()).kind == "bridge"
+
+
+_SAMPLE_OK = {"cpu": 23.0, "mem": 61.0, "disks": {"/": 42.0}, "boot_days": 12.3}
+
+
+def _dcfg(tmp_path):
+    """最小 Config 替身（scheduler 只读 cron/default_cwd/whitelist/repo_root）。"""
+    from common.config import _DEFAULT_CRON
+    from types import SimpleNamespace
+    return SimpleNamespace(cron=dict(_DEFAULT_CRON), default_cwd="/repo",
+                           whitelist={"u@im.wechat"}, repo_root=tmp_path)
+
+
+def test_render_daily_report():
+    from gateway.scheduler import render_daily_report
+    data = {"date": "2026-08-21", "tasks": {"done": 4, "canceled": 1, "dead": 0,
+                                            "total": 5},
+            "cost_usd": 0.83, "cpu": 23.0, "mem": 61.0, "disks": {"/": 42.0},
+            "boot_days": 12.3, "sent": 32, "backlog": 0, "dead_outbox": 0,
+            "online": True, "media_mb": 128.4}
+    text = render_daily_report(data)
+    assert "🌅 刀鱼日报 2026-08-21" in text
+    assert "成功 4 / 取消 1 / 死信 0" in text
+    assert "$0.83" in text
+    assert "CPU 23%" in text and "磁盘" in text
+    assert "出站 32 条" in text and "连接正常" in text
+
+
+def test_daily_anomalies():
+    from gateway.scheduler import daily_anomalies
+    from common.config import _DEFAULT_CRON
+    ok = {"tasks": {"dead": 0}, "disks": {"/": 42.0}, "cpu": 23.0, "mem": 61.0,
+          "backlog": 0, "online": True}
+    assert daily_anomalies(ok, _DEFAULT_CRON) == []
+    bad = {"tasks": {"dead": 2}, "disks": {"/": 91.0}, "cpu": 95.0, "mem": 50.0,
+           "backlog": 0, "online": True}
+    got = daily_anomalies(bad, _DEFAULT_CRON)
+    # brief 原文断言 len==2，但其 bad 夹具 cpu=95 已超阈（90）→ 实测 3 项
+    # （死信 / 磁盘 / CPU），与 brief 自身实现（逐分支超阈判定）矛盾，
+    # 实测失败后按语义修正并补 CPU 存在性断言。
+    assert len(got) == 3 and any("死信" in g for g in got) and any("/" in g for g in got)
+    assert any("CPU" in g for g in got)
+
+
+def test_run_daily_normal(db, tmp_path):
+    from gateway.scheduler import run_daily
+    cfg = _dcfg(tmp_path)
+    # brief 原文缺此行：online 判定读 state bot_token（login/reconnect 写入），
+    # 空测试库无 token → online=False 恒走异常分支。正常轮次前提是已登录。
+    db.set_state("bot_token", "fake-token")
+    result = run_daily(db, cfg, _ANCHOR, dict(_SAMPLE_OK))
+    assert "正常" in result
+    rows = db._conn.execute(
+        "SELECT to_user, text FROM outbox WHERE text LIKE '%日报%'").fetchall()
+    assert rows and rows[0]["to_user"] == "u@im.wechat"
+    assert "⏳" not in rows[0]["text"]
+    # 正常轮次零 Claude 调用：无新任务、无 cost 行
+    assert db._conn.execute("SELECT COUNT(*) c FROM tasks").fetchone()["c"] == 0
+
+
+def test_run_daily_anomaly_escalates(db, tmp_path):
+    from gateway.scheduler import run_daily, OPS_UUID
+    cfg = _dcfg(tmp_path)
+    s = db.get_or_create_session("u@im.wechat", "/repo")
+    tid = db.create_task(None, s.id, "will-dead")
+    db._conn.execute("UPDATE tasks SET state='dead' WHERE id=?", (tid,))
+    db._conn.commit()
+    sample = dict(_SAMPLE_OK, disks={"/": 91.0})
+    result = run_daily(db, cfg, _ANCHOR, sample)
+    assert "异常" in result
+    text = db._conn.execute(
+        "SELECT text FROM outbox WHERE text LIKE '%日报%'").fetchone()["text"]
+    assert "⏳" in text
+    # 分析任务挂 ops 话题
+    row = db._conn.execute(
+        "SELECT t.id, t.session_id FROM tasks t JOIN sessions s ON t.session_id=s.id "
+        "WHERE s.claude_uuid=?", (OPS_UUID,)).fetchone()
+    assert row is not None
