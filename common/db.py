@@ -5,7 +5,7 @@ import time
 import uuid
 from pathlib import Path
 
-from common.models import InboundMessage, OutboxItem, SessionBinding, Task
+from common.models import CronJob, InboundMessage, OutboxItem, SessionBinding, Task
 from common.text import outbox_sent_pages
 
 
@@ -91,6 +91,15 @@ CREATE TABLE IF NOT EXISTS approvals (
   decided_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_state ON approvals(state, id);
+CREATE TABLE IF NOT EXISTS cron_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  time_of_day TEXT,
+  interval_min INTEGER,
+  last_run_at INTEGER,
+  last_result TEXT
+);
 """
 
 
@@ -105,6 +114,13 @@ class Database:
         self._migrate_sessions_table()
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        # M4 预置两行（INSERT OR IGNORE 幂等——升级部署与全新库同路径）
+        self._conn.execute(
+            "INSERT OR IGNORE INTO cron_jobs(name, enabled, time_of_day, interval_min) "
+            "VALUES('daily', 1, '08:00', NULL)")
+        self._conn.execute(
+            "INSERT OR IGNORE INTO cron_jobs(name, enabled, time_of_day, interval_min) "
+            "VALUES('patrol', 1, NULL, 10)")
         self._ensure_media_columns()
         self._conn.commit()
 
@@ -601,3 +617,82 @@ class Database:
     def get_approval(self, approval_id: int):
         return self._conn.execute(
             "SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
+
+    # ---- cron_jobs（M4 主动服务）----
+    def cron_jobs(self) -> list[CronJob]:
+        rows = self._conn.execute("SELECT * FROM cron_jobs ORDER BY id").fetchall()
+        return [CronJob(id=r["id"], name=r["name"], enabled=r["enabled"],
+                        time_of_day=r["time_of_day"], interval_min=r["interval_min"],
+                        last_run_at=r["last_run_at"], last_result=r["last_result"])
+                for r in rows]
+
+    def update_cron(self, name: str, *, enabled: int | None = None,
+                    time_of_day: str | None = None, interval_min: int | None = None,
+                    touch_last_run: int | None = None) -> bool:
+        """/cron 命令写入口：None 字段不动；touch_last_run 传 epoch 则重置
+        last_run_at（/cron on 的「从当前时刻起算」——patrol 等满一个间隔、
+        daily 不补跑错过的时间点）。未知 name 返回 False。"""
+        sets, vals = [], []
+        if enabled is not None:
+            sets.append("enabled=?"); vals.append(enabled)
+        if time_of_day is not None:
+            sets.append("time_of_day=?"); vals.append(time_of_day)
+        if interval_min is not None:
+            sets.append("interval_min=?"); vals.append(interval_min)
+        if touch_last_run is not None:
+            sets.append("last_run_at=?"); vals.append(touch_last_run)
+        if not sets:
+            return False
+        cur = self._conn.execute(
+            f"UPDATE cron_jobs SET {', '.join(sets)} WHERE name=?", (*vals, name))
+        self._conn.commit()
+        return bool(cur.rowcount)
+
+    def mark_cron_run(self, name: str, last_result: str) -> None:
+        """scheduler 到点先占位后收尾（防同分钟崩溃重入重复推送）。"""
+        self._conn.execute(
+            "UPDATE cron_jobs SET last_run_at=?, last_result=? WHERE name=?",
+            (int(time.time()), last_result, name))
+        self._conn.commit()
+
+    def daily_task_stats(self, start: int, end: int) -> dict:
+        """日报任务板块：created_at 落 [start,end) 的任务按 state 分组。
+        展示三态 done/canceled/dead；pending/running 等中间态并入 total。"""
+        rows = self._conn.execute(
+            "SELECT state, COUNT(*) c FROM tasks WHERE created_at>=? AND created_at<? "
+            "GROUP BY state", (start, end)).fetchall()
+        by = {r["state"]: r["c"] for r in rows}
+        return {"done": by.get("done", 0), "canceled": by.get("canceled", 0),
+                "dead": by.get("dead", 0), "total": sum(by.values())}
+
+    def daily_cost(self, start: int, end: int) -> float:
+        """audit_log kind='cost' 窗口求和（today_cost_usd 的参数化版）。"""
+        total = 0.0
+        for row in self._conn.execute(
+                "SELECT detail FROM audit_log WHERE kind='cost' AND ts>=? AND ts<?",
+                (start, end)):
+            try:
+                total += float(json.loads(row["detail"]).get("usd", 0))
+            except (ValueError, TypeError, AttributeError):
+                pass
+        return total
+
+    def outbox_sent_count(self, start: int, end: int) -> int:
+        return self._conn.execute(
+            "SELECT COUNT(*) c FROM outbox WHERE state='sent' "
+            "AND sent_at>=? AND sent_at<?", (start, end)).fetchone()["c"]
+
+    def create_fixed_session(self, wechat_user: str, cwd: str,
+                             claude_uuid: str) -> SessionBinding:
+        """固定 uuid 话题行（M4 ops 话题用）：不动当前话题指针、不置
+        claude_session_inited——首次任务 --session-id 建会话、之后 runner 自然
+        --resume。重复 uuid（已存在）幂等返回既有行。"""
+        now = int(time.time())
+        self._conn.execute(
+            "INSERT OR IGNORE INTO sessions(wechat_user, cwd, claude_uuid, policy, "
+            "created_at, last_active_at) VALUES(?,?,?,?,?,?)",
+            (wechat_user, cwd, claude_uuid, "auto", now, now))
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM sessions WHERE claude_uuid=?", (claude_uuid,)).fetchone()
+        return SessionBinding(**dict(row))

@@ -61,3 +61,15 @@ class OutboxItem:
 class Budget:
     max_turns: int = 50
     max_usd: float = 5.0
+
+
+@dataclass
+class CronJob:
+    """M4 主动服务任务行（cron_jobs 表）：daily=定时日报 / patrol=周期巡检。"""
+    id: int
+    name: str
+    enabled: int
+    time_of_day: str | None    # daily 用：'08:00'
+    interval_min: int | None   # patrol 用：分钟
+    last_run_at: int | None
+    last_result: str | None
