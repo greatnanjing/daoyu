@@ -17,7 +17,7 @@
                      │                                             │
   ① gateway 前端     │  ClawBot 适配层 (Python)                    │
      (ClawBot)       │  iLink 长轮询收 / sendmessage 发 / sendtyping│
-       │             │  统一命令路由 / 连接守护（被动重连）              │
+       │             │  统一命令路由 / 连接守护（主动续期+被动重连）      │
        ▼             │      │ 入站落盘+去重                          │
   ② SQLite (WAL)    │  messages / tasks / outbox / sessions 表    │
        │             │      │ 派发                                   │
@@ -95,6 +95,8 @@ claude -p \
   --bare --max-turns 50 --max-budget-usd 5 \   # 注：-p 路径现已不带 --bare（见上表）；此处示例为 bg 分支形态
   --output-format stream-json --verbose --include-partial-messages
 # cwd = 绑定的工作目录; prompt 经 stdin 传入
+# 勘误（§13-1）：strict 档实际 --permission-mode default（acceptEdits 不触发
+# 审批 prompt-tool）；--allowedTools 现按 policy 档在 cli_builder 装配
 ```
 
 ### 4.2 会话管理
@@ -126,7 +128,8 @@ worker 内宿主一个本地 MCP server，暴露 `approve` 工具，配 `--permi
 
 ```
 收到 "/xxx args"
-  1. 若 xxx ∈ 桥命令(/cancel /tasks /status /cd /sessions /policy /bg /new /adopt)
+  1. 若 xxx ∈ 桥命令(/cancel /tasks /status /cd /sessions /policy /bg /new
+     /adopt /delete)
      → gateway 本地执行, 秒回
      (另有继承自 ClawBot 库的 iLink 运维命令 /time /重新连接, 在 gateway 处理)
   2. 若 xxx ∈ headless 可用命令集(启动时从 system/init slash_commands 同步,
@@ -147,7 +150,8 @@ messages(            -- 入站
   id INTEGER PK, msg_id TEXT UNIQUE,   -- 微信 msg_id, 幂等去重键
   from_user TEXT, text TEXT,
   context_token TEXT,                  -- 仅存最新, 发送回包用
-  received_at INTEGER, state TEXT      -- received/queued
+  received_at INTEGER, state TEXT,     -- received/queued
+  media_path TEXT                      -- M3: 入站图片落盘路径
 )
 tasks(               -- 任务
   id INTEGER PK, message_id INTEGER, session_id INTEGER,
@@ -162,13 +166,16 @@ outbox(              -- 出站(发件箱)
   text TEXT, seq INTEGER,              -- 分页序号
   state TEXT,                          -- pending/sent/failed/dead
   attempts INTEGER DEFAULT 0, max_attempts INTEGER DEFAULT 5,  -- 对齐 PRD NFR-2: 至少重试 5 次
-  last_error TEXT, created_at INTEGER
+  last_error TEXT, created_at INTEGER,
+  kind TEXT DEFAULT 'text',            -- M3: text|image
+  media_path TEXT, caption TEXT,       -- M3: 图片行媒体文件与配文
+  sent_at INTEGER                      -- 收尾批: 送达时间(出站日计数按页折算+跨重启恢复)
 )
-sessions(            -- 会话绑定
+sessions(            -- 会话绑定（M2 后: 同目录多话题）
   id INTEGER PK, wechat_user TEXT, cwd TEXT,
   claude_uuid TEXT, policy TEXT DEFAULT 'auto',
   created_at INTEGER, last_active_at INTEGER,
-  UNIQUE(wechat_user, cwd)
+  UNIQUE(wechat_user, cwd, claude_uuid)
 )
 audit_log(           -- 审计: 命令/配置变更/审批记录/费用
   id INTEGER PK, ts INTEGER, kind TEXT, detail TEXT
@@ -235,6 +242,8 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 
 ## 10. 测试策略
 
+> 终态：359 个自动化测试全绿（`python -m pytest`，单元/集成/E2E 三层——E2E 用 fake iLink + fake claude 子进程覆盖收发/审批往返/bg 冒烟/媒体双向）；真机 E2E 项（多轮对话、/review、崩溃恢复、审批 Y/N、bg、媒体、playwright、/cancel 进程清理）已在 M1~M3 与收尾批各验收期逐项实证，记录见 `.superpowers/sdd/progress.md` 台账。
+
 | 层 | 内容 |
 |---|---|
 | 单元 | 命令路由三分支；msg_id 去重；outbox 重试/死信状态机；命令行组装（policy→flags 映射）；长文分页 |
@@ -255,6 +264,8 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 | Claude Code 版本漂移（flag 行为随版本变） | 持续风险 | **机制化（2026-08-20）**：启动探测 `claude --version` 与 `worker/version.py` 的 `EXPECTED_CLAUDE_VERSION`（当前 2.1.233）比对，匹配 audit 留痕、漂移/失败 audit+warning（fail-open 不阻断）；升级流程 = 改常量 → 全量 pytest → 服务器 npm 升级。**已知局限（2026-08-20 实证）**：npm auto-update 会在服务运行期中途升级（实测 2.1.233→2.1.235），启动探测抓不到长跑中途漂移（下次 restart 报 drift）；周期复探为候选改进 |
 
 ## 12. 实现顺序建议（对应 PRD 里程碑）
+
+> 终态：三阶段 + 2026-08-20 收尾批全部完成并真机验收（PRD §9 里程碑表有逐项标记）；下文为当时的设计顺序，"AI 视觉"MCP 最终未做（OCR 以 RapidOCR 本地封装替代）。
 
 1. **M1**：SQLite schema → gateway 收发+落盘去重 → worker 调 `claude -p`（会话绑定、stream 解析、节流推送）→ 命令总线（转发/代理/桥命令）→ 崩溃恢复 → E2E。
 2. **M2**：审批 MCP → `--bg` 长任务 → MCP 装载（chrome-devtools/OCR/AI 视觉/web-reader/context7）→ 配置代理命令全套 → `/policy` 四档完整 → 监控告警。

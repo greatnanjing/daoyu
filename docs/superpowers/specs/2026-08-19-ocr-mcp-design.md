@@ -1,7 +1,7 @@
 # 刀鱼 M3 余项 B：OCR MCP（RapidOCR 本地封装）设计
 
 - **日期**: 2026-08-19
-- **状态**: 已确认（本 session 需求澄清与设计结论的沉淀）
+- **状态**: 已实现并真机验收通过（2026-08-19：OCR 主链路 / /mcp 列表呈现系统条目 / off 系统条目拦截 / bg 回归四项全过，见 progress 台账余项 B 段）
 - **配套文档**: [PRD.md](../../PRD.md) / [TRD.md](../../TRD.md) / [M3 media spec](2026-08-19-m3-media-design.md)（§1 划出的独立小项目之一）
 - **前置**: [余项 A spec](2026-08-19-mcp-config-writable-design.md) 先行完成（mcp.json 平台无关化与 /mcp 启停是本项装载的干净前提）
 

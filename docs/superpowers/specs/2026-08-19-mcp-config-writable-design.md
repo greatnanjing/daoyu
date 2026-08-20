@@ -1,7 +1,7 @@
 # 刀鱼 M3 余项 A：/mcp 启停与 /config 写入设计
 
 - **日期**: 2026-08-19
-- **状态**: 已确认（本 session 需求澄清与设计结论的沉淀）
+- **状态**: 已实现并真机验收通过（2026-08-19 生产服务器：/mcp 启停 audit 实证、off 后任务不炸、/config set 重启后运行值=文件值，见 progress 台账余项 A 段）
 - **配套文档**: [PRD.md](../../PRD.md) / [TRD.md](../../TRD.md) / [M3 media spec](2026-08-19-m3-media-design.md)（§1 划出的独立小项目之一）
 - **姊妹篇**: [OCR MCP spec](2026-08-19-ocr-mcp-design.md)（M3 余项 B，本项完成后开发）
 
