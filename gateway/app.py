@@ -315,6 +315,7 @@ async def main_async() -> None:
                           poll_interval_s=cfg.worker.get("poll_interval_s", 0.5))
         outbound = OutboundLoop(db, ilink, cfg, token_ref, typing_state)
 
+        from gateway.scheduler import scheduler_loop
         tasks = [
             asyncio.create_task(pool.run_forever(), name="worker-pool"),
             asyncio.create_task(outbound.run_forever(), name="outbound"),
@@ -323,6 +324,7 @@ async def main_async() -> None:
                                 name="reconnect"),
             asyncio.create_task(poll_loop(db, cfg, ilink, pool, outbound, token_ref),
                                 name="poll"),
+            asyncio.create_task(scheduler_loop(db, cfg), name="scheduler"),
         ]
         log.info("刀鱼已启动（gateway+worker 同进程）")
         try:

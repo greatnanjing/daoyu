@@ -370,3 +370,45 @@ def test_run_patrol_alert_and_silence(db, tmp_path):
     r3 = run_patrol(db, cfg, _ANCHOR + 6 * 3600 + 60, bad,
                     deque([20.0] * 5), deque([60.0] * 5))
     assert "告警" in r3
+
+
+def test_scheduler_loop_dispatch(db, tmp_path, monkeypatch):
+    """一轮分发：daily/patrol 到点各自触发一次并落 last_result；未到点不动。"""
+    import gateway.scheduler as sch
+    cfg = _dcfg(tmp_path)
+    calls = []
+    # brief 原文缺此行：daily 预设 08:00 而 _tick 以真实墙钟判定，凌晨跑测试
+    # （now < 今日 08:00）daily 恒不 due → 首断言必挂。改 00:00 使今日时刻恒
+    # 已过，断言语义（预置行从未跑 → 双双 due）不变。
+    db.update_cron("daily", time_of_day="00:00")
+
+    def fake_run_daily(d, c, now, sample):
+        calls.append("daily"); return "日报OK"
+
+    def fake_run_patrol(d, c, now, sample, cw, mw):
+        calls.append("patrol"); return "巡检OK"
+
+    monkeypatch.setattr(sch, "run_daily", fake_run_daily)
+    monkeypatch.setattr(sch, "run_patrol", fake_run_patrol)
+    monkeypatch.setattr(sch, "psutil_sample", lambda cfg: dict(_SAMPLE_OK))
+
+    async def one_round():
+        await sch._tick(db, cfg)   # 单轮内联：scheduler_loop 的每分钟体
+
+    import asyncio
+    asyncio.get_event_loop_policy()
+    asyncio.run(one_round())
+    assert calls == ["daily", "patrol"]        # 预置行从未跑 → 双双 due
+    j = {x.name: x for x in db.cron_jobs()}
+    assert j["daily"].last_result == "日报OK"
+    assert j["patrol"].last_result == "巡检OK"
+    # 第二轮：patrol 间隔未满、daily 今日已跑 → 都不动
+    calls.clear()
+    asyncio.run(one_round())
+    assert calls == []
+    # off 后即便到点也不跑
+    db.update_cron("patrol", enabled=0)
+    db.update_cron("patrol", touch_last_run=_ANCHOR - 99999)
+    calls.clear()
+    asyncio.run(one_round())
+    assert calls == []

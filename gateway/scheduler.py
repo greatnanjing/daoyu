@@ -5,7 +5,9 @@ scheduler_loop 每分钟整分对齐醒来、现读 cron_jobs 表决定动作（
 outbox（发白名单全部用户），异常时建 Claude 分析任务挂 ops 话题（固定
 UUID，分析历史上下文延续）。scheduler 绝不直接调 iLink、不自己跑 Claude。
 """
+import asyncio
 import json
+import os
 import time
 from collections import deque
 from pathlib import Path
@@ -254,3 +256,72 @@ def run_patrol(db, cfg, now: int, sample: dict, cpu_win, mem_win) -> str:
     _broadcast(db, cfg, "\n".join(lines))
     db.audit("cron_patrol", f"alerts={len(fresh)}")
     return f"告警 {len(fresh)} 项，已推送并建分析任务 #{tid}"
+
+
+def psutil_sample(cfg) -> dict:
+    """sample 契约的真实实现（测试注入 fake，此处才碰 psutil——lazy import：
+    未装 psutil 的环境 /cron 命令不受影响）。disks 取系统根与 default_cwd
+    所在盘，按 (total, free) 去重（同盘两路径不重复报）。"""
+    import psutil
+    disks, seen = {}, set()
+    for p in {os.path.abspath(os.sep), cfg.default_cwd}:
+        try:
+            du = psutil.disk_usage(p)
+        except (OSError, ValueError):
+            continue
+        sig = (du.total, du.free)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        disks[p] = du.percent
+    return {"cpu": psutil.cpu_percent(interval=None),
+            "mem": psutil.virtual_memory().percent,
+            "disks": disks,
+            "boot_days": (time.time() - psutil.boot_time()) / 86400.0}
+
+
+async def _tick(db, cfg, cpu_win=None, mem_win=None) -> None:
+    """scheduler_loop 的单轮体（独立成函数便于测试注入）：采样 → 轻量窗口 →
+    到点分发。先 mark_cron_run 占位再跑——同分钟崩溃重入不重复推送。"""
+    now = int(time.time())
+    if cpu_win is None:
+        cpu_win = deque(maxlen=cfg.cron["load_sustain_min"])
+    if mem_win is None:
+        mem_win = deque(maxlen=cfg.cron["load_sustain_min"])
+    sample = psutil_sample(cfg)
+    cpu_win.append(sample["cpu"])
+    mem_win.append(sample["mem"])
+    jobs = {j.name: j for j in db.cron_jobs()}
+    d, p = jobs.get("daily"), jobs.get("patrol")
+    if d is not None and due_daily(d, now):
+        db.mark_cron_run("daily", "运行中")
+        db.mark_cron_run("daily", run_daily(db, cfg, now, sample))
+    if p is not None and due_patrol(p, now):
+        db.mark_cron_run("patrol", "运行中")
+        db.mark_cron_run("patrol", run_patrol(db, cfg, now, sample, cpu_win, mem_win))
+
+
+async def scheduler_loop(db, cfg) -> None:
+    """M4 第五常驻协程：每分钟整分对齐醒来跑一轮 _tick。整轮异常不杀协程
+    （调度器死 ≠ 通道死），记 audit 下轮重来。启动先空采一次 CPU——
+    psutil.cpu_percent 首调返回 0.0，预热后窗口首样本不失真。"""
+    try:
+        import psutil
+        psutil.cpu_percent(interval=None)
+    except Exception:
+        pass
+    # 窗口在 loop 建一次跨轮持久（brief 原文每轮在 _tick 内新开）：持续超载
+    # 判定需连续 load_sustain_min 个样本，每轮新开窗口恒只 1 样本 → CPU/
+    # 内存「持续 N 分钟」告警永久失效；_tick 的 cpu_win/mem_win 形参正为此设。
+    cpu_win = deque(maxlen=cfg.cron["load_sustain_min"])
+    mem_win = deque(maxlen=cfg.cron["load_sustain_min"])
+    while True:
+        now = time.time()
+        try:
+            await _tick(db, cfg, cpu_win, mem_win)
+        except Exception as e:   # noqa: BLE001 —— 保姆代码，不杀协程
+            try:
+                db.audit("cron_error", repr(e))
+            except Exception:
+                pass
+        await asyncio.sleep(60 - int(now) % 60 or 60)

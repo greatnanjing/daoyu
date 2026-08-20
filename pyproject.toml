@@ -3,7 +3,7 @@ name = "daoyu"
 version = "0.1.0"
 description = "把微信变成 Claude Code 的遥控器"
 requires-python = ">=3.11"
-dependencies = ["aiohttp>=3.9", "cryptography>=42", "rapidocr-onnxruntime>=1.4"]
+dependencies = ["aiohttp>=3.9", "cryptography>=42", "rapidocr-onnxruntime>=1.4", "psutil>=5.9"]
 
 [project.scripts]
 daoyu = "gateway.app:start"
