@@ -231,14 +231,21 @@ def test_run_daily_normal(db, tmp_path):
     # brief 原文缺此行：online 判定读 state bot_token（login/reconnect 写入），
     # 空测试库无 token → online=False 恒走异常分支。正常轮次前提是已登录。
     db.set_state("bot_token", "fake-token")
+    # backlog 口径 = pending+running（spec §4，与巡检 active_tasks 一致）：
+    # 造一个 running 任务（无 pending），旧 queue_depth（仅 pending）会数成 0。
+    s = db.get_or_create_session("u@im.wechat", "/repo")
+    rid = db.create_task(None, s.id, "running-job")
+    db._conn.execute("UPDATE tasks SET state='running' WHERE id=?", (rid,))
+    db._conn.commit()
     result = run_daily(db, cfg, _ANCHOR, dict(_SAMPLE_OK))
     assert "正常" in result
     rows = db._conn.execute(
         "SELECT to_user, text FROM outbox WHERE text LIKE '%日报%'").fetchall()
     assert rows and rows[0]["to_user"] == "u@im.wechat"
+    assert "队列 1" in rows[0]["text"]
     assert "⏳" not in rows[0]["text"]
-    # 正常轮次零 Claude 调用：无新任务、无 cost 行
-    assert db._conn.execute("SELECT COUNT(*) c FROM tasks").fetchone()["c"] == 0
+    # 正常轮次零 Claude 调用：无新任务（上面预置的 1 个 running 是基线）、无 cost 行
+    assert db._conn.execute("SELECT COUNT(*) c FROM tasks").fetchone()["c"] == 1
 
 
 def test_run_daily_anomaly_escalates(db, tmp_path):

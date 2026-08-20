@@ -17,7 +17,9 @@ MCP_USAGE = "用法：/mcp — 列表；/mcp off <序号|名字> 停用；/mcp o
 CONFIG_USAGE = ("用法：/config — 概览；/config set <键> <值>（可改键："
                 "throttle.min_send_interval_s/progress_window_s/"
                 "page_char_limit/daily_send_limit、budget.max_turns/max_usd、"
-                "worker.concurrency；重启生效）")
+                "worker.concurrency、cron.disk_threshold_pct/cpu_threshold_pct/"
+                "mem_threshold_pct/load_sustain_min/cert_warn_days/"
+                "alert_silence_h/queue_backlog_warn；重启生效）")
 _SCOPES = ("deny", "allow")
 
 

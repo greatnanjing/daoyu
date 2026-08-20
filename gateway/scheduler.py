@@ -93,7 +93,7 @@ def collect_daily_data(db, cfg, now: int, sample: dict) -> dict:
         "cpu": sample.get("cpu", 0.0), "mem": sample.get("mem", 0.0),
         "disks": sample.get("disks", {}), "boot_days": sample.get("boot_days", 0.0),
         "sent": db.outbox_sent_count(day_start, day_end),
-        "backlog": db.queue_depth(),
+        "backlog": len(db.active_tasks()),
         "dead_outbox": db.dead_letter_count(),
         "online": bool(db.get_state("bot_token")),
         "media_mb": _media_mb(cfg),
