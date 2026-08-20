@@ -78,3 +78,13 @@ def test_create_fixed_session_idempotent(db):
     assert b2.id == b.id
     # 不动当前话题指针
     assert db.get_state("active_session:u@im.wechat") is None
+
+
+def test_config_cron_defaults():
+    """实例 config.json 无 cron 节时给全默认（config.example.json 同构）。"""
+    from common.config import _DEFAULT_CRON
+    assert _DEFAULT_CRON["disk_threshold_pct"] == 85
+    assert _DEFAULT_CRON["load_sustain_min"] == 5
+    assert _DEFAULT_CRON["cert_paths"] == ["/etc/letsencrypt/live"]
+    assert _DEFAULT_CRON["alert_silence_h"] == 6
+    assert _DEFAULT_CRON["queue_backlog_warn"] == 20

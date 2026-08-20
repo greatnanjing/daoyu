@@ -29,5 +29,15 @@
     "force_before_s": 1800,
     "qrcode_scan_timeout_s": 600,
     "silent_grace_s": 30
+  },
+  "cron": {
+    "disk_threshold_pct": 85,
+    "cpu_threshold_pct": 90,
+    "mem_threshold_pct": 90,
+    "load_sustain_min": 5,
+    "cert_warn_days": 14,
+    "cert_paths": ["/etc/letsencrypt/live"],
+    "alert_silence_h": 6,
+    "queue_backlog_warn": 20
   }
 }

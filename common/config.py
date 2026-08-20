@@ -22,6 +22,12 @@ _DEFAULT_WORKER = {"concurrency": 3, "poll_interval_s": 0.5,
 _DEFAULT_RECONNECT = {"session_duration_s": 2592000, "warning_before_s": 7200,
                       "reminder_interval_s": 1800, "force_before_s": 1800,
                       "qrcode_scan_timeout_s": 600, "silent_grace_s": 30}
+# M4 主动服务阈值（scheduler 读取）。cert_paths 为列表不进 /config set 白名单
+# （低频运维键，直接改文件）；数值键经 proxy.CONFIG_KEYS 开放微信 set。
+_DEFAULT_CRON = {"disk_threshold_pct": 85, "cpu_threshold_pct": 90,
+                 "mem_threshold_pct": 90, "load_sustain_min": 5,
+                 "cert_warn_days": 14, "cert_paths": ["/etc/letsencrypt/live"],
+                 "alert_silence_h": 6, "queue_backlog_warn": 20}
 
 
 @dataclass
@@ -39,6 +45,8 @@ class Config:
     # data/media/inbound|outbound 的保留天数（过期 img-* 文件启动/日界时清理；
     # M3 审查追加项。不进 /config set 白名单——低频运维键，直接改文件）
     media_retention_days: float = 14.0
+    # M4 主动服务阈值（/config set 可改数值键，重启生效）
+    cron: dict = field(default_factory=lambda: dict(_DEFAULT_CRON))
 
 
 def load_config(repo_root: Path | None = None) -> Config:
@@ -63,6 +71,8 @@ def load_config(repo_root: Path | None = None) -> Config:
     worker.update(raw.get("worker") or {})
     reconnect = dict(_DEFAULT_RECONNECT)
     reconnect.update(raw.get("reconnect") or {})
+    cron = dict(_DEFAULT_CRON)
+    cron.update(raw.get("cron") or {})
 
     budget_raw = raw.get("budget", {})
     try:
@@ -80,6 +90,7 @@ def load_config(repo_root: Path | None = None) -> Config:
         throttle=throttle,
         worker=worker,
         reconnect=reconnect,
+        cron=cron,
         budget=budget,
         secrets=secrets,
         media_retention_days=float(raw.get("media_retention_days", 14.0)),

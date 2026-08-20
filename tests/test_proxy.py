@@ -571,3 +571,18 @@ async def test_config_set_rejects_non_object_section(db, tmp_path):
         db, _route("config", "set worker.concurrency 2"), FakeCfg(tmp_path))
     assert "不是对象" in reply and "改 gateway/config.json" in reply
     assert _read_gateway_config(tmp_path)["worker"] == "x"
+
+
+def test_config_set_cron_key(tmp_path, monkeypatch):
+    """/config set cron.disk_threshold_pct 白名单可写、范围校验生效。"""
+    import json as _json
+    from gateway import proxy
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(_json.dumps({"cron": {"disk_threshold_pct": 85}}),
+                        encoding="utf-8")
+    raw = _json.loads(cfg_path.read_text(encoding="utf-8"))
+    reply = proxy._config_set(cfg_path, raw, ["cron.disk_threshold_pct", "92"])
+    assert reply.startswith("已写入")
+    assert _json.loads(cfg_path.read_text(encoding="utf-8"))["cron"]["disk_threshold_pct"] == 92
+    raw = _json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert proxy._config_set(cfg_path, raw, ["cron.disk_threshold_pct", "101"]).startswith("值")

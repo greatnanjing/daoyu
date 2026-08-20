@@ -291,6 +291,13 @@ CONFIG_KEYS = {
     "budget.max_turns": (int, lambda v: v >= 1, "整数"),
     "budget.max_usd": (float, lambda v: v > 0, "数值"),
     "worker.concurrency": (int, lambda v: 1 <= v <= 10, "整数"),
+    "cron.disk_threshold_pct": (int, lambda v: 50 <= v <= 99, "整数"),
+    "cron.cpu_threshold_pct": (int, lambda v: 50 <= v <= 99, "整数"),
+    "cron.mem_threshold_pct": (int, lambda v: 50 <= v <= 99, "整数"),
+    "cron.load_sustain_min": (int, lambda v: 1 <= v <= 60, "整数"),
+    "cron.cert_warn_days": (int, lambda v: 1 <= v <= 90, "整数"),
+    "cron.alert_silence_h": (int, lambda v: 1 <= v <= 72, "整数"),
+    "cron.queue_backlog_warn": (int, lambda v: 1 <= v <= 500, "整数"),
 }
 
 
