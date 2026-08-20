@@ -9,3 +9,4 @@ qrcode.*
 .superpowers/
 *.egg-info/
 .playwright-mcp/
+deploy/daoyu.service
