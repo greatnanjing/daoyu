@@ -15,6 +15,7 @@ BRIDGE_HELP = {
     "sessions": "/sessions — 按目录列出全部话题（/cd #n 切换、/new 开新）",
     "policy": "/policy <auto|strict|bypass|plan> — 当前话题的权限档位",
     "bg": "/bg <任务描述> — 转入后台长任务（claude --bg，完成自动回报结果）",
+    "cron": "/cron — 定时任务（日报/巡检）：on|off、time daily <HH:MM>、interval patrol <分钟>",
 }
 ILINK_HELP = {
     "time": "/time — 连接剩余时间",
@@ -229,6 +230,8 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
         tid = db.create_task(None, s.id, prompt, kind="bg")
         await pool.submit_check()
         return f"已转后台（任务 #{tid}），/tasks 查进度、/cancel 取消。"
+    if cmd == "cron":
+        return _cron(db, route.args.strip())
     return f"未知桥命令 {cmd}"
 
 
@@ -317,3 +320,58 @@ def _delete(db, arg: str, from_user: str, config) -> str:
                 f"不可恢复。回复 Y 确认 / N 取消")
     return ("用法：/delete #<序号> 删话题；/delete task <任务号> 删任务记录"
             "（删除前会请你回 Y 确认）")
+
+
+def _cron(db, arg: str) -> str:
+    """/cron 主动服务管理（M4）：写 cron_jobs 表，scheduler 每轮现读即时生效。
+    daily=定时日报 / patrol=周期巡检（详见 scheduler 模块）。"""
+    from gateway.scheduler import next_run_time   # 局部导入：scheduler lazy psutil
+    parts = arg.split()
+    jobs = {j.name: j for j in db.cron_jobs()}
+    usage = ("用法：/cron — 列表；/cron on|off <daily|patrol>；"
+             "/cron time daily <HH:MM>；/cron interval patrol <分钟>")
+    if not parts or parts[0] == "list":
+        now = int(time.time())
+        lines = []
+        for name, icon in (("daily", "📅"), ("patrol", "🔍")):
+            j = jobs.get(name)
+            if j is None:
+                continue
+            mark = "✅" if j.enabled else "⏸"
+            sched = (f"每天 {j.time_of_day}" if name == "daily"
+                     else f"每 {j.interval_min} 分钟")
+            nxt = next_run_time(j, now)
+            nxt_s = time.strftime("%m-%d %H:%M", time.localtime(nxt)) if nxt else "—"
+            lines.append(f"{icon} {name} {mark} {sched}（下次：{nxt_s}）")
+            if j.last_run_at:
+                lr = time.strftime("%m-%d %H:%M", time.localtime(j.last_run_at))
+                lines.append(f"   └ 上次 {lr} · {j.last_result or '—'}")
+            else:
+                lines.append("   └ 尚未运行")
+        lines.append(usage)
+        return "\n".join(lines)
+    op = parts[0].lower()
+    if op in ("on", "off") and len(parts) == 2 and parts[1] in ("daily", "patrol"):
+        db.update_cron(parts[1], enabled=1 if op == "on" else 0,
+                       touch_last_run=int(time.time()) if op == "on" else None)
+        db.audit("cron", f"{op} {parts[1]} user")
+        if op == "on":
+            return (f"{parts[1]} 已开启（从当前时刻起算：daily 到点即跑、"
+                    f"patrol 满一个间隔后跑首轮）。")
+        return f"{parts[1]} 已暂停。"
+    if op == "time" and len(parts) == 3 and parts[1] == "daily":
+        hhmm = parts[2]
+        ok = (len(hhmm) == 5 and hhmm[2] == ":" and hhmm[:2].isdigit()
+              and hhmm[3:].isdigit() and int(hhmm[:2]) < 24 and int(hhmm[3:]) < 60)
+        if not ok:
+            return "时间格式应为 HH:MM（如 08:30）。"
+        db.update_cron("daily", time_of_day=hhmm)
+        db.audit("cron", f"time daily {hhmm}")
+        return f"日报时间已改为每天 {hhmm}。"
+    if op == "interval" and len(parts) == 3 and parts[1] == "patrol":
+        if not parts[2].isdigit() or int(parts[2]) < 1:
+            return "间隔应为 ≥1 的分钟数。"
+        db.update_cron("patrol", interval_min=int(parts[2]))
+        db.audit("cron", f"interval patrol {parts[2]}")
+        return f"巡检间隔已改为 {parts[2]} 分钟。"
+    return usage

@@ -88,3 +88,96 @@ def test_config_cron_defaults():
     assert _DEFAULT_CRON["cert_paths"] == ["/etc/letsencrypt/live"]
     assert _DEFAULT_CRON["alert_silence_h"] == 6
     assert _DEFAULT_CRON["queue_backlog_warn"] == 20
+
+
+# ---- 调度判定（时间注入；固定锚点 2026-08-21 10:30 本地）----
+_ANCHOR = int(time.mktime((2026, 8, 21, 10, 30, 0, 0, 0, -1)))
+
+
+def _job(**kw):
+    from common.models import CronJob
+    base = dict(id=1, name="daily", enabled=1, time_of_day="08:00",
+                interval_min=None, last_run_at=None, last_result=None)
+    base.update(kw)
+    return CronJob(**base)
+
+
+def test_due_daily():
+    from gateway.scheduler import due_daily
+    # 今日 08:00 已过、从未跑 → due
+    assert due_daily(_job(), _ANCHOR) is True
+    # 上次跑在今日 08:00 之后 → 今日已跑，不 due
+    assert due_daily(_job(last_run_at=_ANCHOR), _ANCHOR) is False
+    # 还没到点（07:00 时刻）→ 不 due
+    early = _ANCHOR - 3 * 3600
+    assert due_daily(_job(), early) is False
+    # 禁用恒不 due
+    assert due_daily(_job(enabled=0), _ANCHOR) is False
+
+
+def test_due_patrol():
+    from gateway.scheduler import due_patrol
+    p = dict(id=2, name="patrol", enabled=1, time_of_day=None, interval_min=10)
+    # 从未跑（last_run_at=None）→ 立即 due（首轮建立基线）
+    assert due_patrol(_job(**p), _ANCHOR) is True
+    # 5 分钟前跑过、间隔 10 → 未到
+    assert due_patrol(_job(**p, last_run_at=_ANCHOR - 300), _ANCHOR) is False
+    # 11 分钟前跑过 → due
+    assert due_patrol(_job(**p, last_run_at=_ANCHOR - 660), _ANCHOR) is True
+
+
+def test_next_run_time():
+    from gateway.scheduler import next_run_time
+    early = _ANCHOR - 3 * 3600   # 07:30：daily 下次 = 今日 08:00
+    assert next_run_time(_job(), early) == early + 1800
+    # 明日 08:00 = 锚点 10:30 + 21.5h；brief 原文 16*3600+1800（16.5h=明日 03:00）
+    # 与其注释「明日 08:00」及实现（ts+=86400）矛盾，实测失败后按语义修正。
+    assert next_run_time(_job(), _ANCHOR) == _ANCHOR + 21 * 3600 + 1800
+    assert next_run_time(_job(enabled=0), _ANCHOR) is None
+    p = dict(id=2, name="patrol", enabled=1, time_of_day=None, interval_min=10)
+    assert next_run_time(_job(**p, last_run_at=_ANCHOR - 300), _ANCHOR) == _ANCHOR + 300
+
+
+class _FakeCfg:
+    def __init__(self):
+        self.reconnect = {"session_duration_s": 86400}
+        self.default_cwd = "/repo"
+        self.throttle = {"page_char_limit": 2000}
+
+
+def _route(cmd, args=""):
+    from gateway.router import Route
+    return Route(kind="bridge", command=cmd, args=args, detail={})
+
+
+async def test_cron_cmd(db):
+    from gateway.bridge import execute_bridge
+    # 列表（无参 = list）
+    r = await execute_bridge(db, None, _route("cron"), "u@im.wechat", _FakeCfg())
+    assert "daily" in r and "patrol" in r and "08:00" in r
+    # off / on
+    r = await execute_bridge(db, None, _route("cron", "off patrol"), "u@im.wechat", _FakeCfg())
+    assert "已暂停" in r
+    j = {x.name: x for x in db.cron_jobs()}["patrol"]
+    assert j.enabled == 0
+    r = await execute_bridge(db, None, _route("cron", "on patrol"), "u@im.wechat", _FakeCfg())
+    assert "已开启" in r
+    # time / interval
+    r = await execute_bridge(db, None, _route("cron", "time daily 09:30"),
+                             "u@im.wechat", _FakeCfg())
+    assert "09:30" in r
+    assert {x.name: x for x in db.cron_jobs()}["daily"].time_of_day == "09:30"
+    r = await execute_bridge(db, None, _route("cron", "interval patrol 15"),
+                             "u@im.wechat", _FakeCfg())
+    assert "15" in r
+    # 非法参数回用法
+    r = await execute_bridge(db, None, _route("cron", "time daily 25:99"),
+                             "u@im.wechat", _FakeCfg())
+    assert "HH:MM" in r
+    r = await execute_bridge(db, None, _route("cron", "bogus"), "u@im.wechat", _FakeCfg())
+    assert "用法" in r
+
+
+def test_router_cron_bridge():
+    from gateway.router import route
+    assert route("/cron", set()).kind == "bridge"
