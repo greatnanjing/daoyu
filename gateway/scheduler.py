@@ -7,6 +7,7 @@ UUID，分析历史上下文延续）。scheduler 绝不直接调 iLink、不自
 """
 import json
 import time
+from collections import deque
 from pathlib import Path
 
 from common.models import CronJob
@@ -157,3 +158,98 @@ def run_daily(db, cfg, now: int, sample: dict) -> str:
     _broadcast(db, cfg, text)
     db.audit("cron_daily", f"anomalies={len(anomalies)}")
     return f"异常 {len(anomalies)} 项，已推送并建分析任务"
+
+
+def check_patrol(db, cfg, now: int, sample: dict, cpu_win, mem_win) -> list[dict]:
+    """巡检判定（纯函数式，异常项列表）：磁盘 / CPU / 内存持续超载 /
+    队列积压 / iLink token / 证书。死信不查——M2 已有即时告警专责，
+    巡检不双通道重复。"""
+    c = cfg.cron
+    alerts = []
+    for path, pct in sorted(sample.get("disks", {}).items()):
+        if pct > c["disk_threshold_pct"]:
+            alerts.append({"key": f"disk:{path}", "title": "磁盘",
+                           "lines": [f"{path} 分区 {pct:.0f}%（阈值 "
+                                     f"{c['disk_threshold_pct']}%）"]})
+    n = c["load_sustain_min"]
+    cpu_recent = list(cpu_win)[-n:]
+    if len(cpu_recent) >= n and all(v > c["cpu_threshold_pct"] for v in cpu_recent):
+        alerts.append({"key": "cpu", "title": "CPU",
+                       "lines": [f"持续 {c['cpu_threshold_pct']}%+ 达 {n} 分钟"]})
+    mem_recent = list(mem_win)[-n:]
+    if len(mem_recent) >= n and all(v > c["mem_threshold_pct"] for v in mem_recent):
+        alerts.append({"key": "mem", "title": "内存",
+                       "lines": [f"持续 {c['mem_threshold_pct']}%+ 达 {n} 分钟"]})
+    backlog = len(db.active_tasks())
+    if backlog > c["queue_backlog_warn"]:
+        alerts.append({"key": "queue", "title": "队列",
+                       "lines": [f"积压 {backlog} 个任务（预警 "
+                                 f"{c['queue_backlog_warn']}）"]})
+    if not db.get_state("bot_token"):
+        alerts.append({"key": "ilink_token", "title": "连接",
+                       "lines": ["iLink token 缺失（连接未建立）"]})
+    alerts += check_certs(cfg, now)
+    return alerts
+
+
+def check_certs(cfg, now: int) -> list[dict]:
+    """cert_paths 下 *.pem 读 NotAfter；剩余 < cert_warn_days 告警。
+    路径不存在/非证书文件跳过（Windows 开发机、privkey.pem 均不误报炸）。"""
+    from cryptography import x509
+    import datetime
+    c = cfg.cron
+    alerts = []
+    for base in c.get("cert_paths", []):
+        basep = Path(base)
+        if not basep.is_dir():
+            continue
+        for pem in sorted(basep.rglob("*.pem")):
+            try:
+                cert = x509.load_pem_x509_certificate(pem.read_bytes())
+                days_left = (cert.not_valid_after_utc
+                             - datetime.datetime.now(datetime.timezone.utc)).days
+            except (ValueError, OSError):
+                continue
+            if days_left < c["cert_warn_days"]:
+                alerts.append({"key": f"cert:{pem}", "title": "证书",
+                               "lines": [f"{pem} 剩余 {days_left} 天（预警 "
+                                         f"{c['cert_warn_days']} 天）"]})
+    return alerts
+
+
+def silenced(db, key: str, silence_s: int, now: int) -> bool:
+    """同类异常静默期内（alert_silence_h）不重报——防重复告警重复建任务烧钱；
+    过期后仍异常会再报一次（防「告一次永远沉默」）。"""
+    ts = db.get_state(f"cron_alert:{key}")
+    return bool(ts and ts.isdigit() and now - int(ts) < silence_s)
+
+
+def mark_alert(db, key: str, now: int) -> None:
+    db.set_state(f"cron_alert:{key}", str(now))
+
+
+def run_patrol(db, cfg, now: int, sample: dict, cpu_win, mem_win) -> str:
+    """巡检主流程：判定 → 静默期过滤 → 告警推送 + 合并建一个分析任务。
+    正常轮次零 Claude 调用（零成本原则）。"""
+    alerts = check_patrol(db, cfg, now, sample, cpu_win, mem_win)
+    if not alerts:
+        return "正常"
+    silence_s = int(cfg.cron["alert_silence_h"]) * 3600
+    fresh = [a for a in alerts if not silenced(db, a["key"], silence_s, now)]
+    if not fresh:
+        return f"{len(alerts)} 项异常均在静默期内"
+    lines = [f"⚠️ 巡检告警（{len(fresh)} 项）"]
+    for a in fresh:
+        lines += [f"[{a['title']}] {ln}" for ln in a["lines"]]
+    detail = "\n".join(f"[{a['title']}] " + "；".join(a["lines"]) for a in fresh)
+    prompt = ("刀鱼巡检系统自动任务：巡检发现以下异常，请分析原因并给出简要"
+              "结论与建议。\n\n" + detail +
+              "\n可执行只读命令（df/ps/日志/data/daoyu.db）辅助分析，结论一屏以内。")
+    sid = ensure_ops_session(db, cfg)
+    tid = db.create_task(None, sid, prompt, kind="chat")
+    for a in fresh:
+        mark_alert(db, a["key"], now)
+    lines.append(f"⏳ 已建分析任务 #{tid}，结论稍后推送")
+    _broadcast(db, cfg, "\n".join(lines))
+    db.audit("cron_patrol", f"alerts={len(fresh)}")
+    return f"告警 {len(fresh)} 项，已推送并建分析任务 #{tid}"

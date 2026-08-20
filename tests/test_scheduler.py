@@ -259,3 +259,115 @@ def test_run_daily_anomaly_escalates(db, tmp_path):
         "SELECT t.id, t.session_id FROM tasks t JOIN sessions s ON t.session_id=s.id "
         "WHERE s.claude_uuid=?", (OPS_UUID,)).fetchone()
     assert row is not None
+
+
+from collections import deque
+
+
+def test_check_patrol_items(db, tmp_path):
+    from gateway.scheduler import check_patrol
+    cfg = _dcfg(tmp_path)
+    now = _ANCHOR
+    # brief 原文缺此行（Task 4 test_run_daily_normal 同款笔误）：ilink_token
+    # 判定读 state bot_token，空测试库无 token → 首断言 == [] 与磁盘断言
+    # ["disk:/"] 恒被 ilink_token 项击穿。「正常无告警」前提是已登录；
+    # 中段再摘 token 验证 brief 注释「只剩 token 缺失一项」的原语义。
+    db.set_state("bot_token", "T")
+    # 正常采样 + 窗口低位 → 无告警
+    ok = check_patrol(db, cfg, now, dict(_SAMPLE_OK), deque([20.0] * 5), deque([60.0] * 5))
+    assert ok == []
+    # 磁盘超阈
+    bad = dict(_SAMPLE_OK, disks={"/": 91.0})
+    got = check_patrol(db, cfg, now, bad, deque([20.0] * 5), deque([60.0] * 5))
+    assert [a["key"] for a in got] == ["disk:/"]
+    # CPU 连续 5 采样超阈才告警；4 个不够
+    got = check_patrol(db, cfg, now, dict(_SAMPLE_OK),
+                       deque([95.0] * 5), deque([60.0] * 5))
+    assert "cpu" in [a["key"] for a in got]
+    got = check_patrol(db, cfg, now, dict(_SAMPLE_OK),
+                       deque([95.0] * 4), deque([60.0] * 5))
+    assert "cpu" not in [a["key"] for a in got]
+    # 队列积压：造 pending 任务（先摘 token，下断言才「只剩 token 缺失一项」）
+    db.delete_state("bot_token")
+    s = db.get_or_create_session("u@im.wechat", "/repo")
+    db.create_task(None, s.id, "queued")
+    got = check_patrol(db, cfg, now, dict(_SAMPLE_OK),
+                       deque([20.0] * 5), deque([60.0] * 5))
+    # backlog=1 未超 queue_backlog_warn=20 → 只剩 token 缺失一项
+    assert [a["key"] for a in got] == ["ilink_token"]
+    # token 在线后无告警
+    db.set_state("bot_token", "T")
+    assert check_patrol(db, cfg, now, dict(_SAMPLE_OK),
+                        deque([20.0] * 5), deque([60.0] * 5)) == []
+
+
+def test_check_certs(tmp_path):
+    from gateway.scheduler import check_certs
+    from common.config import _DEFAULT_CRON
+    import datetime
+    from types import SimpleNamespace
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    # 自签一张 7 天后到期的证书（< 预警 14 天）
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now_u = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "t")]))
+            .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "t")]))
+            .public_key(key.public_key())
+            .not_valid_before(now_u - datetime.timedelta(days=1))
+            .not_valid_after(now_u + datetime.timedelta(days=7))
+            .serial_number(x509.random_serial_number()).sign(key, hashes.SHA256()))
+    live = tmp_path / "letsencrypt" / "live" / "a"
+    live.mkdir(parents=True)
+    (live / "fullchain.pem").write_bytes(
+        cert.public_bytes(serialization.Encoding.PEM))
+    cfg = SimpleNamespace(cron=dict(_DEFAULT_CRON, cert_paths=[str(tmp_path / "letsencrypt" / "live")]))
+    got = check_certs(cfg, int(time.time()))
+    # brief 原文断言 "7" in lines[0]：days_left 用 timedelta.days 向下取整，
+    # now_u 读出后有 RSA keygen+签名耗时（实测 ~0.8s）→ 7 天差恒折为 6；
+    # 本跑曾「通过」纯因 tmp_path 含 pytest-357 的字符 7（碰巧非语义）。
+    # 按语义改为「剩余 6 天」（零耗时的理论边界 7 一并容忍）。
+    assert len(got) == 1 and got[0]["key"].startswith("cert:") and (
+        "剩余 6 天" in got[0]["lines"][0] or "剩余 7 天" in got[0]["lines"][0])
+    # 路径不存在 → 空（Windows 开发机不误报）
+    cfg2 = SimpleNamespace(cron=dict(_DEFAULT_CRON, cert_paths=["/no/such/dir"]))
+    assert check_certs(cfg2, int(time.time())) == []
+
+
+def test_silence_window(db):
+    from gateway.scheduler import mark_alert, silenced
+    now = _ANCHOR
+    assert silenced(db, "disk:/", 6 * 3600, now) is False   # 从未告警
+    mark_alert(db, "disk:/", now)
+    assert silenced(db, "disk:/", 6 * 3600, now + 3600) is True    # 静默期内
+    assert silenced(db, "disk:/", 6 * 3600, now + 6 * 3600 + 1) is False  # 过期重报
+
+
+def test_run_patrol_alert_and_silence(db, tmp_path):
+    from gateway.scheduler import run_patrol, OPS_UUID
+    cfg = _dcfg(tmp_path)
+    db.set_state("bot_token", "T")
+    bad = dict(_SAMPLE_OK, disks={"/": 91.0})
+    r1 = run_patrol(db, cfg, _ANCHOR, bad, deque([20.0] * 5), deque([60.0] * 5))
+    assert "告警" in r1 and "分析任务" in r1
+    # 告警行 + 分析任务（ops 话题）
+    assert db._conn.execute(
+        "SELECT COUNT(*) c FROM outbox WHERE text LIKE '%巡检告警%'"
+    ).fetchone()["c"] == 1
+    row = db._conn.execute(
+        "SELECT t.id FROM tasks t JOIN sessions s ON t.session_id=s.id "
+        "WHERE s.claude_uuid=?", (OPS_UUID,)).fetchone()
+    assert row is not None
+    # 静默期内第二轮：不重报不重建
+    r2 = run_patrol(db, cfg, _ANCHOR + 300, bad, deque([20.0] * 5), deque([60.0] * 5))
+    assert "静默" in r2
+    assert db._conn.execute(
+        "SELECT COUNT(*) c FROM outbox WHERE text LIKE '%巡检告警%'"
+    ).fetchone()["c"] == 1
+    # 静默期过后仍异常 → 再报
+    r3 = run_patrol(db, cfg, _ANCHOR + 6 * 3600 + 60, bad,
+                    deque([20.0] * 5), deque([60.0] * 5))
+    assert "告警" in r3
