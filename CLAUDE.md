@@ -116,6 +116,13 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 - secret 只放 `claude/secrets.env`（gitignore）+ 环境变量注入，日志脱敏。
 - gateway 仅响应白名单微信账号，白名单外一律不响应。
 
+## 图片回传约定（违反即体验缺陷）
+
+- **截图/生成图片类任务必须用 `mcp__daoyu__send_image` 工具把原图回传微信**，不能只存盘 + 文字描述。用户在微信端**只收得到 send_image 回传的图**；claude 存到 `data/media/` 的文件用户看不到（除非经 send_image 走 outbox 出站）。
+- 覆盖场景：`chrome-devtools` 的 `take_screenshot`、`playwright` 的 `browser_take_screenshot`、`browser_run_code_unsafe` 生成的截图、任何用 Write 落盘的 png/jpg/gif/webp。
+- 流程：工具截图落盘 → 立即调 `send_image(path, caption=简短说明)` 回传 → 再文字总结。caption 写一句图里关键内容（用户先看文字再看图）。
+- 真机实证（2026-08-20）：不加此约定时 claude 默认"存盘 + 描述"，截图任务在微信端永远收不到原图——用户需每次 prompt 明指才回传，体验断裂。
+
 ## 实现顺序（勿颠倒依赖）
 
 - **M1（MVP）✅**：SQLite schema → gateway 收发+落盘去重 → worker 调 `claude -p`（会话绑定、stream 解析、节流推送）→ 命令总线 → 崩溃恢复 → E2E。
