@@ -325,13 +325,12 @@ def test_check_certs(tmp_path):
     (live / "fullchain.pem").write_bytes(
         cert.public_bytes(serialization.Encoding.PEM))
     cfg = SimpleNamespace(cron=dict(_DEFAULT_CRON, cert_paths=[str(tmp_path / "letsencrypt" / "live")]))
-    got = check_certs(cfg, int(time.time()))
-    # brief 原文断言 "7" in lines[0]：days_left 用 timedelta.days 向下取整，
-    # now_u 读出后有 RSA keygen+签名耗时（实测 ~0.8s）→ 7 天差恒折为 6；
-    # 本跑曾「通过」纯因 tmp_path 含 pytest-357 的字符 7（碰巧非语义）。
-    # 按语义改为「剩余 6 天」（零耗时的理论边界 7 一并容忍）。
+    got = check_certs(cfg, int(now_u.timestamp()))
+    # 注入 now = now_u（造证书基准）消除墙钟漂移：not_valid_after = now_u + 7d
+    # 整 → 差恰 7 天、.days 恒 7（旧 6/7 容忍是墙钟漂移产物——now_u 读出后
+    # 有 RSA keygen+签名 ~0.8s 耗时把 7 天差折为 6；注入后无需容忍）。
     assert len(got) == 1 and got[0]["key"].startswith("cert:") and (
-        "剩余 6 天" in got[0]["lines"][0] or "剩余 7 天" in got[0]["lines"][0])
+        "剩余 7 天" in got[0]["lines"][0])
     # 路径不存在 → 空（Windows 开发机不误报）
     cfg2 = SimpleNamespace(cron=dict(_DEFAULT_CRON, cert_paths=["/no/such/dir"]))
     assert check_certs(cfg2, int(time.time())) == []

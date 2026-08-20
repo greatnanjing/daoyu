@@ -207,7 +207,8 @@ def check_certs(cfg, now: int) -> list[dict]:
             try:
                 cert = x509.load_pem_x509_certificate(pem.read_bytes())
                 days_left = (cert.not_valid_after_utc
-                             - datetime.datetime.now(datetime.timezone.utc)).days
+                             - datetime.datetime.fromtimestamp(
+                                 now, datetime.timezone.utc)).days
             except (ValueError, OSError):
                 continue
             if days_left < c["cert_warn_days"]:
