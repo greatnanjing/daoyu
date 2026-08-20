@@ -117,6 +117,32 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
                 outbound.notify()   # 回执即时送达（approval server 2s 轮询收终态）
             return
 
+    # /delete Y/N 确认拦截：桥命令 /delete 预置 delete_confirm:<user> 后才真删。
+    # 排在审批之后（两者并存时审批优先，delete 门下一轮仍有效）。
+    pending_del = db.get_state(f"delete_confirm:{from_user}")
+    if pending_del and text.strip().upper() in ("Y", "N"):
+        db.delete_state(f"delete_confirm:{from_user}")
+        if text.strip().upper() == "Y":
+            try:
+                spec = json.loads(pending_del)
+            except ValueError:
+                spec = None
+            if spec and spec.get("type") == "session":
+                n = db.delete_session_rows(int(spec["id"]))
+                db.enqueue(None, from_user,
+                           f"🗑️ 已删除话题（连同 {n} 个任务记录）。" if n >= 0
+                           else "该话题已不存在。")
+            elif spec and spec.get("type") == "task":
+                ok = db.delete_task_rows(int(spec["id"]))
+                db.enqueue(None, from_user,
+                           f"🗑️ 已删除任务 #{spec['id']}。" if ok else "该任务已不存在。")
+            db.audit("delete", f"user={from_user} spec={pending_del}")
+        else:
+            db.enqueue(None, from_user, "已取消删除。")
+        if outbound:
+            outbound.notify()
+        return
+
     if image_items and not text and not image_paths:
         return   # 纯图且全部下载失败：已有 ⚠️ 回执，不建任务（防空文本进路由）
     if image_paths and not text:

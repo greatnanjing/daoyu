@@ -10,6 +10,7 @@ BRIDGE_HELP = {
     "status": "/status — 队列深度、死信数、当日费用、连接剩余",
     "new": "/new — 在当前目录开新话题（新 Claude 会话，上下文从零开始）",
     "adopt": "/adopt [uuid前缀] — 收养终端里创建的 Claude 会话为当前话题（无参数=最新一个）",
+    "delete": "/delete #<序号> — 删话题；/delete task <任务号> — 删任务记录（均需回 Y 确认）",
     "cd": "/cd <目录|#序号> — 切目录或切话题（#序号见 /sessions）",
     "sessions": "/sessions — 按目录列出全部话题（/cd #n 切换、/new 开新）",
     "policy": "/policy <auto|strict|bypass|plan> — 当前话题的权限档位",
@@ -206,6 +207,8 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
         return "\n".join(lines)
     if cmd == "adopt":
         return _adopt(db, route.args.strip(), from_user, config)
+    if cmd == "delete":
+        return _delete(db, route.args.strip(), from_user, config)
     if cmd == "policy":
         arg = route.args.strip().lower()
         s = _active_session(db, from_user, config.default_cwd)
@@ -272,3 +275,43 @@ async def execute_ilink_op(db, route, from_user: str, config, reconnect_fn) -> s
         db.set_state("reconnect_confirm", from_user)
         return "确认立即重新连接？回复 Y 确认 / N 取消"
     return "未知运维命令"
+
+
+def _delete(db, arg: str, from_user: str, config) -> str:
+    """/delete 预置确认门（回 Y 才真删，app.py 拦截执行）。两种形态：
+    /delete #<全局序号> 删话题（连同其任务/outbox/approvals）；
+    /delete task <任务号> 删单个任务记录。防误删三闸：序号/任务号合法性、
+    当前话题拒删（先切走）、pending/running 任务拒删（先 /cancel）。"""
+    if not arg:
+        return ("用法：/delete #<序号> 删话题（序号见 /sessions）；"
+                "/delete task <任务号> 删任务记录（/tasks 查看）")
+    if arg.startswith("#") and arg[1:].isdigit():
+        sessions = db.list_sessions(from_user)
+        n = int(arg[1:])
+        if not 1 <= n <= len(sessions):
+            return f"序号超出范围（共 {len(sessions)} 个话题）"
+        target = sessions[n - 1]
+        active = db.get_active_binding(from_user, config.default_cwd, touch=False)
+        if target.id == active.id:
+            return ("这是当前话题，不能直接删。先 /cd #<其他序号> 或 /new 切走，"
+                    "再 /delete。")
+        cnt = db.session_task_count(target.id)
+        summary = db.last_task_summary(target.id) or "（无任务）"
+        db.set_state(f"delete_confirm:{from_user}",
+                     json.dumps({"type": "session", "id": target.id}))
+        return (f"⚠️ 将删除话题 #{n}（{target.cwd}，含 {cnt} 个任务记录）：{summary}\n"
+                f"不可恢复。回复 Y 确认 / N 取消")
+    parts = arg.split(None, 1)
+    if len(parts) == 2 and parts[0] == "task" and parts[1].isdigit():
+        tid = int(parts[1])
+        task = db.get_task(tid)
+        if task is None:
+            return f"没有任务 #{tid}。"
+        if task.state in ("pending", "running"):
+            return f"任务 #{tid} 仍在 {task.state}，先 /cancel {tid} 再删。"
+        db.set_state(f"delete_confirm:{from_user}",
+                     json.dumps({"type": "task", "id": tid}))
+        return (f"⚠️ 将删除任务 #{tid}（{task.kind}/{task.state}）：{task.prompt[:30]}\n"
+                f"不可恢复。回复 Y 确认 / N 取消")
+    return ("用法：/delete #<序号> 删话题；/delete task <任务号> 删任务记录"
+            "（删除前会请你回 Y 确认）")

@@ -88,6 +88,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 | | `/new` | 在当前目录开新话题（新 Claude 会话，上下文从零开始） |
 | | `/adopt [uuid前缀]` | 收养终端里创建的 Claude 会话为当前话题（无参 = 最新一个；终端会话用 `deploy/daoyu-tui.sh` 创建，微信 ↔ 终端 TUI 由此可交叉接续同一话题） |
 | | `/sessions` | 按目录两级列出全部话题（全局序号 + ▶ 当前 + 最近任务摘要 + 活跃时间 + uuid 短码），`/cd #n` 切换 |
+| | `/delete #<序号\|task 任务号>` | 删话题（连同其任务）或单删任务记录；均需回 `Y` 确认，当前话题/运行中任务拒删 |
 | | `/policy <auto\|strict\|bypass\|plan>` | 查看或切换当前话题的权限档位（每话题独立） |
 | 配置代理（改刀鱼专属配置，效果同 TUI） | `/permissions` | 查看 deny/allow/ask 列表；`/permissions deny add <规则>`、`/permissions deny del <序号>`、`/permissions allow add <规则>` 读写 `claude/settings.json` |
 | | `/mcp` | 列出 `claude/mcp.json` 已装 MCP server（✅/⛔ 状态）；`/mcp off|on <序号|名字>` 启停（下一任务生效，停用不丢配置） |

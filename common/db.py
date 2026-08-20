@@ -437,6 +437,44 @@ class Database:
         self._conn.commit()
         return bool(cur.rowcount)
 
+    # ---- /delete 清理（M3 后补：话题/任务删除，关联行同清）----
+
+    def session_task_count(self, session_id: int) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) c FROM tasks WHERE session_id=?", (session_id,)).fetchone()
+        return row["c"]
+
+    def delete_task_rows(self, task_id: int) -> bool:
+        """删除单个任务及其 outbox/approvals 关联行（/delete task 的 Y 确认路径）。
+        前置校验（仅终态可删）在 bridge 层；此处幂等，返回是否确有删除。"""
+        cur = self._conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        self._conn.execute("DELETE FROM outbox WHERE task_id=?", (task_id,))
+        self._conn.execute("DELETE FROM approvals WHERE task_id=?", (task_id,))
+        self.delete_state(f"bg_blocked_since:{task_id}")
+        self._conn.commit()
+        return bool(cur.rowcount)
+
+    def delete_session_rows(self, session_id: int) -> int:
+        """删除话题及其全部任务/outbox/approvals 关联行（/delete #n 的 Y 确认
+        路径）。返回删除的任务数；话题不存在返回 -1。前置校验（当前话题拒删）
+        在 bridge 层。"""
+        if self.get_session(session_id) is None:
+            return -1
+        n = self.session_task_count(session_id)
+        self._conn.execute(
+            "DELETE FROM outbox WHERE task_id IN "
+            "(SELECT id FROM tasks WHERE session_id=?)", (session_id,))
+        self._conn.execute(
+            "DELETE FROM approvals WHERE task_id IN "
+            "(SELECT id FROM tasks WHERE session_id=?)", (session_id,))
+        for row in self._conn.execute(
+                "SELECT id FROM tasks WHERE session_id=?", (session_id,)):
+            self.delete_state(f"bg_blocked_since:{row['id']}")
+        self._conn.execute("DELETE FROM tasks WHERE session_id=?", (session_id,))
+        cur = self._conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+        self._conn.commit()
+        return n if cur.rowcount else -1
+
     # ---- outbox ----
     def enqueue(self, task_id: int | None, to_user: str, text: str) -> int:
         cur = self._conn.execute(
