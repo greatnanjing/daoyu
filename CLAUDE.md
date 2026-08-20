@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），357 个测试全绿（`python -m pytest`）。**2026-08-20 收尾批**（开放问题与技术债清偿）：bypass deny 实测落定（不生效）、CLI 版本探测机制化（[worker/version.py](worker/version.py)）、/cancel 进程组/整树 kill、出站熔断按页计数+跨重启（outbox.sent_at）、data/media 定期清理（`media_retention_days`）、/permissions 畸形结构防护（PermStructureError，不再静默吞写）、playwright MCP 装载（默认启用）。M2 已实现（2026-08-16）。M3 全部完成、真机验收通过（2026-08-19，余项 B 四项全过：OCR 主链路 / /mcp 列表呈现系统条目 / /mcp off 系统条目拦截 / /bg 回归）：媒体收发（图片双向）+ /mcp 启停与 /config 写入（余项 A，spec 2026-08-19-mcp-config-writable-design）+ OCR MCP（余项 B，spec 2026-08-19-ocr-mcp-design）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
+**M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），359 个测试全绿（`python -m pytest`）。**2026-08-20 收尾批**（开放问题与技术债全清、真机验收全绿）：bypass deny 实测落定（不生效，**Windows+Linux 双复证**；npm auto-update 运行期中途漂移 2.1.233→2.1.235 亦实证——启动探测的已知局限）、CLI 版本探测机制化（[worker/version.py](worker/version.py)）、/cancel 进程组/整树 kill（真机零残留实证）、出站熔断按页计数+跨重启（outbox.sent_at）、data/media 定期清理（`media_retention_days`，覆盖 media 根目录的 claude 自定义名图片）、/permissions 畸形结构防护（PermStructureError，不再静默吞写）、playwright MCP 装载（默认启用，真机全链路通——含 `ignoreHTTPSErrors` 绕自签证书、服务器 CJK 字体装配）、截图回传铁律落地为 runner prompt 注入（`_PROMPT_SUFFIX`，CLAUDE.md 软指令三次实证不够）。M2 已实现（2026-08-16）。M3 全部完成、真机验收通过（2026-08-19，余项 B 四项全过：OCR 主链路 / /mcp 列表呈现系统条目 / /mcp off 系统条目拦截 / /bg 回归）：媒体收发（图片双向）+ /mcp 启停与 /config 写入（余项 A，spec 2026-08-19-mcp-config-writable-design）+ OCR MCP（余项 B，spec 2026-08-19-ocr-mcp-design）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
 
 - [docs/PRD.md](docs/PRD.md) — 产品需求（功能 FR-1~10、非功能需求、里程碑 M1/M2/M3、范围外）
 - [docs/TRD.md](docs/TRD.md) — 技术设计（架构、SQLite 数据模型、claude CLI 调用规范、命令路由、安全设计、测试策略）
@@ -46,7 +46,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-python -m pytest                        # 全量测试（358 个）
+python -m pytest                        # 全量测试（359 个）
 python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程；M2 含审批往返/bg 冒烟；M3 媒体 E2E 在 tests/test_media_e2e.py）
 daoyu-login                             # 终端扫码登录（token 落盘后退出）
 python -m gateway.app                   # 前台调试运行（不进 systemd）

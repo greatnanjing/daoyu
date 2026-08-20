@@ -179,23 +179,30 @@ async def download_inbound_image(ilink, image_item: dict, dest_dir: Path) -> str
 
 def cleanup_expired_media(root: Path, retention_days: float,
                           protected: set[str]) -> int:
-    """清理 data/media/inbound|outbound 中超期的 img-* 文件（M3 审查追加项）。
+    """清理 data/media（根目录及 inbound/outbound 子目录）中超期的图片文件。
 
-    只删 mtime 早于 now - retention_days 且匹配 img-* 命名（入/出站落盘同款
-    img-<16hex>.<ext>）的文件；protected（outbox 未终态行引用的 media_path，
-    两侧 abspath 归一化比较——approval_mcp 孙进程写的是绝对路径）一律保留，
-    防重试/死信取证引用悬空。目录缺失/单文件删除失败容错继续，返回删除数。
-    非图片命名文件不碰（用户手放的文件不作猜测）。"""
+    删除条件 = 文件名 `img-*` 前缀（入/出站落盘命名 img-<16hex>.<ext>）**或**
+    图片扩展名（png/jpg/jpeg/gif/webp，大小写不敏感——claude 用 Write/截图工具
+    落盘的自定义名文件如 hermes-pw.png 同样清理，真机实证其堆在 media 根目录
+    不受 img-* 规则覆盖）。非图片文件（claude 的 tmp-*.html 等工作产物）不碰
+    ——不作猜测。protected（outbox 未终态行引用的 media_path，两侧 abspath
+    归一化比较——approval_mcp 孙进程写的是绝对路径）一律保留，防重试/死信
+    取证引用悬空。目录缺失/单文件删除失败容错继续，返回删除数。"""
     import time
     cutoff = time.time() - retention_days * 86400
     keep = {os.path.abspath(p) for p in protected}
+    media = Path(root) / "data" / "media"
+    targets = [media, media / "inbound", media / "outbound"]
     removed = 0
-    for sub in ("inbound", "outbound"):
-        d = Path(root) / "data" / "media" / sub
+    for d in targets:
         if not d.is_dir():
             continue
         for f in d.iterdir():
-            if not f.name.startswith("img-") or not f.is_file():
+            if not f.is_file():
+                continue
+            ext = f.suffix.lower()
+            if not (f.name.startswith("img-")
+                    or ext in (".png", ".jpg", ".jpeg", ".gif", ".webp")):
                 continue
             if os.path.abspath(f) in keep:
                 continue

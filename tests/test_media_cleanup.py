@@ -33,6 +33,18 @@ def test_cleanup_removes_expired_keeps_fresh_and_non_media(tmp_path):
     assert note.exists()
 
 
+def test_cleanup_covers_media_root_custom_named_images(tmp_path):
+    """media 根目录的 claude 工作产物（自定义名截图，真机实证 hermes-pw.png
+    堆根目录）：图片扩展名过期即删；非图片工作产物（tmp-*.html）不碰。"""
+    root_png = _mk(tmp_path, "", "hermes-pw.png", age_days=30)     # "" = media 根
+    root_html = _mk(tmp_path, "", "tmp-8891.html", age_days=30)
+    sub_png = _mk(tmp_path, "outbound", "render-8891.PNG", age_days=30)  # 大写扩展名
+    n = cleanup_expired_media(tmp_path, 14.0, protected=set())
+    assert n == 2
+    assert not root_png.exists() and not sub_png.exists()
+    assert root_html.exists()
+
+
 def test_cleanup_protects_active_outbox_refs_any_path_form(tmp_path):
     """未终态 outbox 行引用的文件保留（approval_mcp 写绝对路径；斜杠形态
     差异经 abspath 归一化命中——真实数据流无相对路径形态）。"""
