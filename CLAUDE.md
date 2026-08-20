@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **刀鱼 (daoyu)**：把微信变成 Claude Code 的遥控器。用户在微信发消息 → 转发给服务器上 headless 模式运行的 Claude Code → 回答与执行进度实时回微信。单用户产品（仅作者本人），单台 Linux 服务器部署，systemd 托管。默认工作仓库即本仓库（自举/dogfood）。
 
+> ⚠️ **图片回传铁律（最高优先级）**：任何截图 / 生成图片的操作（`take_screenshot` / `browser_take_screenshot` / `browser_run_code_unsafe` 出图 / Write 落盘 png/jpg 等），**紧接着必须调用 `mcp__daoyu__send_image(path, caption)` 把原图回传微信**——否则用户在微信端收不到图（存盘文件用户看不到）。这是硬性要求，不是建议。详见下方「图片回传约定」节。
+
 ## 当前状态
 
 **M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），357 个测试全绿（`python -m pytest`）。**2026-08-20 收尾批**（开放问题与技术债清偿）：bypass deny 实测落定（不生效）、CLI 版本探测机制化（[worker/version.py](worker/version.py)）、/cancel 进程组/整树 kill、出站熔断按页计数+跨重启（outbox.sent_at）、data/media 定期清理（`media_retention_days`）、/permissions 畸形结构防护（PermStructureError，不再静默吞写）、playwright MCP 装载（默认启用）。M2 已实现（2026-08-16）。M3 全部完成、真机验收通过（2026-08-19，余项 B 四项全过：OCR 主链路 / /mcp 列表呈现系统条目 / /mcp off 系统条目拦截 / /bg 回归）：媒体收发（图片双向）+ /mcp 启停与 /config 写入（余项 A，spec 2026-08-19-mcp-config-writable-design）+ OCR MCP（余项 B，spec 2026-08-19-ocr-mcp-design）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
