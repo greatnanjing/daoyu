@@ -81,6 +81,17 @@ curl -sLO <镜像>/alsa-lib-<版本>.x86_64.rpm && rpm2cpio *.rpm | cpio -idmu
 # runner 按 ~/chrome-libs/usr/lib64 自动注入 LD_LIBRARY_PATH
 ```
 
+**中文字体（截图含中文时必装，否则豆腐块）**：服务器默认无 CJK 字体（`fc-list :lang=zh` 为空）。免 sudo 装法（yumdownloader 也要先 `unset` 死代理）：
+
+```bash
+unset http_proxy https_proxy
+yumdownloader --destdir=/tmp google-noto-sans-cjk-ttc-fonts
+mkdir -p ~/.local/share/fonts && cd ~/.local/share/fonts
+rpm2cpio /tmp/google-noto-sans-cjk-ttc-fonts-*.rpm | cpio -idmu --quiet
+mv usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc . && rm -rf usr
+fc-cache -f ~/.local/share/fonts && fc-list :lang=zh   # 应列出 Noto Sans CJK
+```
+
 `gateway/config.json` 主要键：
 
 | 键 | 说明 |
