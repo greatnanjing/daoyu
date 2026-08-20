@@ -25,7 +25,7 @@
 
 ## 首次部署（Linux 服务器）
 
-前提：Python ≥ 3.11；claude CLI 已安装且在 PATH（`claude --version` 可用）；微信账号用于扫码。
+前提：Python ≥ 3.11；claude CLI 已安装且在 PATH（`claude --version` 可用）；微信账号用于扫码。巡检采样依赖 psutil（pyproject dependencies 已含 `psutil>=5.9`，`pip install -e .` 自动安装，无需单独装）。
 
 ```bash
 # 1. clone 到与 deploy/daoyu.service 一致的路径
@@ -104,6 +104,7 @@ fc-cache -f ~/.local/share/fonts && fc-list :lang=zh   # 应列出 Noto Sans CJK
 | `budget` | 预算闸：`max_turns` + `max_usd`，与权限档位独立、恒生效 |
 | `worker` | 任务池并发数与轮询间隔 |
 | `reconnect` | 连接守护参数（`session_duration_s` 默认 30 天——token 长效实证；token 真失效时 401 自动触发重扫；`silent_grace_s`：重连先静默尝试再推二维码） |
+| `cron` | M4 主动服务阈值（磁盘/CPU/内存阈值、持续分钟、证书预警天数与路径、告警静默小时、积压预警）；除 `cert_paths` 外数值键可经 `/config set` 改（重启生效） |
 
 ## 日常使用（微信里发）
 
@@ -119,9 +120,10 @@ fc-cache -f ~/.local/share/fonts && fc-list :lang=zh   # 应列出 Noto Sans CJK
 | | `/sessions` | 按目录两级列出全部话题（全局序号 + ▶ 当前 + 最近任务摘要 + 活跃时间 + uuid 短码），`/cd #n` 切换 |
 | | `/delete #<序号\|task 任务号>` | 删话题（连同其任务）或单删任务记录；均需回 `Y` 确认，当前话题/运行中任务拒删 |
 | | `/policy <auto\|strict\|bypass\|plan>` | 查看或切换当前话题的权限档位（每话题独立） |
+| | `/cron` | 定时任务管理：日报/巡检 开关、`time daily <HH:MM>`、`interval patrol <分钟>` |
 | 配置代理（改刀鱼专属配置，效果同 TUI） | `/permissions` | 查看 deny/allow/ask 列表；`/permissions deny add <规则>`、`/permissions deny del <序号>`、`/permissions allow add <规则>` 读写 `claude/settings.json` |
 | | `/mcp` | 列出 `claude/mcp.json` 已装 MCP server（✅/⛔ 状态）；`/mcp off|on <序号|名字>` 启停（下一任务生效，停用不丢配置） |
-| | `/config` | 查看 gateway 配置概要（节流/预算/白名单数，secret 只计个数不回显）；`set <键> <值>` 改七键白名单（throttle/budget/worker.concurrency，重启生效） |
+| | `/config` | 查看 gateway 配置概要（节流/预算/白名单数，secret 只计个数不回显）；`set <键> <值>` 改白名单键（throttle/budget/worker.concurrency + cron 阈值七键，共 14 键，重启生效） |
 | iLink 运维 | `/help` | 全部可用命令（按实际能力动态生成） |
 | | `/time` | 连接剩余时间 |
 | | `/重新连接` | 立即重连（静默优先免扫码，需扫码时推二维码；Y/N 确认） |
@@ -177,7 +179,7 @@ deploy/daoyu-tui.sh          # 聊完 /exit 退出
 ## 开发
 
 ```bash
-python -m pytest                        # 全量测试（359 个）
+python -m pytest                        # 全量测试（382 个）
 python -m pytest tests/test_e2e.py -v   # E2E：fake iLink + fake claude 子进程全链路
 python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```
@@ -201,7 +203,7 @@ python -m gateway.app                   # 前台调试运行（不进 systemd）
 - **`/bg` 不装载 MCP 工具**（真机实证）：`--mcp-config` 与 `--bg` 结构性不兼容（后台 daemon 异步读配置与临时文件即删竞态），已摘除——后台任务无 `send_image` 等 MCP 能力，需要时同步跑；回执明示。
 - **bypass 档 `/bg` 带 `--disallowedTools` 工具级兜底**（与 `-p` 同源常量；`--bg` 下 acceptEdits 与 Bash 正常放行已真机实证）。
 - **OCR**：daoyu-ocr（RapidOCR 本地封装，中英混识）随任务恒装载（系统条目，不受 /mcp 启停管辖）；视觉理解由 Claude 模型原生视觉承担（Read 看图）。静态三台 chrome-devtools / context7 / web-reader 可经 /mcp 启停。
-- **`/mcp`、`/config`**：/mcp 列表 + on/off 启停（下一任务生效，停用不丢配置）；/config 概览 + set 改常用键（throttle/budget/concurrency 七键，重启生效）。whitelist 等不开放，改 gateway/config.json。
+- **`/mcp`、`/config`**：/mcp 列表 + on/off 启停（下一任务生效，停用不丢配置）；/config 概览 + set 改常用键（throttle/budget/concurrency，M4 起 cron 阈值七键并入白名单，重启生效）。whitelist 等不开放，改 gateway/config.json。
 - **语音/文件/视频收发**：仍为二期（图片收发 M3 已实现，见下节）。
 
 ## M3 媒体收发（图片双向，已真机验收 2026-08-19）

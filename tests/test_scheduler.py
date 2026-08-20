@@ -412,3 +412,53 @@ def test_scheduler_loop_dispatch(db, tmp_path, monkeypatch):
     calls.clear()
     asyncio.run(one_round())
     assert calls == []
+
+
+async def test_e2e_cron_flow(db, tmp_path):
+    """验收流：/cron off 后推进不产生推送；on 后异常注入 → 告警 + ops 分析
+    任务；静默期内重跑不重复；CPU 窗口不足不误报。"""
+    from gateway.bridge import execute_bridge
+    import gateway.scheduler as sch
+
+    cfg = _dcfg(tmp_path)
+    db.set_state("bot_token", "T")
+
+    def outbox_n(pat):
+        return db._conn.execute(
+            "SELECT COUNT(*) c FROM outbox WHERE text LIKE ?", (pat,)).fetchone()["c"]
+
+    # 1) off 后不跑
+    await execute_bridge(db, None, _route("cron", "off patrol"), "u@im.wechat", cfg)
+    sch.run_patrol(db, cfg, _ANCHOR, dict(_SAMPLE_OK, disks={"/": 91.0}),
+                   deque([20.0] * 5), deque([60.0] * 5))  # 直接调模拟到点
+    # off 只是 scheduler 不再自动触发；直接调 run_patrol 仍会告警——off 语义
+    # 在 loop 分发层（test_scheduler_loop_dispatch 已覆盖），此处不重复断言。
+    # 本轮落下 1 条告警 + 1 个分析任务 + 静默标记@_ANCHOR，下文计数以其为基线。
+    db.update_cron("patrol", enabled=1, touch_last_run=int(time.time()))
+    before = outbox_n("%巡检告警%")
+    # brief 原文第 2~4 步用 int(time.time())：静默标记在 _ANCHOR（今日 10:30），
+    # 墙钟落在 _ANCHOR 后 6h 内（含凌晨 now<_ANCHOR 的负差——负数也 < 静默窗）
+    # 恒判静默 → 第 4 步必挂。改 _ANCHOR 相对注入时间，第 4 步 +6h 出静默窗。
+    # 2) 正常轮次：零任务零告警
+    r = sch.run_patrol(db, cfg, _ANCHOR + 10, dict(_SAMPLE_OK),
+                       deque([20.0] * 5), deque([60.0] * 5))
+    assert r == "正常" and outbox_n("%巡检告警%") == before
+    # 3) CPU 尖峰不足窗口：不告警
+    r = sch.run_patrol(db, cfg, _ANCHOR + 20, dict(_SAMPLE_OK, cpu=95.0),
+                       deque([20.0] * 5 + [95.0]), deque([60.0] * 5))
+    assert r == "正常"
+    # 4) 磁盘异常 → 告警 + 分析任务；静默期内重复不重报
+    bad = dict(_SAMPLE_OK, disks={"/": 91.0})
+    r = sch.run_patrol(db, cfg, _ANCHOR + 6 * 3600 + 60, bad,
+                       deque([20.0] * 5), deque([60.0] * 5))
+    assert "告警" in r
+    assert outbox_n("%巡检告警%") == before + 1
+    n_tasks = db._conn.execute(
+        "SELECT COUNT(*) c FROM tasks").fetchone()["c"]
+    # brief 原文断言 ==1 漏计第 1 步直接调落下的分析任务（两轮各建一个）
+    assert n_tasks == 2
+    sch.run_patrol(db, cfg, _ANCHOR + 6 * 3600 + 120, bad,
+                   deque([20.0] * 5), deque([60.0] * 5))
+    assert outbox_n("%巡检告警%") == before + 1
+    assert db._conn.execute(
+        "SELECT COUNT(*) c FROM tasks").fetchone()["c"] == n_tasks
