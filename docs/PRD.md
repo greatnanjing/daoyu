@@ -55,7 +55,7 @@
 `/help` 动态生成，列出当前实际可用命令（从 Claude 的 `system/init` 事件同步），永远与真实能力一致。
 
 ### FR-3 会话管理
-每个"用户 ↔ 工作目录"对绑定一个持久 Claude 会话（UUID）；`/cd` 切目录即切会话；历史会话可查、可恢复；`/adopt` 可收养终端（TUI）创建的会话为微信话题——微信与服务器终端可交叉接续同一话题。
+每个"用户 ↔ 工作目录"对绑定一个持久 Claude 会话（UUID）；`/cd` 切目录即切会话；历史会话可查、可恢复；`/adopt` 可收养终端（TUI）创建的会话为微信话题——微信与服务器终端可交叉接续同一话题；`/delete` 可删话题（连同其任务）或单删任务记录（回 Y 确认，防误删）。
 
 ### FR-4 软件开发能力
 在真实仓库上：读写代码、执行 shell、git 操作、代码审查（`/review` `/code-review` `/security-review`）、特性开发（`/feature-dev` 及 architect/explorer/reviewer 子代理）、TDD、superpowers 工作流全套（brainstorming → writing-plans → executing-plans → finishing-branch 等）。

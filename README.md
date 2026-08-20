@@ -40,7 +40,9 @@ python3.11 -m venv .venv
 cp gateway/config.example.json gateway/config.json
 #    编辑 whitelist（微信 user id，形如 xxx@im.wechat）与 default_cwd
 cp claude/secrets.env.example claude/secrets.env
-#    填 ANTHROPIC_API_KEY
+#    填 ANTHROPIC_API_KEY（兜底层）。凭据/模型映射会动态跟随宿主
+#    ~/.claude/settings.json 的 env 块（ANTHROPIC_* 逐键优先，secrets.env 兜底）
+#    ——在宿主侧换 key/改模型，刀鱼每任务现场跟随，无需改这里。
 
 # 4. 扫码登录（token 写入 DB 后退出；直接启动 daoyu 也会在无 token 时引导扫码）
 .venv/bin/daoyu-login
@@ -64,6 +66,18 @@ npx -y @upstash/context7-mcp
 uvx --with "mcp~=1.0" mcp-server-fetch
 ```
 
+**Linux headless Chrome 装配**（chrome-devtools 渲染 SPA 需要，2026-08-19 实证）：runner 的 `inject_linux_chrome` 按约定路径自动注入 `--headless --executablePath` + `LD_LIBRARY_PATH`，装好即生效、未装则 no-op。手动装法（必须走 `@puppeteer/browsers`，直拼 URL 会 404；版本号查同镜像 `last-known-good-versions.json`）：
+
+```bash
+npx -y @puppeteer/browsers install chrome-headless-shell@<版本> \
+    --path ~/.cache/puppeteer \
+    --base-url https://cdn.npmmirror.com/binaries/chrome-for-testing
+# 唯一缺失的系统库 libasound.so.2：rpm 解包免 sudo（路径换实际发行版镜像）
+mkdir -p ~/chrome-libs && cd ~/chrome-libs
+curl -sLO <镜像>/alsa-lib-<版本>.x86_64.rpm && rpm2cpio *.rpm | cpio -idmu
+# runner 按 ~/chrome-libs/usr/lib64 自动注入 LD_LIBRARY_PATH
+```
+
 `gateway/config.json` 主要键：
 
 | 键 | 说明 |
@@ -71,7 +85,7 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 | `whitelist` | 允许响应的微信 user id 列表，白名单外一律不响应 |
 | `default_cwd` | 初始工作目录（也是默认 Claude 会话绑定的仓库） |
 | `claude_bin` | claude 可执行文件（字符串或 argv 前缀列表） |
-| `throttle` | 节流：最小发送间隔 / 进度窗口 / 单条分页字符上限 / 每日发送上限 |
+| `throttle` | 节流：最小发送间隔 / 进度窗口 / 单条分页字符上限 / 每日发送上限。分页另有字节硬闸（微信单条 16384 字节实测上限，超限 `errcode=0` 静默丢），`page_char_limit` 怎么调都安全 |
 | `budget` | 预算闸：`max_turns` + `max_usd`，与权限档位独立、恒生效 |
 | `worker` | 任务池并发数与轮询间隔 |
 | `reconnect` | 连接守护参数（`session_duration_s` 默认 30 天——token 长效实证；token 真失效时 401 自动触发重扫；`silent_grace_s`：重连先静默尝试再推二维码） |
@@ -116,6 +130,23 @@ uvx --with "mcp~=1.0" mcp-server-fetch
 ### 监控告警（M2）
 
 以下异常自动推微信 ⚠️（发全部白名单账号，复用出站通道）：出站死信（重试 ≥5 次仍失败）、日发送上限熔断、任务预算/回合耗尽死信、微信连接失效（连续 401/403，自动重连）。
+
+### 微信 ↔ 终端 TUI 交叉接续同一话题
+
+微信与服务器终端可以交替续写**同一个** Claude 话题：
+
+```bash
+# 终端侧：一键入口（清死代理 + 注入凭据 + 指向刀鱼隔离配置目录）
+deploy/daoyu-tui.sh          # 聊完 /exit 退出
+# 自检（不启动 claude，只打印解析后的环境）：DAOYU_TUI_DRYRUN=1 deploy/daoyu-tui.sh
+```
+
+```
+微信侧：/adopt            ← 收养刚退出的终端会话为当前话题（无参取最新）
+        继续发消息          ← 终端里聊的上下文都在
+```
+
+反方向同理：微信聊到一半，终端 `deploy/daoyu-tui.sh` 进 TUI 用 `claude --resume` 选同一会话接着聊。约束：同一话题不能两端同时开着（并发 `--resume` 冲突），终端先退出再在微信发消息。
 
 ## 运维
 

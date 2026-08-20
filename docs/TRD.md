@@ -191,8 +191,11 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 │   └── secrets.env        # API key 等 — gitignore
 ├── gateway/config.json    # 白名单微信号、节流参数、告警渠道 — gitignore(含敏感项)
 ├── data/daoyu.db          # SQLite — gitignore
-└── deploy/daoyu.service   # systemd 单元
+├── deploy/daoyu.service   # systemd 单元
+└── deploy/daoyu-tui.sh    # 终端 TUI 一键入口（清死代理+注凭据+指向 daoyu-home）
 ```
+
+**凭据/模型映射动态跟随宿主**（2026-08-20）：runner/pool/tui 三处给 claude 子进程注入的 `ANTHROPIC_*` 环境变量，优先取宿主 `~/.claude/settings.json` 的 env 块（`host_claude_env` 白名单 `ANTHROPIC_*` + `API_TIMEOUT_MS`），逐键覆盖 `claude/secrets.env` 兜底层（`merge_claude_secrets`；`AUTH_TOKEN`/`API_KEY` 形态二选一去重）。用户在宿主侧换 key/改模型映射，刀鱼每任务现场跟随、零配置同步；只取凭据键，`permissions`/`plugins`/`defaultMode` 不碰——`CLAUDE_CONFIG_DIR` 隔离语义不变。
 
 `claude/mcp.json` 默认装载（与 PRD FR-5 对应）：
 
