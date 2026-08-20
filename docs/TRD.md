@@ -245,7 +245,7 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 | bypass 档下 `permissions.deny` 是否仍生效 | 未实测 | M2 实测；若不生效则以 `--disallowedTools` + 文件系统权限双兜底 |
 | ClawBot 媒体（CDN 加密上传） | 已实现（M3 图片双向，真机验收 2026-08-19） | — |
 | 重连二维码的无人值守推送渠道 | 待部署时选定（邮件/server酱） | M2 |
-| 微信文本单条长度上限 | 未实测 | M1 实测后定分页阈值 |
+| 微信文本单条长度上限 | **已实测（2026-08-20）：16384 字节 UTF-8**（16384 ✓ / 16385 ✗ `prepare failed`；按**字节**计——中文 5450 字≈16350B ✓ / 5500 字≈16500B ✗、ASCII 12000 字 ✓；超限 `errcode=0` **静默不投递**） | [common/text.py](common/text.py) `split_text` 双上限：字符（`page_char_limit`）+ 字节硬闸 `MAX_PAGE_BYTES=15000`，无论 limit 配多大都防越线 |
 | OCR MCP 具体 server 选型/封装 | 已落定：RapidOCR 本地封装（daoyu-ocr，rapidocr-onnxruntime 1.4.4，模型随包、bytes 直传） | 已实现（2026-08-19 余项 B） |
 | Claude Code 版本漂移（flag 行为随版本变） | 持续风险 | 固定版本 + 升级前跑 E2E 回归 |
 

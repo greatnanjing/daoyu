@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），322 个测试全绿（`python -m pytest`）；M2 已实现（2026-08-16）。M3 全部完成、真机验收通过（2026-08-19，余项 B 四项全过：OCR 主链路 / /mcp 列表呈现系统条目 / /mcp off 系统条目拦截 / /bg 回归）：媒体收发（图片双向）+ /mcp 启停与 /config 写入（余项 A，spec 2026-08-19-mcp-config-writable-design）+ OCR MCP（余项 B，spec 2026-08-19-ocr-mcp-design）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
+**M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），325 个测试全绿（`python -m pytest`）；M2 已实现（2026-08-16）。M3 全部完成、真机验收通过（2026-08-19，余项 B 四项全过：OCR 主链路 / /mcp 列表呈现系统条目 / /mcp off 系统条目拦截 / /bg 回归）：媒体收发（图片双向）+ /mcp 启停与 /config 写入（余项 A，spec 2026-08-19-mcp-config-writable-design）+ OCR MCP（余项 B，spec 2026-08-19-ocr-mcp-design）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
 
 - [docs/PRD.md](docs/PRD.md) — 产品需求（功能 FR-1~10、非功能需求、里程碑 M1/M2/M3、范围外）
 - [docs/TRD.md](docs/TRD.md) — 技术设计（架构、SQLite 数据模型、claude CLI 调用规范、命令路由、安全设计、测试策略）
@@ -44,7 +44,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-python -m pytest                        # 全量测试（322 个）
+python -m pytest                        # 全量测试（325 个）
 python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程；M2 含审批往返/bg 冒烟；M3 媒体 E2E 在 tests/test_media_e2e.py）
 daoyu-login                             # 终端扫码登录（token 落盘后退出）
 python -m gateway.app                   # 前台调试运行（不进 systemd）
@@ -73,6 +73,7 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 - **bg 三终态与取结果（真机实测 2.1.233）**：`claude agents --json --all` 条目终态 `done`/`blocked`/`failed`（默认过滤 failed，**必须带 `--all`**）；done 条目十字段（pid/id/cwd/kind/startedAt/sessionId/name/status/state）**无输出/cost 字段** → 取结果靠回原会话（`--fork-session`，直接 `--resume` 被 daemon 持有拒绝且 **rc=0**、错误只在输出——静默空结果）；`blocked` = 会话等用户后续输入（Claude 结尾反问是常态），bg 无输入通道即永久挂起 → 首次观察即 fork 取结果完结。
 - **长任务必须走 `claude --bg` + `claude agents --json` 轮询**（后台任务管理是 `claude agents`；停止是 `claude stop <id>`；`claude logs <id>` 实测 2.1.233 存在——TUI 流含 ANSI 转义、人读可但不宜程序解析）：`-p` 结束 5s 会杀后台 bash，subagent 默认上限 10min。
 - **`context_token` 只使用当前会话最新入站消息的**，绝不复用历史值（复用旧 token 会 HTTP 200 但静默不投递）。
+- **微信单条文本上限 = 16384 字节 UTF-8**（2026-08-20 实测钉死：16384 ✓ / 16385 ✗，按**字节**计——中文 5450 字过 / 5500 字不过、ASCII 12000 字过）；超限仍 `errcode=0` 静默不投递，与 context_token 复用同款陷阱。出站分页 [common/text.py](common/text.py) `split_text` 双上限兜底：字符（`page_char_limit`）+ 字节硬闸 `MAX_PAGE_BYTES=15000`——即便 limit 调高也不越线。
 - **入站按 `msg_id` 幂等去重**（iLink 重连后消息会重投）；出站走 outbox 发件箱，失败重试，至少 5 次后才进死信并告警。
 - **宿主配置隔离靠 `CLAUDE_CONFIG_DIR`（机制化）**：实测 `--bare`/`--settings` 均不能隔离宿主 `~/.claude`（宿主 defaultMode/allow/trustAllFiles/插件全部穿透生效，直接架空 strict 审批与硬 deny 清单）；runner 与 pool 给每个 claude 子进程注入 `CLAUDE_CONFIG_DIR=<repo>/data/claude-home/`（调用即 mkdir）。**`-p` 路径已不带 `--bare`**（2026-08-19 实测：`--bare` 剥离 WebFetch/WebSearch/Write/Glob/Grep 全部扩展工具只留 Bash/Edit/Read+MCP；去掉后 WebSearch 经智谱端点适配 `web_search_prime` 完全可用、真机查证带 Sources 验证通过，WebFetch 因抓取前的 claude.ai 域名验证国内不可达而失败但模型会 fallback 到 web-reader MCP；bg 分支保守集保留 `--bare`）。凭据/模型映射**动态跟随宿主 `~/.claude/settings.json` 的 env 块**（`host_claude_env` 白名单取 `ANTHROPIC_*` + `API_TIMEOUT_MS`，逐键优先于 `claude/secrets.env` 兜底层；AUTH_TOKEN/API_KEY 形态二选一去重——用户在宿主侧轮换 key/改模型映射，刀鱼每任务现场跟随；只取凭据键，permissions/plugins 不碰、隔离语义不变）；MCP 清单经 `--mcp-config` 显式传。刀鱼持久配置在 `claude/settings.json` 与 `claude/mcp.json`（进 git），代理命令（/permissions /config /mcp）改的就是这些文件。
 - **媒体出站走 outbox kind=image 行**：投递时整链路现做（上传→caption→图），

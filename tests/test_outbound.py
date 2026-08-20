@@ -70,6 +70,34 @@ def test_split_text():
     assert pages[2] == "(第 3/3 页)\n" + "x" * 1000   # 末页只含剩余字符，无缺损
 
 
+def test_split_text_byte_cap_chinese():
+    # 微信单条 16384 字节按字节计（实测钉死）：中文 3B/字，字符数没超 limit
+    # 但字节超 MAX_PAGE_BYTES 时也必须切——否则 errcode=0 静默丢消息。
+    from common.text import MAX_PAGE_BYTES
+    text = "测" * 6000                      # 6000 字 = 18000 字节 > 15000
+    pages = split_text(text, limit=100000)  # 字符上限故意放开，只看字节闸
+    assert len(pages) >= 2
+    for p in pages:
+        assert len(p.encode("utf-8")) <= MAX_PAGE_BYTES + 32   # 前缀余量内
+    assert "".join(p.split("\n", 1)[1] for p in pages) == text  # 内容无损
+
+
+def test_split_text_byte_cap_ascii_high_limit():
+    # 高 limit + 大 ASCII：字节闸兜底（16000B 超限要切，12000B 不切）
+    from common.text import MAX_PAGE_BYTES
+    assert len(split_text("x" * 16000, limit=99999)) >= 2
+    assert split_text("x" * 12000, limit=99999) == ["x" * 12000]
+    for p in split_text("x" * 40000, limit=99999):
+        assert len(p.encode("utf-8")) <= MAX_PAGE_BYTES + 32
+
+
+def test_split_text_mixed_content_no_char_split():
+    # 中英混排不切碎多字节字符：逐字符累积的不变量
+    text = ("中文abc" * 2000)               # 混排 14000 字
+    rejoined = "".join(p.split("\n", 1)[1] for p in split_text(text, limit=3000))
+    assert rejoined == text
+
+
 async def test_outbox_drain_marks_sent(db):
     il = FakeILink()
     db.insert_message(common_msg("u@im.wechat", "CTX-NEW"))
