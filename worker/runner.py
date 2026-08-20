@@ -42,6 +42,17 @@ _BG_ID_RE = re.compile(r"backgrounded.*?([0-9a-f]{6,})")
 # 临时 mcp config 前缀：主进程被 kill 时 finally 不执行会残留，启动时按前缀清扫
 _MCP_TMP_PREFIX = "daoyu-mcp-"
 
+# -p 任务 prompt 的环境约定后缀（仅普通对话；斜杠命令转发不加——追加文本会
+# 破坏命令解析）。CLAUDE.md 同款约定实测三次均被模型默认行为压过（截图场景
+# claude 恒"存盘+描述"不调 send_image——软指令天花板），任务级 prompt 遵循度
+# 最高，故在此强制注入（真机实证 2026-08-20）。
+_PROMPT_SUFFIX = (
+    "\n\n（刀鱼环境约定：用户在微信端，只能看到你回传的文本与 "
+    "mcp__daoyu__send_image 工具发出的图片。任何截图/生成图片的操作，必须"
+    "紧接着调用 mcp__daoyu__send_image(path, caption) 把原图回传微信——"
+    "仅存盘用户看不到，描述不能替代原图。此为硬性要求。）"
+)
+
 
 def _cleanup_stale_mcp_configs() -> None:
     """清扫上次进程被 kill 时残留的临时 mcp config（正常路径每次任务结束即删）。
@@ -204,9 +215,12 @@ class TaskRunner:
             result_subtype: str | None = None
             result_is_error = False
             try:
-                # prompt 经 stdin 原样传入（不走 argv，无 shell 转义）；cwd = 会话绑定目录
+                # prompt 经 stdin 传入（不走 argv，无 shell 转义）；cwd = 会话绑定目录。
+                # 斜杠命令转发原样传（追加文本破坏命令解析）；普通对话拼环境约定后缀
+                prompt = (task.prompt if task.prompt.startswith("/")
+                          else task.prompt + _PROMPT_SUFFIX)
                 try:
-                    proc.stdin.write(task.prompt.encode("utf-8"))
+                    proc.stdin.write(prompt.encode("utf-8"))
                     await proc.stdin.drain()
                 except (BrokenPipeError, ConnectionResetError):
                     pass   # 子进程已先退出致管道断裂：stdout 随即 EOF，走退出码路径

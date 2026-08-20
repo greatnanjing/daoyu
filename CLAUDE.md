@@ -46,7 +46,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-python -m pytest                        # 全量测试（357 个）
+python -m pytest                        # 全量测试（358 个）
 python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程；M2 含审批往返/bg 冒烟；M3 媒体 E2E 在 tests/test_media_e2e.py）
 daoyu-login                             # 终端扫码登录（token 落盘后退出）
 python -m gateway.app                   # 前台调试运行（不进 systemd）
@@ -123,7 +123,7 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 - **截图/生成图片类任务必须用 `mcp__daoyu__send_image` 工具把原图回传微信**，不能只存盘 + 文字描述。用户在微信端**只收得到 send_image 回传的图**；claude 存到 `data/media/` 的文件用户看不到（除非经 send_image 走 outbox 出站）。
 - 覆盖场景：`chrome-devtools` 的 `take_screenshot`、`playwright` 的 `browser_take_screenshot`、`browser_run_code_unsafe` 生成的截图、任何用 Write 落盘的 png/jpg/gif/webp。
 - 流程：工具截图落盘 → 立即调 `send_image(path, caption=简短说明)` 回传 → 再文字总结。caption 写一句图里关键内容（用户先看文字再看图）。
-- 真机实证（2026-08-20）：不加此约定时 claude 默认"存盘 + 描述"，截图任务在微信端永远收不到原图——用户需每次 prompt 明指才回传，体验断裂。
+- **双层落实（真机实证 2026-08-20）**：本节 CLAUDE.md 软指令单独**不够**——截图场景模型默认"存盘+描述"三次压过约定；runner 对每个非斜杠任务 prompt 末尾**强制注入**环境约定后缀（[worker/runner.py](worker/runner.py) `_PROMPT_SUFFIX`，斜杠命令转发不加防破坏命令解析），任务级 prompt 遵循度最高。
 
 ## 实现顺序（勿颠倒依赖）
 

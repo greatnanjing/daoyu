@@ -48,7 +48,8 @@ async def test_run_task_success(db, cfg):
     await runner.run(db.get_task(t), s)
 
     assert db.get_task(t).state == "done"
-    # stdin 收到原样 prompt（不经过 shell）
+    # 斜杠命令转发：stdin 收到原样 prompt（不经过 shell、不拼环境约定后缀——
+    # 追加文本会破坏命令解析）
     assert cfg.stdin_log.read_text(encoding="utf-8") == "/review"
     # 最终回复入 outbox（含 result 文本）
     sent = [db.get_outbox(i) for i in _outbox_ids(db)]
@@ -61,6 +62,20 @@ async def test_run_task_success(db, cfg):
     # 进度（工具事件）也推过
     progress = [o for o in sent if "Bash" in o.text]
     assert progress
+
+
+async def test_prompt_env_suffix_appended_for_normal_not_slash(db, cfg):
+    """环境约定后缀（截图回传铁律的 prompt 注入）：普通对话拼后缀、
+    斜杠命令原样。CLAUDE.md 软指令三次实测压不过模型默认行为（2026-08-20）。"""
+    from worker.runner import _PROMPT_SUFFIX
+    for prompt in ("用 playwright 打开 x 截图", "随便聊聊"):
+        s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
+        t = db.create_task(None, s.id, prompt)
+        runner = TaskRunner(db, cfg, process_registry={})
+        await runner.run(db.get_task(t), s)
+        got = cfg.stdin_log.read_text(encoding="utf-8")
+        assert got == prompt + _PROMPT_SUFFIX, prompt
+        assert "send_image" in got and "微信" in got
 
 
 async def test_subprocess_env_redirects_claude_config_dir(db, cfg, tmp_path, monkeypatch):
