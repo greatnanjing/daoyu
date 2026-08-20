@@ -58,15 +58,18 @@ Windows 开发机（Git Bash）仅 venv 内路径不同：`.venv/Scripts/python`
 
 `claude/mcp.json`（MCP server 清单，进 git）为平台无关形态（各条目 `command` 直写 `npx` / `uvx`）：Windows 下由 runner 合并层自动包一层 `cmd /c`（白名单 {npx,uvx}），Linux 直传、部署无需手改清单；只需确认已装 Node.js（含 npx）与 [uv](https://docs.astral.sh/uv/)（提供 uvx）。
 
+**CLI 版本探测**：启动时自动跑 `claude --version` 与 `worker/version.py` 的 `EXPECTED_CLAUDE_VERSION`（当前 2.1.233，生产服务器 实测基线）比对——匹配记 audit、漂移/失败 audit+warning（fail-open 不阻断启动；flag/输出形态的实测假设随版本漂移失真，见各代码注释的版本锚点）。升级流程：改常量 → `python -m pytest` 全量回归 → 服务器 `npm i -g @anthropic-ai/claude-code@<版本>`。
+
 **MCP 冷缓存预热**：Linux 首次调用时 npx/uvx 要现下载包（分钟级，期间 Claude 可能等不到 server 就绪）。部署后先手动各跑一次、等下载完成再 Ctrl+C 中断，即可把包缓存好：
 
 ```bash
 npx chrome-devtools-mcp@latest --help
 npx -y @upstash/context7-mcp
 uvx --with "mcp~=1.0" mcp-server-fetch
+npx -y @playwright/mcp@0.0.79 --headless --help
 ```
 
-**Linux headless Chrome 装配**（chrome-devtools 渲染 SPA 需要，2026-08-19 实证）：runner 的 `inject_linux_chrome` 按约定路径自动注入 `--headless --executablePath` + `LD_LIBRARY_PATH`，装好即生效、未装则 no-op。手动装法（必须走 `@puppeteer/browsers`，直拼 URL 会 404；版本号查同镜像 `last-known-good-versions.json`）：
+**Linux headless Chrome 装配**（chrome-devtools 与 playwright 共用，2026-08-19/20 实证）：runner 的 `inject_linux_chrome` / `inject_linux_playwright` 按约定路径自动注入 `--headless --executablePath|--executable-path` + `LD_LIBRARY_PATH`，装好即生效、未装则 no-op。playwright 复用同一 chrome-headless-shell 二进制（兼容性未真机证实时兜底：`PLAYWRIGHT_DOWNLOAD_HOST=<npmmirror 镜像> npx playwright install chromium` 自装并去掉注入）。手动装法（必须走 `@puppeteer/browsers`，直拼 URL 会 404；版本号查同镜像 `last-known-good-versions.json`）：
 
 ```bash
 npx -y @puppeteer/browsers install chrome-headless-shell@<版本> \
@@ -84,8 +87,9 @@ curl -sLO <镜像>/alsa-lib-<版本>.x86_64.rpm && rpm2cpio *.rpm | cpio -idmu
 |---|---|
 | `whitelist` | 允许响应的微信 user id 列表，白名单外一律不响应 |
 | `default_cwd` | 初始工作目录（也是默认 Claude 会话绑定的仓库） |
-| `claude_bin` | claude 可执行文件（字符串或 argv 前缀列表） |
-| `throttle` | 节流：最小发送间隔 / 进度窗口 / 单条分页字符上限 / 每日发送上限。分页另有字节硬闸（微信单条 16384 字节实测上限，超限 `errcode=0` 静默丢），`page_char_limit` 怎么调都安全 |
+| `claude_bin` | claude 可执行文件（字符串或 argv 前缀列表）。Windows 下建议直接指向 npm shim 内的真实 `claude.exe`（`.cmd` 含空格路径有 cmd /c 剥引号坑，版本探测会自动解析 shim 但 spawn 不会） |
+| `throttle` | 节流：最小发送间隔 / 进度窗口 / 单条分页字符上限 / 每日发送上限（**按实际发送页数计**、跨重启不清零——按已送达 outbox 行折算恢复）。分页另有字节硬闸（微信单条 16384 字节实测上限，超限 `errcode=0` 静默丢），`page_char_limit` 怎么调都安全 |
+| `media_retention_days` | `data/media/inbound\|outbound` 保留天数（默认 14；启动与日界时清理过期 `img-*` 文件，未终态 outbox 行引用的受保护；0 = 关闭） |
 | `budget` | 预算闸：`max_turns` + `max_usd`，与权限档位独立、恒生效 |
 | `worker` | 任务池并发数与轮询间隔 |
 | `reconnect` | 连接守护参数（`session_duration_s` 默认 30 天——token 长效实证；token 真失效时 401 自动触发重扫；`silent_grace_s`：重连先静默尝试再推二维码） |
@@ -95,7 +99,7 @@ curl -sLO <镜像>/alsa-lib-<版本>.x86_64.rpm && rpm2cpio *.rpm | cpio -idmu
 | 类别 | 命令 | 说明 |
 |---|---|---|
 | 桥命令（本地秒回） | `/tasks` | 查看 running/pending 任务（后台任务带 `[bg]` 标记） |
-| | `/status` | 队列深度、死信数、当日费用、连接剩余时间 |
+| | `/status` | 队列深度、死信数、当日费用、今日已发送条数、连接剩余时间 |
 | | `/cancel <任务号>` | 取消任务（无参 = 当前会话最新运行中任务；后台任务走 `claude stop`） |
 | | `/bg <任务描述>` | 转入后台长任务（`claude --bg`）：秒回执，完成后自动分页推送结果 |
 | | `/cd <目录\|#序号>` | 切目录（指向该目录最新话题，无则自动建）或按 `/sessions` 全局序号切话题；无参查看当前目录话题 |

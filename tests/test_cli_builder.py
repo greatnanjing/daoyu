@@ -35,7 +35,7 @@ def test_policy_mode_mapping():
 def test_bypass_adds_disallowed_tools_fallback():
     argv = build_argv(session_uuid="U", resume=True, policy="bypass",
                       budget=Budget(), mcp_config=None, settings=None)
-    assert "--disallowedTools" in argv   # deny 清单在 bypass 下是否生效未实测，工具级兜底恒加
+    assert "--disallowedTools" in argv   # 2026-08-20 实测 bypass 下 deny 不生效，工具级兜底恒加（确证有效）
     argv2 = build_argv(session_uuid="U", resume=True, policy="auto",
                        budget=Budget(), mcp_config=None, settings=None)
     assert "--disallowedTools" not in argv2
@@ -205,3 +205,59 @@ def test_inject_linux_chrome_does_not_mutate_input(tmp_path):
     inject_linux_chrome(servers, tmp_path)
     assert servers["chrome-devtools"]["args"] == ["chrome-devtools-mcp@latest"]
     assert servers["chrome-devtools"]["env"] == {}
+
+
+# ---- inject_linux_playwright：与 chrome 注入同源（同二进制/env）、flag 名不同 ----
+
+def _mk_chrome(tmp_path, ver="152.0.7977.42"):
+    d = tmp_path / f".cache/puppeteer/chrome-headless-shell/linux-{ver}/chrome-headless-shell-linux64"
+    d.mkdir(parents=True)
+    (d / "chrome-headless-shell").write_bytes(b"")
+    return d / "chrome-headless-shell"
+
+
+def test_inject_linux_playwright_hits_convention_path(tmp_path):
+    # 命中：只追加 --executable-path（连字符小写——与 chrome-devtools 的
+    # --executablePath 是不同 CLI 的不同 flag）+ env；--headless --isolated
+    # 已在静态 args 不重复追加
+    from worker.cli_builder import inject_linux_playwright
+    chrome = _mk_chrome(tmp_path)
+    servers = {"playwright": _svc("npx", ["-y", "@playwright/mcp@0.0.79",
+                                          "--headless", "--isolated"])}
+    out = inject_linux_playwright(servers, tmp_path)
+    args = out["playwright"]["args"]
+    assert args[:3] == ["-y", "@playwright/mcp@0.0.79", "--headless"]  # 静态 args 在前
+    assert args.count("--headless") == 1
+    assert args[args.index("--executable-path") + 1] == str(chrome)
+    assert "--executablePath" not in args        # 不会拿错 flag 名
+    env = out["playwright"]["env"]
+    assert env["http_proxy"] == "" and env["https_proxy"] == ""
+
+
+def test_inject_linux_playwright_no_chrome_or_missing_entry_noop(tmp_path):
+    # 未安装 / 条目缺席：原样返回（fail-open）
+    from worker.cli_builder import inject_linux_playwright
+    servers = {"playwright": _svc("npx", ["-y", "@playwright/mcp@0.0.79"]),
+               "context7": _svc("npx")}
+    out = inject_linux_playwright(servers, tmp_path)
+    assert out == servers
+    _mk_chrome(tmp_path)
+    out2 = inject_linux_playwright({"context7": _svc("npx")}, tmp_path)
+    assert "playwright" not in out2
+    out3 = inject_linux_playwright({"playwright": "not-a-dict"}, tmp_path)
+    assert out3["playwright"] == "not-a-dict"
+
+
+def test_inject_linux_playwright_alsa_env_and_no_mutation(tmp_path):
+    # ALSA LD_LIBRARY_PATH 注入 + 静态 env 保留 + 不改传入对象
+    from worker.cli_builder import inject_linux_playwright
+    _mk_chrome(tmp_path)
+    alsa = tmp_path / "chrome-libs/usr/lib64"
+    alsa.mkdir(parents=True)
+    (alsa / "libasound.so.2").write_bytes(b"")
+    servers = {"playwright": {**_svc("npx"), "env": {"FOO": "bar"}}}
+    out = inject_linux_playwright(servers, tmp_path)
+    assert out["playwright"]["env"]["LD_LIBRARY_PATH"] == str(alsa)
+    assert out["playwright"]["env"]["FOO"] == "bar"
+    assert servers["playwright"]["env"] == {"FOO": "bar"}   # 未改输入
+    assert servers["playwright"]["args"] == []              # 未改输入

@@ -253,3 +253,64 @@ def test_enqueue_media_shape(db):
 def test_enqueue_text_rows_default_kind_text(db):
     db.enqueue(None, "u@im.wechat", "普通文本")
     assert db.next_outbox_batch(limit=10)[0].kind == "text"
+
+
+# ---- outbox.sent_at 与日计数折算（出站熔断按页计数，M1 移交项清偿）----
+
+def test_sent_at_migrated_from_pre_column_db(tmp_path):
+    """旧库（无 sent_at 列）跑 ensure_schema 补列，历史行 NULL 不计入日计数。"""
+    import sqlite3
+    from common.db import Database
+    old = tmp_path / "old.db"
+    c = sqlite3.connect(old)
+    c.executescript("""
+      CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER REFERENCES tasks(id), to_user TEXT NOT NULL,
+        text TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 5, last_error TEXT,
+        created_at INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'text',
+        media_path TEXT, caption TEXT);
+      INSERT INTO outbox(to_user, text, created_at, state)
+        VALUES('u', '迁移前的历史 sent 行', 1, 'sent');
+    """)
+    c.commit()
+    c.close()
+    d = Database(old)
+    d.ensure_schema()
+    cols = {r[1] for r in d._conn.execute("PRAGMA table_info(outbox)")}
+    assert "sent_at" in cols
+    row = d._conn.execute("SELECT sent_at FROM outbox").fetchone()
+    assert row["sent_at"] is None                       # 历史行无时间
+    assert d.sent_pages_today(2000) == 0                # NULL 不计（当日略低估，可接受）
+
+
+def test_mark_sent_stamps_and_sent_pages_today_folds(db):
+    """mark_sent 写时间；折算口径=文本行分页数、图片行 caption+图。"""
+    import time as _time
+    # mark_sent 本身写 sent_at（非 NULL）
+    db.enqueue(None, "u@im.wechat", "先用 mark_sent 的行")
+    db.mark_sent(db._conn.execute("SELECT id FROM outbox").fetchone()["id"])
+    assert db._conn.execute(
+        "SELECT sent_at FROM outbox WHERE state='sent'").fetchone()["sent_at"]
+    db._conn.execute("DELETE FROM outbox")
+    db._conn.commit()
+    # 3 页文本（5000 字 / limit 2000）+ 图片行带 caption（=2 条）+ 无 caption 图（=1 条）
+    db.enqueue(None, "u@im.wechat", "x" * 5000)                 # id 1 → 3 页
+    db.enqueue_media(None, "u@im.wechat", "/a.png", "配文")       # → 2 条
+    db.enqueue_media(None, "u@im.wechat", "/b.png", "")          # → 1 条
+    db.enqueue(None, "u@im.wechat", "未发送的 pending 行")        # 不计
+    now = int(_time.time())
+    ids = [r["id"] for r in db._conn.execute("SELECT id FROM outbox").fetchall()]
+    assert len(ids) == 4
+    for oid in ids[:3]:   # 前三行（文本 + 两图）置今日 sent；第四行保持 pending
+        db._conn.execute(
+            "UPDATE outbox SET state='sent', sent_at=? WHERE id=?", (now, oid))
+    db._conn.commit()
+    assert db.sent_pages_today(2000) == 3 + 2 + 1
+    # 非今日（零点前）的 sent 行不计：文本行 sent_at 置 1（1970 年）
+    db._conn.execute(
+        "UPDATE outbox SET sent_at=1 WHERE id=?", (ids[0],))
+    db._conn.commit()
+    assert db.sent_pages_today(2000) == 2 + 1   # 只剩今日的两行图片
+

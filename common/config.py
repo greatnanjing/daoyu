@@ -36,6 +36,9 @@ class Config:
     reconnect: dict
     budget: Budget
     secrets: dict = field(default_factory=dict)
+    # data/media/inbound|outbound 的保留天数（过期 img-* 文件启动/日界时清理；
+    # M3 审查追加项。不进 /config set 白名单——低频运维键，直接改文件）
+    media_retention_days: float = 14.0
 
 
 def load_config(repo_root: Path | None = None) -> Config:
@@ -79,6 +82,7 @@ def load_config(repo_root: Path | None = None) -> Config:
         reconnect=reconnect,
         budget=budget,
         secrets=secrets,
+        media_retention_days=float(raw.get("media_retention_days", 14.0)),
     )
 
 

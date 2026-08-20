@@ -6,6 +6,15 @@ import uuid
 from pathlib import Path
 
 from common.models import InboundMessage, OutboxItem, SessionBinding, Task
+from common.text import outbox_sent_pages
+
+
+def local_midnight_ts() -> int:
+    """本地时区当日 0 点 epoch（当日费用与出站日计数共用日界口径，
+    防 tm_yday 与 mktime 两套算法漂移——yday 跨年同日还会撞）。"""
+    lt = time.localtime()
+    return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -56,7 +65,8 @@ CREATE TABLE IF NOT EXISTS outbox (
   created_at INTEGER NOT NULL,
   kind TEXT NOT NULL DEFAULT 'text',
   media_path TEXT,
-  caption TEXT
+  caption TEXT,
+  sent_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_state ON outbox(state, id);
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -99,13 +109,16 @@ class Database:
         self._conn.commit()
 
     def _ensure_media_columns(self) -> None:
-        """M2 老库无损加媒体列（新库 _SCHEMA 已含，PRAGMA 查缺后 ALTER，幂等）。
-        ADD COLUMN NOT NULL DEFAULT 'text' 合法（静态默认值）。"""
+        """老库无损加列（新库 _SCHEMA 已含，PRAGMA 查缺后 ALTER，幂等）：
+        M2 媒体三列 + outbox.sent_at（出站日计数跨重启）。ADD COLUMN NOT NULL
+        DEFAULT 'text' 合法（静态默认值）；sent_at 可空——迁移前的历史 sent 行
+        没有送达时间，不计入当日计数（次日归零，可接受）。"""
         for table, col, decl in (
                 ("messages", "media_path", "TEXT"),
                 ("outbox", "kind", "TEXT NOT NULL DEFAULT 'text'"),
                 ("outbox", "media_path", "TEXT"),
-                ("outbox", "caption", "TEXT")):
+                ("outbox", "caption", "TEXT"),
+                ("outbox", "sent_at", "INTEGER")):
             cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
             if col not in cols:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -175,11 +188,9 @@ class Database:
         self._conn.commit()
 
     def today_cost_usd(self) -> float:
-        lt = time.localtime()
-        day_start = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
         total = 0.0
         for row in self._conn.execute(
-                "SELECT detail FROM audit_log WHERE kind='cost' AND ts>=?", (day_start,)):
+                "SELECT detail FROM audit_log WHERE kind='cost' AND ts>=?", (local_midnight_ts(),)):
             try:
                 total += float(json.loads(row["detail"]).get("usd", 0))
             except (ValueError, TypeError, AttributeError):
@@ -518,8 +529,28 @@ class Database:
         return [self._outbox_row(r) for r in rows]
 
     def mark_sent(self, outbox_id: int) -> None:
-        self._conn.execute("UPDATE outbox SET state='sent' WHERE id=?", (outbox_id,))
+        self._conn.execute(
+            "UPDATE outbox SET state='sent', sent_at=? WHERE id=?",
+            (int(time.time()), outbox_id))
         self._conn.commit()
+
+    def sent_pages_today(self, page_char_limit: int) -> int:
+        """今日（本地零点起）已送达的微信侧发送条数——出站熔断计数的重启恢复
+        与 /status 展示共用。折算口径见 common.text.outbox_sent_pages；
+        迁移前的历史 sent 行 sent_at 为 NULL 不计（当日略低估，次日归零）。"""
+        rows = self._conn.execute(
+            "SELECT kind, text, caption FROM outbox "
+            "WHERE state='sent' AND sent_at IS NOT NULL AND sent_at>=?",
+            (local_midnight_ts(),)).fetchall()
+        return outbox_sent_pages(rows, page_char_limit)
+
+    def active_media_paths(self) -> set[str]:
+        """未终态（pending/failed/dead）outbox 行引用的 media_path 集合——
+        media 清理的保护名单（重试复活与死信取证都还引用这些文件，
+        approval_mcp 孙进程写的是绝对路径）。"""
+        return {r["media_path"] for r in self._conn.execute(
+            "SELECT DISTINCT media_path FROM outbox "
+            "WHERE state != 'sent' AND media_path IS NOT NULL")}
 
     def mark_send_failed(self, outbox_id: int, error: str) -> None:
         row = self._conn.execute(

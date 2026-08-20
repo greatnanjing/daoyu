@@ -56,4 +56,7 @@ if [ "${DAOYU_TUI_DRYRUN:-0}" = "1" ]; then
     echo "DEFAULT_OPUS_MODEL=$ANTHROPIC_DEFAULT_OPUS_MODEL"
     exit 0
 fi
+# 版本回显：刀鱼的实测假设锚定 EXPECTED_CLAUDE_VERSION（worker/version.py），
+# 漂移时 flag/输出形态行为可能失真——每次进 TUI 顺手可见
+echo "claude $(claude --version 2>/dev/null || echo '?')"
 exec claude "$@"

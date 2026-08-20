@@ -17,6 +17,12 @@
       "command": "uvx",
       "args": ["--with", "mcp~=1.0", "mcp-server-fetch"],
       "env": {}
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@0.0.79", "--headless", "--isolated"],
+      "env": {}
     }
   },
   "disabled": []

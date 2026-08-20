@@ -69,7 +69,7 @@
 | daoyu-ocr（RapidOCR 本地封装） | 从图片提取文字（中英混识，本地推理，runner 恒注入的系统条目） |
 | web-reader | 抓取阅读网页 |
 | context7 | 实时查库文档 |
-| playwright（可选） | 浏览器自动化备选 |
+| playwright（钉版 `@playwright/mcp`，Linux 复用 chrome-headless-shell） | 浏览器自动化备选（2026-08-20 装载，默认启用，`/mcp off playwright` 可关） |
 
 `/mcp` 命令管理（列表/启用/禁用/新增），改动下一条消息即生效。
 
@@ -103,7 +103,7 @@
 - 进程重启自动回放未完成任务与未投递消息。
 
 ### FR-10 状态查询
-`/status`（系统整体状态：队列深度、死信数、当日费用）、`/tasks`（任务列表）、`/time`（iLink 连接剩余时间）。
+`/status`（系统整体状态：队列深度、死信数、当日费用、今日已发送条数、连接剩余时间）、`/tasks`（任务列表）、`/time`（iLink 连接剩余时间）。
 
 ## 6. 非功能需求
 

@@ -279,6 +279,23 @@ async def main_async() -> None:
     if db.dead_letter_count():
         db.audit("startup_dead_letter", f"count={db.dead_letter_count()}")
 
+    # ---- 版本探测（TRD §11 版本漂移对策）：实测版本 vs EXPECTED_CLAUDE_VERSION，
+    # 漂移/失败只 audit+warning 不阻断（fail-open）。放启动一次性，不进
+    # TaskRunner.__init__（测试大量构造 runner，避免普遍子进程开销）。
+    from worker.version import check_claude_version
+    await check_claude_version(db, cfg)
+
+    # ---- media 过期清理（M3 审查追加项）：启动清一次；日常由出站循环日界滚动
+    # 搭车（outbound._media_cleanup_once）。未终态 outbox 行引用的文件受保护。
+    from gateway.media import cleanup_expired_media
+    if cfg.media_retention_days > 0:
+        n = await asyncio.to_thread(cleanup_expired_media, cfg.repo_root,
+                                    cfg.media_retention_days,
+                                    db.active_media_paths())
+        if n:
+            db.audit("media_cleanup", f"startup removed={n}")
+            log.info("启动 media 清理：%d 个过期文件", n)
+
     token = db.get_state("bot_token")
     token_ref = {"token": token or "",
                  "base_url": db.get_state("bot_base_url", "") or ""}

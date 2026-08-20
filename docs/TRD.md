@@ -205,7 +205,7 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 | daoyu-ocr | 图片文字提取（RapidOCR 本地封装；runner 恒注入，不受 /mcp 启停管辖） | 系统（恒装载） |
 | web-reader | 网页抓取阅读 | 默认 |
 | context7 | 库文档实时查询 | 默认 |
-| playwright | 浏览器自动化备选 | 可选，默认关 |
+| playwright | 浏览器自动化备选（钉版 `@playwright/mcp`，Linux 复用 chrome-headless-shell 经 `--executable-path` 注入） | 默认（2026-08-20 装载，用户拍板默认启用） |
 
 - 会话级变更（`/model` 等）：转发官方命令，只影响当前会话；
 - 持久级变更（`/config` `/permissions` `/mcp`）：写 `claude/settings.json` / `mcp.json`，下次调用生效；文件在 git 内 → 天然版本化、可回滚、可审计（配合 audit_log）。/mcp on/off 启停（写 mcp.json 顶层 disabled、下一任务生效）与 /config set 七键白名单写入（写 gateway/config.json、重启生效）已提供（2026-08-19 余项 A，spec `2026-08-19-mcp-config-writable-design`）。daoyu-ocr 为系统条目恒注入（2026-08-19 余项 B，spec `2026-08-19-ocr-mcp-design`）。
@@ -215,7 +215,7 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 | 层 | 机制 |
 |---|---|
 | 权限档位 | `/policy auto/strict/bypass/plan`，逐任务翻译为 `--permission-mode` + `--allowedTools` |
-| 硬 deny | `permissions.deny` 规则锁 `/`、`/etc`、`~/.ssh`、`~/.claude`、`data/daoyu.db` 等；**auto/strict/plan 档恒生效**。bypass 档下 deny 是否仍被尊重**以实测为准**（登记于 §11）；无论实测结果如何，worker 在 bypass 档额外叠加 `--disallowedTools`（工具级拒绝）兜底 |
+| 硬 deny | `permissions.deny` 规则锁 `/`、`/etc`、`~/.ssh`、`~/.claude`、`data/daoyu.db` 等；**auto/strict/plan 档恒生效**。**bypass 档下 deny 不生效**（2026-08-20 实测：bypassPermissions 跳过包括 deny 在内的全部权限检查，deny 规则在场 Write 照常落盘，见 `.superpowers/sdd/bypass-deny-research.md`）——bypass 档的路径防护只剩 worker 恒加的 `--disallowedTools` 工具级兜底（实测确证生效）；且该清单只覆盖 Read/Edit/daoyu.db/Bash rm，**Write 工具无兜底**，bypass 档本义即用户自担 |
 | 预算闸（恒生效） | `--max-turns` + `--max-budget-usd`，与权限模式独立，bypass 下仍限费 |
 | 审批 | strict 档经 `--permission-prompt-tool` 走微信 Y/N，5 分钟超时拒绝 |
 | 白名单 | gateway 仅响应白名单微信账号 |
@@ -227,8 +227,10 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 ## 9. 部署与运维
 
 - **systemd**：`daoyu.service` 单服务（gateway + worker 同进程，`Restart=always`）。
-- **首次/重连扫码**：终端 CLI 模式运行展示二维码（`qrcode[pil]` 终端渲染）；服务器无人值守时的重连二维码经备用渠道推送（邮件/server酱，部署时选定）。
-- **监控**：`/status` 输出（队列深度、死信数、连接剩余时间、当日费用）；死信与预算超限触发告警（同备用渠道）。
+- **首次/重连扫码**：终端 CLI 模式运行展示二维码（`qrcode[pil]` 终端渲染）；服务器无人值守时的重连**经出站通道推微信**（⚠️ + 二维码链接，复用 outbox 投递——已替代早期"邮件/server酱备用渠道"设想；且重连静默续期优先，`silent_grace_s` 窗内免打扰）。
+- **监控**：`/status` 输出（队列深度、死信数、连接剩余时间、当日费用、今日已发送条数）；死信/预算耗尽/日限熔断/token 失效四类告警同经微信出站通道（M2 Task 7 落地，防自激守卫见 outbound.py）。
+- **CLI 版本**：启动自动探测 `claude --version` 与基线比对（漂移 audit+warning，fail-open），升级流程见 §11 版本漂移行。
+- **media**：`data/media/inbound|outbound` 按 `media_retention_days`（默认 14 天）启动与日界清理，未终态 outbox 行引用的文件受保护。
 - **备份**：`data/daoyu.db` 每日快照（cron + sqlite `.backup`）。
 
 ## 10. 测试策略
@@ -245,12 +247,12 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 | 项 | 状态 | 计划 |
 |---|---|---|
 | `/init` 在 headless 下的确切行为 | 官方文档未明说 | M1 期间实测；以 `system/init` 的 `slash_commands` 实际清单为准 |
-| bypass 档下 `permissions.deny` 是否仍生效 | 未实测 | M2 实测；若不生效则以 `--disallowedTools` + 文件系统权限双兜底 |
+| bypass 档下 `permissions.deny` 是否仍生效 | **已实测（2026-08-20）：不生效**（bypassPermissions 跳过全部权限检查；`--disallowedTools` 工具级兜底实测有效） | 结论见 `.superpowers/sdd/bypass-deny-research.md`；TRD §8 已更新 |
 | ClawBot 媒体（CDN 加密上传） | 已实现（M3 图片双向，真机验收 2026-08-19） | — |
-| 重连二维码的无人值守推送渠道 | 待部署时选定（邮件/server酱） | M2 |
+| 重连二维码的无人值守推送渠道 | **已落地（M2）**：经出站通道推微信（⚠️+二维码链接），另有重连静默续期（`silent_grace_s`）与主动续期 30 天 | 早期"邮件/server酱"设想作废 |
 | 微信文本单条长度上限 | **已实测（2026-08-20）：16384 字节 UTF-8**（16384 ✓ / 16385 ✗ `prepare failed`；按**字节**计——中文 5450 字≈16350B ✓ / 5500 字≈16500B ✗、ASCII 12000 字 ✓；超限 `errcode=0` **静默不投递**） | [common/text.py](common/text.py) `split_text` 双上限：字符（`page_char_limit`）+ 字节硬闸 `MAX_PAGE_BYTES=15000`，无论 limit 配多大都防越线 |
 | OCR MCP 具体 server 选型/封装 | 已落定：RapidOCR 本地封装（daoyu-ocr，rapidocr-onnxruntime 1.4.4，模型随包、bytes 直传） | 已实现（2026-08-19 余项 B） |
-| Claude Code 版本漂移（flag 行为随版本变） | 持续风险 | 固定版本 + 升级前跑 E2E 回归 |
+| Claude Code 版本漂移（flag 行为随版本变） | 持续风险 | **机制化（2026-08-20）**：启动探测 `claude --version` 与 `worker/version.py` 的 `EXPECTED_CLAUDE_VERSION`（当前 2.1.233）比对，匹配 audit 留痕、漂移/失败 audit+warning（fail-open 不阻断）；升级流程 = 改常量 → 全量 pytest → 服务器 npm 升级 |
 
 ## 12. 实现顺序建议（对应 PRD 里程碑）
 

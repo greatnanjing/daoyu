@@ -141,9 +141,11 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
     if cmd == "status":
         cost = db.today_cost_usd()
         remain = _remain_text(db, config)
+        sent = db.sent_pages_today(int(config.throttle["page_char_limit"]))
         return (f"队列：{db.queue_depth()} 排队 / {len(pool.running_session_ids())} 会话运行中\n"
                 f"死信：{db.dead_letter_count()}\n"
                 f"当日费用：${cost:.2f}\n"
+                f"今日已发送：{sent} 条\n"
                 f"连接剩余：{remain}")
     if cmd == "new":
         cwd = _active_session(db, from_user, config.default_cwd).cwd

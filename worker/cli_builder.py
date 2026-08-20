@@ -1,5 +1,6 @@
 """claude CLI 命令行组装（TRD §4.1）。每次调用全量传 flag（--resume 不恢复权限/MCP 配置）。
 prompt 一律走 stdin，不进 argv（避免 shell 转义问题）。"""
+import re
 from pathlib import Path
 
 from common.models import Budget
@@ -38,8 +39,11 @@ APPROVAL_PROMPT_TOOL = f"mcp__{APPROVAL_MCP_SERVER}__approve"
 OCR_MCP_SERVER = "daoyu-ocr"
 OCR_TOOL = f"mcp__{OCR_MCP_SERVER}__ocr"   # claude/settings.json allow 引用同一形态
 
-# bypass 档工具级兜底（bypass 下 permissions.deny 生效性未实测，TRD §8 要求叠加）。
-# 与 claude/settings.json 的 deny 清单逐项对齐。路径用 // 绝对锚定：官方 permissions
+# bypass 档工具级兜底（2026-08-20 实测：bypassPermissions 跳过包括 permissions.deny
+# 在内的全部权限检查，deny 规则在场 Write 照常落盘；本清单实测有效拦截——
+# 见 .superpowers/sdd/bypass-deny-research.md）。与 claude/settings.json 的 deny
+# 清单逐项对齐（Write 工具不在清单内，bypass 档经 Write 写敏感路径无兜底，
+# 该档本义即用户自担）。路径用 // 绝对锚定：官方 permissions
 # 文档规定 Read/Edit 单前导 / 锚定到规则来源目录（--settings <file> → 该文件所在目录，
 # CLI flag → original cwd，且会话 cwd 可被 /cd 切走），不锚定文件系统根；
 # //**/x 匹配文件系统任意位置的同名路径（文档明确记载的形态）。
@@ -92,6 +96,30 @@ def build_argv(*, session_uuid: str, resume: bool, policy: str, budget: Budget,
 _WINDOWS_WRAP = {"npx", "uvx"}
 
 
+def wrap_windows_command(prefix: list[str]) -> list[str]:
+    """版本探测等「直接拉起 claude_bin」场景的 Windows 包装（与
+    expand_platform 的 _WINDOWS_WRAP 同源问题域：shell=False 直 exec
+    .cmd/.bat 脚本会 OSError [WinError 193]）。
+
+    首选解析 npm shim 指向的真实 exe（"%dp0%\\...\\x.exe" 形态，2026-08-20
+    实测 claude.cmd 即此形态）——exe 是原生可执行，CreateProcess 直启无空格
+    问题。解析不了回退 cmd /c（注意已知坑：cmd /c 对含空格的引号路径会按
+    旧版引号规则剥引号再切分——rc=0 空输出的静默失败，故 exe 直达是首选；
+    回退仅对无空格路径可靠）。Linux/其他形态原样返回。纯函数可测。"""
+    if not prefix or not prefix[0].lower().endswith((".cmd", ".bat")):
+        return prefix
+    try:
+        text = Path(prefix[0]).read_text(encoding="utf-8", errors="replace")
+        m = re.search(r'"%dp0%\\([^"]+\.exe)"', text)
+        if m:
+            exe = Path(prefix[0]).parent / m.group(1)
+            if exe.is_file():
+                return [str(exe), *prefix[1:]]
+    except OSError:
+        pass
+    return ["cmd", "/c", *prefix]
+
+
 def expand_platform(servers: dict, windows: bool) -> dict:
     """静态 mcpServers → 实际拉起形态（纯函数，平台由参数传入可测）。
     windows=False 时原样返回传入对象（调用方当只读）；仅 windows=True 分支
@@ -118,37 +146,68 @@ _LINUX_CHROME_GLOB = ("chrome-headless-shell", "linux-*", "chrome-headless-shell
 _LINUX_ALSA_REL = Path("chrome-libs") / "usr" / "lib64" / "libasound.so.2"
 
 
-def inject_linux_chrome(servers: dict, home: Path) -> dict:
-    """Linux 侧 chrome-devtools 条目的本机装配注入（纯函数，home 参数化可测）。
-
-    命中约定路径的 headless Chrome 时给 chrome-devtools 条目追加
-    --headless --isolated --executablePath，并按需注入 LD_LIBRARY_PATH
-    （~/chrome-libs 解包的 libasound 存在时）；同时显式清空条目 env 的
-    http(s)_proxy——服务器 shell 的死代理配置会穿透给 Chrome 导致所有导航
-    失败（systemd 生产环境本就干净，防御手跑排障场景）。条目 env 与静态条目
-    env 合并（注入值优先），args 追加在静态 args 之后（CLI 后值覆盖前值）。
-    未安装（约定路径缺失）或条目缺席/坏形态时原样返回——fail-open，与
-    expand_platform 的防御口径一致。Windows 由调用方分支排除，不会走到。"""
-    chrome = None
+def _discover_linux_chrome(home: Path) -> Path | None:
+    """约定路径发现 headless Chrome（版本目录字典序取最高 = 最高版本）；
+    未安装返回 None。chrome-devtools 与 playwright 两个条目共用同一二进制。"""
     base = home / ".cache" / "puppeteer"
-    if base.is_dir():
-        cands = sorted(base.glob(str(Path(*_LINUX_CHROME_GLOB))))
-        if cands:
-            chrome = cands[-1]   # 版本目录字典序 = 最高版本
-    svc = servers.get("chrome-devtools")
-    if chrome is None or not isinstance(svc, dict):
-        return servers
-    env = dict(svc.get("env") or {})
+    if not base.is_dir():
+        return None
+    cands = sorted(base.glob(str(Path(*_LINUX_CHROME_GLOB))))
+    return cands[-1] if cands else None
+
+
+def _linux_browser_env(home: Path, env: dict) -> dict:
+    """Linux 浏览器条目 env 装配：ALSA LD_LIBRARY_PATH（~/chrome-libs 免 sudo
+    解包，Chrome 152 在 OpenCloudOS 9 上唯一缺失的系统库）+ 显式清空
+    http(s)_proxy（服务器 shell 死代理会穿透给浏览器导致所有导航失败；
+    systemd 生产环境本就干净，防御手跑排障场景）。注入值与静态 env 合并。"""
+    env = dict(env)
     alsa = home / _LINUX_ALSA_REL
     if alsa.exists():
         env["LD_LIBRARY_PATH"] = str(alsa.parent) + (
             ":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
     env.setdefault("http_proxy", "")
     env.setdefault("https_proxy", "")
+    return env
+
+
+def inject_linux_chrome(servers: dict, home: Path) -> dict:
+    """Linux 侧 chrome-devtools 条目的本机装配注入（纯函数，home 参数化可测）。
+
+    命中约定路径的 headless Chrome 时给 chrome-devtools 条目追加
+    --headless --isolated --executablePath（注意 camelCase——chrome-devtools-mcp
+    的 flag 形态），env 经 _linux_browser_env（ALSA + 清死代理）。未安装
+    （约定路径缺失）或条目缺席/坏形态时原样返回——fail-open，与
+    expand_platform 的防御口径一致。Windows 由调用方分支排除，不会走到。"""
+    chrome = _discover_linux_chrome(home)
+    svc = servers.get("chrome-devtools")
+    if chrome is None or not isinstance(svc, dict):
+        return servers
     servers = {**servers, "chrome-devtools": {
         **svc,
         "args": [*svc.get("args", []), "--headless", "--isolated",
                  "--executablePath", str(chrome)],
-        "env": env,
+        "env": _linux_browser_env(home, svc.get("env") or {}),
     }}
     return servers
+
+
+def inject_linux_playwright(servers: dict, home: Path) -> dict:
+    """Linux 侧 playwright 条目的本机装配注入（与 inject_linux_chrome 同源：
+    同一 headless Chrome 二进制、同一套 ALSA/死代理 env）。
+
+    差异：flag 名是 --executable-path（连字符小写——@playwright/mcp 的形态）；
+    --headless --isolated 已在静态 mcp.json args（两平台通用），此处只补
+    executable-path 与 env。chrome-headless-shell × playwright 的兼容性
+    未真机证实（puppeteer 系有先例，playwright 未验证）——不兼容时兜底：
+    服务器 PLAYWRIGHT_DOWNLOAD_HOST=<npmmirror> + npx playwright install
+    chromium 自装浏览器并去掉本注入。未安装/条目缺席/坏形态原样返回。"""
+    chrome = _discover_linux_chrome(home)
+    svc = servers.get("playwright")
+    if chrome is None or not isinstance(svc, dict):
+        return servers
+    return {**servers, "playwright": {
+        **svc,
+        "args": [*svc.get("args", []), "--executable-path", str(chrome)],
+        "env": _linux_browser_env(home, svc.get("env") or {}),
+    }}

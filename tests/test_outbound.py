@@ -429,3 +429,56 @@ async def test_empty_bot_token_window_keeps_pending_then_delivers(db):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+# ---- 出站日计数按页折算（M1 移交项清偿：计数口径=微信侧真实发送条数）----
+
+async def test_daily_count_counts_pages_not_rows(db):
+    """3 页长文送达 → _sent_today 计 3（旧口径按 outbox 行只计 1）。"""
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    il = FakeILink()
+    loop = OutboundLoop(db, il, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    db.enqueue(None, "u@im.wechat", "x" * 5000)   # 3 页（limit 2000）
+    await loop._drain_once()
+    assert len(il.sent) == 3
+    assert loop._sent_today == 3
+
+
+async def test_daily_count_failed_pages_not_counted(db):
+    """首页发送失败即止：成功页 0，计数 0（失败页对端未收到不计）。"""
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    il = FakeILink()
+    il.fail_first = 1
+    loop = OutboundLoop(db, il, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    db.enqueue(None, "u@im.wechat", "x" * 5000)
+    await loop._drain_once()
+    assert loop._sent_today == 0
+
+
+async def test_daily_count_survives_restart(db):
+    """重启恢复：3 页送达后新建 OutboundLoop（同 db），计数从 sent 行折算回来。"""
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    il = FakeILink()
+    loop = OutboundLoop(db, il, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    db.enqueue(None, "u@im.wechat", "x" * 5000)
+    await loop._drain_once()
+    assert loop._sent_today == 3
+    loop2 = OutboundLoop(db, FakeILink(), FakeCfg(),
+                         token_ref={"token": "T", "base_url": ""}, typing_state={})
+    assert loop2._sent_today == 3
+
+
+async def test_daily_count_image_row_counts_caption_and_image(db, tmp_path):
+    """图片行带 caption 送达 → 计 2（caption 文本条 + 图片条各计 1）。"""
+    img = tmp_path / "out.png"; img.write_bytes(_png_bytes())
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    db.enqueue_media(None, "u@im.wechat", str(img), "看这个")
+    fake = FakeMediaILink()
+    loop = OutboundLoop(db, fake, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    await loop._drain_once()
+    assert len(fake.sent_texts) == 1 and len(fake.sent_images) == 1
+    assert loop._sent_today == 2

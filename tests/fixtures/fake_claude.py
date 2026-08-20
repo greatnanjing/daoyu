@@ -16,6 +16,12 @@ import time
 def main():
     sys.stdin.reconfigure(encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8")
+    if "--version" in sys.argv:
+        # 版本探测分支（worker/version.py）：形态对齐真实 CLI（实测 2.1.233）；
+        # FAKE_CLAUDE_VERSION 可注入模拟匹配/漂移两分支。必须先于 stdin.read
+        # ——探测方不写 stdin，等 read 会挂到超时。
+        print(os.environ.get("FAKE_CLAUDE_VERSION", "2.1.233") + " (Claude Code)")
+        sys.exit(0)
     prompt = sys.stdin.read()          # 必须消费 stdin（真实 claude 也从 stdin 读）
     script = os.environ["FAKE_CLAUDE_SCRIPT"]
     # 把收到的 prompt 存下来供测试断言

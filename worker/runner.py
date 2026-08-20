@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import re
+import signal
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -14,7 +16,7 @@ from common.config import host_claude_env, merge_claude_secrets
 from worker.cli_builder import (APPROVAL_MCP_SERVER, BYPASS_DISALLOWED_TOOLS,
                                 OCR_MCP_SERVER, POLICY_MODE, build_argv,
                                 claude_config_dir, expand_platform,
-                                inject_linux_chrome)
+                                inject_linux_chrome, inject_linux_playwright)
 from worker.stream import StreamParser, Throttle
 
 log = logging.getLogger(__name__)
@@ -51,6 +53,48 @@ def _cleanup_stale_mcp_configs() -> None:
             pass   # 竞态下已被他人删除/占用——幂等
 
 
+def _spawn_kwargs() -> dict:
+    """claude 子进程 spawn 的平台 kwargs。
+
+    POSIX：start_new_session 建独立进程组（pgid==pid），/cancel 时 killpg 整树
+    杀掉——claude 拉起的 MCP server 是孙进程，只杀 claude 本体会留孙进程持
+    管道/占资源（M1 移交技术债，真机实证见 progress 台账）。Windows：不建组，
+    杀树走 taskkill /T 按父子链遍历，与进程组无关。"""
+    if sys.platform == "win32":
+        return {}
+    return {"start_new_session": True}
+
+
+def kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """杀子进程整棵树（/cancel 与流异常孤儿兜底共用）。
+
+    POSIX：killpg(pid)——spawn 带 start_new_session 时 pgid==pid，直接用 pid，
+    不做 getpgid（进程已死时 getpgid 抛错的竞态点）。Windows：taskkill /F /T
+    按父子链杀。组杀未命中（异常或 taskkill 非零退出）兜底杀直接子进程。"""
+    if proc.returncode is not None:
+        return   # 已退出，无需 kill
+    group_killed = False
+    try:
+        if sys.platform == "win32":
+            cp = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, timeout=10)
+            group_killed = cp.returncode == 0
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+            group_killed = True
+    except (OSError, subprocess.SubprocessError) as e:
+        # ProcessLookupError/PermissionError 均为 OSError 子类；
+        # taskkill 超时为 TimeoutExpired（SubprocessError 子类）
+        log.warning("进程组 kill 异常，兜底杀直接子进程: pid=%s err=%r",
+                    proc.pid, e)
+    if not group_killed:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass   # 进程已自行退出，kill 只是兜底
+
+
 class TrackedProcess:
     """process_registry 的条目：记录是否被外部 kill 过。
 
@@ -64,7 +108,7 @@ class TrackedProcess:
 
     def kill(self) -> None:
         self.killed = True
-        self._proc.kill()
+        kill_process_tree(self._proc)
 
 
 class TaskRunner:
@@ -129,7 +173,7 @@ class TaskRunner:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=_STREAM_LIMIT,
-                    cwd=session.cwd, env=env)
+                    cwd=session.cwd, env=env, **_spawn_kwargs())
             except OSError as e:
                 await self._fail(task, session.wechat_user, f"无法启动 claude 子进程: {e}")
                 return
@@ -200,11 +244,9 @@ class TaskRunner:
                 stderr_tail = (await stderr_task).decode("utf-8", "replace").strip()
             except Exception as e:
                 # 流读取/解析任何异常（如单行超 _STREAM_LIMIT 的 ValueError）：kill 防
-                # 孤儿进程、wait 收尸、走 _fail —— 任务不卡 running、用户有反馈。
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass   # 进程已自行退出，kill 只是兜底
+                # 孤儿进程（整树杀，MCP 孙进程不残留）、wait 收尸、走 _fail ——
+                # 任务不卡 running、用户有反馈。
+                kill_process_tree(proc)
                 await proc.wait()
                 stderr_task.cancel()
                 await self._fail(task, session.wechat_user, f"输出流读取/解析异常: {e!r}")
@@ -299,7 +341,7 @@ class TaskRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=_STREAM_LIMIT,
-                cwd=session.cwd, env=env)
+                cwd=session.cwd, env=env, **_spawn_kwargs())
         except OSError as e:
             await self._fail(task, session.wechat_user, f"无法启动 claude 后台子进程: {e}")
             return
@@ -370,11 +412,12 @@ class TaskRunner:
         servers = {k: v for k, v in static.get("mcpServers", {}).items()
                    if k not in disabled}
         # 平台无关条目 → 实际拉起形态（Windows 白名单命令包 cmd /c；Linux 给
-        # chrome-devtools 注入本机 headless Chrome 装配——约定路径命中才注入，
-        # 未安装 no-op，详见 inject_linux_chrome）
+        # chrome-devtools 与 playwright 注入本机 headless Chrome 装配——约定路径
+        # 命中才注入，未安装 no-op，详见两 inject 函数）
         servers = expand_platform(servers, sys.platform == "win32")
         if sys.platform != "win32":
             servers = inject_linux_chrome(servers, Path.home())
+            servers = inject_linux_playwright(servers, Path.home())
         merged = {"mcpServers": {
             **servers,
             APPROVAL_MCP_SERVER: {

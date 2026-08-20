@@ -25,6 +25,12 @@ class NotJsonObjectError(ValueError):
     """文件是合法 JSON 但顶层不是对象（数组/字符串等）。str(e) 为文件路径。"""
 
 
+class PermStructureError(ValueError):
+    """settings.json 是合法 JSON 但 permissions 结构异常（permissions 非对象、
+    allow/deny/ask 存在却不是数组）。与 JSON 解析失败区分——静默重置 [] 再写回
+    会覆盖丢失原畸形内容（M3 后补技术债清偿）。"""
+
+
 async def execute_proxy(db, route, config) -> str:
     cmd = route.command
     if cmd == "permissions":
@@ -32,6 +38,9 @@ async def execute_proxy(db, route, config) -> str:
             return _permissions(db, config, route.args.strip())
         except NotJsonObjectError as e:
             return f"配置文件格式异常（顶层不是对象）：{e}"
+        except PermStructureError as e:
+            db.audit("permissions_malformed", str(e))
+            return f"claude/settings.json 结构异常：{e}"
         except ValueError as e:
             return f"claude/settings.json 解析失败：{e}"
     if cmd == "mcp":
@@ -73,13 +82,19 @@ def _load_settings(config):
 
 
 def _perm_lists(data) -> dict:
-    """就地补齐 allow/deny/ask 三列表（缺失或类型不对按空表处理）。"""
+    """就地补齐 allow/deny/ask 三列表（键缺失按空表补）。
+
+    键**存在但非数组** → PermStructureError：静默重置 [] 后 add/del 写回会把
+    原畸形内容覆盖丢失，必须拒绝操作让人工处置。列表内非字符串元素不防护：
+    JSON 回写保真、del 按序号正确、add 去重不误伤，无丢数据风险。"""
     perms = data.setdefault("permissions", {})
     if not isinstance(perms, dict):
-        raise ValueError("permissions 不是对象")
+        raise PermStructureError("permissions 不是对象")
     for k in ("allow", "deny", "ask"):
-        if not isinstance(perms.get(k), list):
-            perms[k] = []
+        if k in perms and not isinstance(perms[k], list):
+            raise PermStructureError(f"permissions.{k} 不是数组，"
+                                     "请直接修改 claude/settings.json")
+        perms.setdefault(k, [])
     return perms
 
 

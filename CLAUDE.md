@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），325 个测试全绿（`python -m pytest`）；M2 已实现（2026-08-16）。M3 全部完成、真机验收通过（2026-08-19，余项 B 四项全过：OCR 主链路 / /mcp 列表呈现系统条目 / /mcp off 系统条目拦截 / /bg 回归）：媒体收发（图片双向）+ /mcp 启停与 /config 写入（余项 A，spec 2026-08-19-mcp-config-writable-design）+ OCR MCP（余项 B，spec 2026-08-19-ocr-mcp-design）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
+**M3 媒体收发（图片双向）真机验收通过**（2026-08-19，spec §5 五项全过；验收期实测修正：出站 aes_key 形态、bg watcher 三终态、bg 摘除 mcp-config，见 M3 清单），357 个测试全绿（`python -m pytest`）。**2026-08-20 收尾批**（开放问题与技术债清偿）：bypass deny 实测落定（不生效）、CLI 版本探测机制化（[worker/version.py](worker/version.py)）、/cancel 进程组/整树 kill、出站熔断按页计数+跨重启（outbox.sent_at）、data/media 定期清理（`media_retention_days`）、/permissions 畸形结构防护（PermStructureError，不再静默吞写）、playwright MCP 装载（默认启用）。M2 已实现（2026-08-16）。M3 全部完成、真机验收通过（2026-08-19，余项 B 四项全过：OCR 主链路 / /mcp 列表呈现系统条目 / /mcp off 系统条目拦截 / /bg 回归）：媒体收发（图片双向）+ /mcp 启停与 /config 写入（余项 A，spec 2026-08-19-mcp-config-writable-design）+ OCR MCP（余项 B，spec 2026-08-19-ocr-mcp-design）。设计与实现决策仍以下列文档为准，实现与 TRD 的已知偏差登记在 `docs/superpowers/plans/2026-08-15-m1-mvp.md` Self-Review 节与 `.superpowers/sdd/` 各审查记录：
 
 - [docs/PRD.md](docs/PRD.md) — 产品需求（功能 FR-1~10、非功能需求、里程碑 M1/M2/M3、范围外）
 - [docs/TRD.md](docs/TRD.md) — 技术设计（架构、SQLite 数据模型、claude CLI 调用规范、命令路由、安全设计、测试策略）
@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **strict 档审批**：`/policy strict` 后任务带 `--permission-prompt-tool mcp__daoyu__approve`；[worker/approval_mcp.py](worker/approval_mcp.py)（stdio JSON-RPC server，经临时合并 mcp config 由 claude 拉起、任务结束即删）写 approvals 行 + outbox 🔐 推微信；gateway `handle_inbound` 拦截 Y/N 单字 decide（300s 超时 = expired = 拒绝）。
 - **`/bg` 长任务**：桥命令建 bg 任务 → runner `claude --bg` 启动分支（bg_id 落盘即回执）→ [worker/pool.py](worker/pool.py) `_bg_watcher` 轮询 `claude agents --json --all` 推进（真机 2.1.233 三终态：`done`=完成/`blocked`=等用户输入，均 fork 取结果推送完结、`failed`=失败重试；条目无输出字段，结果靠 `--fork-session` 回原会话取——直接 `--resume` 被 daemon 持有拒绝且 rc=0；消失取消）；`/cancel` 走 `claude stop`。
-- **MCP 装载**：`claude/mcp.json` 已装 chrome-devtools / context7 / web-reader 三台（平台无关形态——command 直写 npx/uvx，runner 合并层 Windows 包 cmd /c（白名单 {npx,uvx}）+ 过滤 disabled；Linux 侧 chrome-devtools 由 `inject_linux_chrome` 按约定路径注入 headless Chrome 装配——`~/.cache/puppeteer/chrome-headless-shell/linux-*`（npmmirror 装，手动拼 URL 会 404 必须走 `@puppeteer/browsers`）+ `~/chrome-libs` 解包 libasound 免 sudo，注入 `--headless --isolated --executablePath` + LD_LIBRARY_PATH + 清死代理；2026-08-19/20 真机验证 Next.js SPA 完整渲染（直连与微信全链路双验证，进度条 `mcp__chrome-devtools__new_page` 实证），未安装 no-op fail-open）；另有 daoyu-ocr 系统条目（RapidOCR 本地 OCR，runner 恒注入、不受 /mcp 启停管辖，余项 B）。
+- **MCP 装载**：`claude/mcp.json` 已装 chrome-devtools / context7 / web-reader / playwright 四台（平台无关形态——command 直写 npx/uvx，runner 合并层 Windows 包 cmd /c（白名单 {npx,uvx}）+ 过滤 disabled；Linux 侧 chrome-devtools 与 playwright 共用 headless Chrome 装配——`inject_linux_chrome` / `inject_linux_playwright` 按约定路径注入 `~/.cache/puppeteer/chrome-headless-shell/linux-*`（npmmirror 装，手动拼 URL 会 404 必须走 `@puppeteer/browsers`）+ `~/chrome-libs` 解包 libasound 免 sudo，注入 `--headless --isolated --executablePath|--executable-path` + LD_LIBRARY_PATH + 清死代理；chrome-devtools 2026-08-19/20 真机验证 Next.js SPA 完整渲染（直连与微信全链路双验证，进度条 `mcp__chrome-devtools__new_page` 实证），playwright 2026-08-20 装载（钉版 `@playwright/mcp@0.0.79` 默认启用；chrome-headless-shell × playwright `--executable-path` 兼容性未真机证实，不兼容兜底 = npmmirror `PLAYWRIGHT_DOWNLOAD_HOST` + `npx playwright install chromium`；未安装 no-op fail-open）；另有 daoyu-ocr 系统条目（RapidOCR 本地 OCR，runner 恒注入、不受 /mcp 启停管辖，余项 B）。
 - **配置代理命令**：[gateway/proxy.py](gateway/proxy.py) — `/permissions`（列表 + deny add/del + allow add，写 `claude/settings.json`）、`/mcp`（列表 + on/off 启停，写 mcp.json 顶层 disabled）、`/config`（概览 + set 七键白名单写 gateway/config.json，重启生效）。
 - **同目录多话题**：sessions 表 `UNIQUE(wechat_user, cwd, claude_uuid)`（ensure_schema 对旧表做无损迁移：建 v2 → 搬行 → 换名，幂等）。`/new` 当前目录开新话题；`/sessions` 两级展示（目录分组 + 组内全局序号，序号按 last_active_at DESC）；`/cd #n` 切话题、`/cd <路径>` 切目录（指向该目录最新话题，无则建）；当前话题指针在 state KV `active_session:<wechat_user>`（[common/db.py](common/db.py) `get_active_binding`，chat/policy/bg/cancel 均走它；老库无指针时经旧 `cwd:` 指针回退并回写）。`/policy` 每话题独立。
 - **`/sessions`**：会话列表（目录 + 最近任务摘要 + uuid 短码）与 `/cd #n` 序号切换（见上一条：现为话题两级展示）。
@@ -37,14 +37,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **入口**：`daoyu` console script → [gateway/app.py](gateway/app.py) `start()`（读 `gateway/config.json` + `claude/secrets.env`，崩溃恢复后常驻 poll / outbound / reconnect / worker-pool 四协程）；`daoyu-login` → [gateway/login.py](gateway/login.py)（终端扫码，token 写 DB state 后退出）。
 - **gateway**：[gateway/ilink.py](gateway/ilink.py)（iLink 协议封装）、[gateway/router.py](gateway/router.py)（命令总线路由）、[gateway/bridge.py](gateway/bridge.py)（桥命令 + /help 多层合并）、[gateway/proxy.py](gateway/proxy.py)（TUI 配置命令微信代理）、[gateway/outbound.py](gateway/outbound.py)（outbox 投递/重试/死信/节流/typing + 图片 CDN 上传链路）、[gateway/reconnect.py](gateway/reconnect.py)（连接守护，**主动续期周期默认 30 天**——2026-08-19 实证推翻 TRD "24h 过期"假设：本机实例 token 连续 ≥2.6 天活跃有效无 401，官方 openclaw-weixin dist 亦无免扫码续期路径（`binded_redirect` 是扫码时已绑定的状态）；官方 README 定义 `errcode -14 = session timeout` 且不声明 TTL，官方客户端对 -14 仅暂停 1h 同 token 重试（无重登）。**token 失效的权威信号是应用层 `errcode`/`ret = -14`（HTTP 200 响应体）而非 HTTP 401**——poll_loop 两路都清 token 触发重扫（-14 连续 5 次防抖 ≈25s）。续期时静默优先：`local_token_list` 带旧 token 轮询 `silent_grace_s`（默认 30s）超窗才推二维码；`bot_token_last` 永清副本保证 401/403 清 token 后线索不丢）、[gateway/media.py](gateway/media.py)（媒体 CDN AES-128-ECB 上传/下载/解密）。
-- **worker**：[worker/pool.py](worker/pool.py)（按 session 串行调度池 + bg 后台监视 watcher）、[worker/cli_builder.py](worker/cli_builder.py)（claude argv 组装）、[worker/runner.py](worker/runner.py)（子进程执行/流式进度/费用记账/bg 启动分支）、[worker/stream.py](worker/stream.py)（stream-json 解析 + 节流器）、[worker/approval_mcp.py](worker/approval_mcp.py)（daoyu MCP server：审批 approve + 发图 send_image）、[worker/ocr_mcp.py](worker/ocr_mcp.py)（daoyu-ocr：本地 OCR）。
+- **worker**：[worker/pool.py](worker/pool.py)（按 session 串行调度池 + bg 后台监视 watcher）、[worker/cli_builder.py](worker/cli_builder.py)（claude argv 组装 + Linux chrome 注入 + Windows shim 解析）、[worker/runner.py](worker/runner.py)（子进程执行/流式进度/费用记账/bg 启动分支；进程组/整树 kill——POSIX `start_new_session`+`killpg`、Windows `taskkill /T`，MCP 孙进程不残留）、[worker/stream.py](worker/stream.py)（stream-json 解析 + 节流器）、[worker/approval_mcp.py](worker/approval_mcp.py)（daoyu MCP server：审批 approve + 发图 send_image）、[worker/ocr_mcp.py](worker/ocr_mcp.py)（daoyu-ocr：本地 OCR）、[worker/version.py](worker/version.py)（CLI 版本探测：`EXPECTED_CLAUDE_VERSION` 基线比对，漂移 audit+warning fail-open）。
 - **common**：[common/db.py](common/db.py)（SQLite 五表 + approvals + state KV；M3 加 messages.media_path 与 outbox.kind/media_path/caption）、[common/config.py](common/config.py)（配置加载契约）、[common/models.py](common/models.py)、[common/text.py](common/text.py)（长文本分页）。
 - **配置**：`gateway/config.example.json`（实例 config.json 进 gitignore）；`claude/settings.json` + `claude/mcp.json`（进 git，宿主隔离靠 CLAUDE_CONFIG_DIR，见硬性约束）；`claude/secrets.env`（gitignore）；`deploy/daoyu.service`（systemd 单元）。
 
 ## 常用命令
 
 ```bash
-python -m pytest                        # 全量测试（325 个）
+python -m pytest                        # 全量测试（357 个）
 python -m pytest tests/test_e2e.py -v   # E2E（fake iLink + fake claude 子进程；M2 含审批往返/bg 冒烟；M3 媒体 E2E 在 tests/test_media_e2e.py）
 daoyu-login                             # 终端扫码登录（token 落盘后退出）
 python -m gateway.app                   # 前台调试运行（不进 systemd）
@@ -110,9 +110,9 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 
 ## 安全底线
 
-- **硬 deny 清单**（`//etc/**`、`~/.ssh/**`、`~/.claude/**`、`//**/data/daoyu.db` 等；注意官方 permissions 语义：单前导 `/` 锚定 settings 来源目录而非绝对路径，**绝对路径必须 `//`**）：auto/strict/plan 档恒生效；bypass 档下 deny 是否被尊重以实测为准，无论结果如何都叠加 `--disallowedTools` 工具级兜底。
+- **硬 deny 清单**（`//etc/**`、`~/.ssh/**`、`~/.claude/**`、`//**/data/daoyu.db` 等；注意官方 permissions 语义：单前导 `/` 锚定 settings 来源目录而非绝对路径，**绝对路径必须 `//`**）：auto/strict/plan 档恒生效；**bypass 档下 deny 不生效**（2026-08-20 实测：bypassPermissions 跳过包括 deny 在内的全部权限检查，见 `.superpowers/sdd/bypass-deny-research.md`），恒叠加 `--disallowedTools` 工具级兜底（实测确证有效；但该清单只覆盖 Read/Edit/daoyu.db/Bash rm，Write 工具在 bypass 档无兜底——该档本义即用户自担）。
 - **预算闸**（`--max-turns` + `--max-budget-usd`）与权限档位独立、恒生效，bypass 下仍限费；预算/回合耗尽的失败**不重试**（直接死信，防 3× 上限放大）。
-- `/policy` 四档：auto（默认全放）/ strict（default + 审批 MCP：需批准的工具调用推微信 Y/N，5 分钟超时视为拒绝；`/bg` 任务无审批通道、需审批工具被直接拒绝，仅适合只读）/ bypass / plan。
+- `/policy` 四档：auto（默认全放）/ strict（default + 审批 MCP：需批准的工具调用推微信 Y/N，5 分钟超时视为拒绝；`/bg` 任务无审批通道、需审批工具被直接拒绝，仅适合只读）/ bypass（deny 清单不生效——2026-08-20 实测，见硬 deny 条；工具级兜底 `--disallowedTools` 恒加）/ plan。
 - secret 只放 `claude/secrets.env`（gitignore）+ 环境变量注入，日志脱敏。
 - gateway 仅响应白名单微信账号，白名单外一律不响应。
 
@@ -124,7 +124,7 @@ Windows 开发机（Git Bash）下 venv 解释器在 `.venv/Scripts/python`，Li
 
 ## 开放问题（涉及前先实测，勿凭假设实现）
 
-TRD §11 登记的未决项：`/init` 在 headless 下的确切行为、bypass 档下 `permissions.deny` 是否生效、微信文本单条长度上限（分页阈值依据）、Claude Code 版本漂移（对策：固定版本 + 升级前跑 E2E 回归）。M2 新登记的 bg 三项已随 M3 验收（2026-08-19）全部落定：
+TRD §11 登记的未决项：~~`/init` 在 headless 下的确切行为~~（已按设计消解：不依赖它，以 `system/init` 的 `slash_commands` 实清单同步）、~~bypass 档下 `permissions.deny` 是否生效~~（**2026-08-20 实测落定：不生效**，`--disallowedTools` 兜底确证有效，结论见 `.superpowers/sdd/bypass-deny-research.md`）、~~微信文本单条长度上限~~（已实测 16384 字节，[common/text.py](common/text.py) 字节硬闸）、~~Claude Code 版本漂移~~（已机制化：启动版本探测 + `EXPECTED_CLAUDE_VERSION` 基线比对，见 [worker/version.py](worker/version.py)）。M2 新登记的 bg 三项已随 M3 验收（2026-08-19）全部落定：
 
 - ~~**bg completed 条目字段名未采样**~~ → 已采样：终态值是 `done`（非 completed）、条目十字段无输出/cost 字段，取结果靠 `--fork-session` 回原会话（常态路径而非兜底）。
 - ~~**`--bg` 与 `--permission-prompt-tool` 组合未实测**~~ → 已落定：bg 不传审批工具（strict 档回执明示）；`--settings` 硬 deny 与 acceptEdits 下 Bash 正常放行均实证；**`--mcp-config` 与 `--bg` 结构性不兼容**（daemon 异步读竞态，已摘除，bg 无 MCP）。

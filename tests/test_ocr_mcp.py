@@ -54,7 +54,7 @@ def test_ocr_no_text(monkeypatch, tmp_path):
 
 def test_ocr_rejects_oversize_image(monkeypatch, tmp_path):
     """M-1：超上限的图读入后即拒（与入站/send_image 同一 MAX_IMAGE_BYTES 阈值），
-    不喂引擎——阈值临时调小到 1MB、假图 1MB+1 字节造最小用例。"""
+    不喂引擎——阈值临时调小到 1MB、假图 1MB+8 字节（8B PNG 魔数+1MB 填充）造最小用例。"""
     import gateway.media
     monkeypatch.setattr(gateway.media, "MAX_IMAGE_BYTES", 1024 * 1024)
     fake = _FakeEngine([])

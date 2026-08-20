@@ -1,4 +1,4 @@
-"""claude/mcp.json 静态 MCP 清单 schema 测试：三个 server 键存在、stdio 传输、
+"""claude/mcp.json 静态 MCP 清单 schema 测试：四个 server 键存在、stdio 传输、
 command/args 非空。清单为平台无关形态（command 直写 npx/uvx），实际拉起形态
 由 runner 合并层按平台展开（Windows 包 cmd /c，见 worker/cli_builder.py）。"""
 import json
@@ -7,17 +7,29 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MCP_JSON = ROOT / "claude" / "mcp.json"
 
-EXPECTED_SERVERS = ("chrome-devtools", "context7", "web-reader")
+EXPECTED_SERVERS = ("chrome-devtools", "context7", "web-reader", "playwright")
 
 
 def _servers() -> dict:
     return json.loads(MCP_JSON.read_text(encoding="utf-8"))["mcpServers"]
 
 
-def test_mcp_json_has_three_expected_servers():
+def test_mcp_json_has_all_expected_servers():
     servers = _servers()
     for name in EXPECTED_SERVERS:
         assert name in servers, f"mcp.json 缺 server: {name}"
+
+
+def test_playwright_entry_pinned_headless_isolated():
+    """playwright 条目形态锚：钉版（对 flag 语义敏感，不跟 @latest）+
+    --headless（默认 headed！）+ --isolated。默认启用（disabled 空，用户拍板）。"""
+    entry = _servers()["playwright"]
+    assert entry["command"] == "npx"
+    assert any(a.startswith("@playwright/mcp@") and a != "@playwright/mcp@latest"
+               for a in entry["args"]), "钉版形态（非 @latest）"
+    assert "--headless" in entry["args"] and "--isolated" in entry["args"]
+    raw = json.loads(MCP_JSON.read_text(encoding="utf-8"))
+    assert "playwright" not in raw.get("disabled", [])
 
 
 def test_mcp_servers_are_stdio_with_nonempty_command_and_args():

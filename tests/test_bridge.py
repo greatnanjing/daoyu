@@ -9,6 +9,7 @@ class FakeCfg:
     def __init__(self):
         self.reconnect = {"session_duration_s": 86400}
         self.default_cwd = "/repo"
+        self.throttle = {"page_char_limit": 2000}
 
 
 class FakePool:

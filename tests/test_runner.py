@@ -368,6 +368,9 @@ async def test_mcp_disabled_filtered_and_platform_expanded(
                           "args": ["-y", "@upstash/context7-mcp"], "env": {}},
             "web-reader": {"type": "stdio", "command": "uvx",
                             "args": ["mcp-server-fetch"], "env": {}},
+            "playwright": {"type": "stdio", "command": "npx",
+                            "args": ["-y", "@playwright/mcp@0.0.79",
+                                     "--headless", "--isolated"], "env": {}},
         },
         "disabled": ["web-reader", "ghost"],   # ghost：残留名静默忽略
     }), encoding="utf-8")
@@ -383,6 +386,8 @@ async def test_mcp_disabled_filtered_and_platform_expanded(
     assert "context7" in servers                 # 启用条目保留
     assert servers["context7"]["command"] == "cmd"          # Windows 包装
     assert servers["context7"]["args"][0] == "/c"
+    assert servers["playwright"]["command"] == "cmd"        # 同为 npx 白名单包装
+    assert "--headless" in servers["playwright"]["args"]    # 静态 args 流过
     assert "web-reader" not in servers           # disabled 过滤
     assert "ghost" not in servers                # 残留名忽略（本就不在清单）
     assert "disabled" not in raw                 # disabled 键不进临时文件

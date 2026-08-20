@@ -81,6 +81,47 @@ async def test_settings_top_level_not_object(db, tmp_path):
     assert "settings.json" in reply
 
 
+# ---- /permissions 畸形结构防护（技术债清偿：静默重置 [] 会覆盖丢数据）----
+
+async def test_permissions_deny_not_list_rejected_all_paths(db, tmp_path):
+    """deny 存在但非数组：list/add/del 三路径全拒、文件字节不变、审计留痕。"""
+    perms = {"deny": {"nested": "object"}, "allow": []}
+    _write_settings(tmp_path, perms)
+    before = (tmp_path / "claude" / "settings.json").read_bytes()
+    for args in ("", "deny add Read(/x/**)", "deny del 1"):
+        reply = await execute_proxy(
+            db, _route("permissions", args), FakeCfg(tmp_path))
+        assert "结构异常" in reply and "permissions.deny 不是数组" in reply, args
+        assert "解析失败" not in reply, args
+    assert (tmp_path / "claude" / "settings.json").read_bytes() == before
+    assert _read_settings(tmp_path)["permissions"]["deny"] == {"nested": "object"}
+    assert _audit_details(db, "permissions_malformed")
+
+
+async def test_permissions_allow_ask_not_list_rejected(db, tmp_path):
+    _write_settings(tmp_path, {"deny": [], "allow": "oops", "ask": 3})
+    reply = await execute_proxy(db, _route("permissions"), FakeCfg(tmp_path))
+    assert "结构异常" in reply and "permissions.allow 不是数组" in reply
+    reply = await execute_proxy(
+        db, _route("permissions", "deny add Read(/x/**)"), FakeCfg(tmp_path))
+    # add 路径同样被拦（_perm_lists 先行）：allow 畸形不允许任何写回
+    assert "结构异常" in reply
+
+
+async def test_permissions_not_dict_rejected_as_structure(db, tmp_path):
+    _write_settings(tmp_path, ["Read(/x/**)"])   # permissions 本身是数组
+    reply = await execute_proxy(db, _route("permissions"), FakeCfg(tmp_path))
+    assert "结构异常" in reply and "permissions 不是对象" in reply
+    assert "解析失败" not in reply
+
+
+async def test_permissions_missing_keys_still_default_empty(db, tmp_path):
+    """回归：键缺失仍补空表（只有'存在但非 list'才拒绝）。"""
+    _write_settings(tmp_path, {"deny": ["Read(/x/**)"]})
+    reply = await execute_proxy(db, _route("permissions"), FakeCfg(tmp_path))
+    assert "allow:（空）" in reply and "ask:（空）" in reply
+
+
 # ---- /permissions deny add / allow add ----
 
 async def test_permissions_deny_add_roundtrip(db, tmp_path):

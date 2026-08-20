@@ -4,6 +4,7 @@
   ],
   "default_cwd": "/home/<user>/proj/daoyu",
   "claude_bin": "claude",
+  "media_retention_days": 14,
   "throttle": {
     "min_send_interval_s": 1.0,
     "progress_window_s": 2.5,

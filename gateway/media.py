@@ -8,6 +8,7 @@ x-encrypted-param；下载 GET 密文后解密。"""
 import base64
 import hashlib
 import logging
+import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -174,3 +175,35 @@ async def download_inbound_image(ilink, image_item: dict, dest_dir: Path) -> str
     dest.write_bytes(raw)
     log.info("入站图片已落盘: %s (%d bytes)", dest, len(raw))
     return str(dest)
+
+
+def cleanup_expired_media(root: Path, retention_days: float,
+                          protected: set[str]) -> int:
+    """清理 data/media/inbound|outbound 中超期的 img-* 文件（M3 审查追加项）。
+
+    只删 mtime 早于 now - retention_days 且匹配 img-* 命名（入/出站落盘同款
+    img-<16hex>.<ext>）的文件；protected（outbox 未终态行引用的 media_path，
+    两侧 abspath 归一化比较——approval_mcp 孙进程写的是绝对路径）一律保留，
+    防重试/死信取证引用悬空。目录缺失/单文件删除失败容错继续，返回删除数。
+    非图片命名文件不碰（用户手放的文件不作猜测）。"""
+    import time
+    cutoff = time.time() - retention_days * 86400
+    keep = {os.path.abspath(p) for p in protected}
+    removed = 0
+    for sub in ("inbound", "outbound"):
+        d = Path(root) / "data" / "media" / sub
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            if not f.name.startswith("img-") or not f.is_file():
+                continue
+            if os.path.abspath(f) in keep:
+                continue
+            try:
+                if f.stat().st_mtime >= cutoff:
+                    continue
+                f.unlink()
+                removed += 1
+            except OSError as e:
+                log.warning("media 清理跳过 %s: %r", f, e)   # Windows 占用等——继续
+    return removed
