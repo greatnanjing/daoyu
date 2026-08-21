@@ -148,6 +148,38 @@ fc-cache -f ~/.local/share/fonts && fc-list :lang=zh   # 应列出 Noto Sans CJK
 
 以下异常自动推微信 ⚠️（发全部白名单账号，复用出站通道）：出站死信（重试 ≥5 次仍失败）、日发送上限熔断、任务预算/回合耗尽死信、微信连接失效（连续 401/403，自动重连）。
 
+### 通知通道（M5A：事件接入）
+
+外部事件经刀鱼出站通道推微信（🔔 纯通知，不进对话流）。四个入口：
+
+**1. 命令行**（脚本收尾 / cron / SSH 远程）：
+
+```bash
+daoyu-notify "备份完成" "耗时 3 分钟"
+longjob && daoyu-notify "任务成功" || daoyu-notify "任务失败"
+```
+
+**2. 终端 Claude Code 会话**（hooks，零代码）：把
+[deploy/notify-hooks.example.json](deploy/notify-hooks.example.json) 的 `hooks`
+节合并进服务器宿主 `~/.claude/settings.json`——终端 TUI 任务完成（Stop）推
+✅、等输入/权限确认（Notification）推 ❓。
+
+**3. headless 任务中**（MCP 工具）：Claude 可调 `notify(title, body)` 推送
+阶段性通知（后台任务无 MCP，不可用——同 send_image）。
+
+**4. HTTP**（本机其他系统）：
+
+```bash
+curl -X POST http://127.0.0.1:8417/notify \
+     -H 'Content-Type: application/json' \
+     -d '{"title": "构建完成", "body": "全部通过"}'
+# secrets.env 设 notify_token 时再加 -H 'Authorization: Bearer <token>'
+```
+
+注意：通知与对话共用出站通道与日限熔断——外部源高频推送会触发熔断暂停全部
+出站（含对话回复），接入方自行限频。升级部署需 `pip install -e .` 重装（获得
+daoyu-notify 命令）。
+
 ### 微信 ↔ 终端 TUI 交叉接续同一话题
 
 微信与服务器终端可以交替续写**同一个** Claude 话题：
@@ -179,7 +211,7 @@ deploy/daoyu-tui.sh          # 聊完 /exit 退出
 ## 开发
 
 ```bash
-python -m pytest                        # 全量测试（382 个）
+python -m pytest                        # 全量测试（400 个）
 python -m pytest tests/test_e2e.py -v   # E2E：fake iLink + fake claude 子进程全链路
 python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```

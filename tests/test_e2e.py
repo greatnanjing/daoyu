@@ -6,10 +6,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from common.db import Database
 from common.models import Budget
 from gateway.app import handle_inbound
+from gateway.outbound import OutboundLoop
 from worker.pool import WorkerPool
 from worker.runner import TaskRunner
 
@@ -259,6 +261,61 @@ async def test_full_pipeline_bg_smoke(tmp_path, monkeypatch):
         await handle_inbound(db, cfg, pool, None, inbound(2, "/tasks"))
         assert any("[bg]" in t and "写总结" in t for t in _texts(db))
         assert row["state"] == "running"                  # watcher 接管，不在此完结
+    finally:
+        loop_task.cancel()
+        await asyncio.gather(loop_task, return_exceptions=True)
+
+
+# ---------------- M5A：通知通道（CLI 子进程 → outbox → 出站链路） ----------------
+
+class _NotifyILink:
+    """最小 fake：对齐 OutboundLoop 用到的三个 ilink 签名。"""
+
+    def __init__(self):
+        self.sent = []    # (to_user, context_token, text)
+
+    async def sendmessage(self, to_user, context_token, text, token=None, base_url=None):
+        self.sent.append((to_user, context_token, text))
+        return True
+
+    async def getconfig(self, ilink_user_id, context_token, token=None, base_url=None):
+        return "TICKET" if context_token else ""
+
+    async def sendtyping(self, ilink_user_id, ticket, status, token=None, base_url=None):
+        pass
+
+
+async def test_notify_cli_e2e(tmp_path):
+    """M5A E2E：CLI 子进程真写 outbox → 出站协程拾取 → sendmessage 收到 🔔。"""
+    from common.models import InboundMessage   # 顶部仅 import Budget，按需局部引
+    db = Database(tmp_path / "e2e.db")
+    db.ensure_schema()
+    db.insert_message(InboundMessage(msg_id="n1", from_user="u@im.wechat",
+                                     text="hi", context_token="CTX", received_at=1))
+    env = {**os.environ, "DAOYU_DB": str(db.path),
+           "DAOYU_WHITELIST": "u@im.wechat"}
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "gateway.notify_cli", "部署完成", "耗时 3 分钟",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        cwd=str(ROOT), env=env)
+    _, err = await proc.communicate()
+    assert proc.returncode == 0, err.decode("utf-8", "replace")
+
+    fake = _NotifyILink()
+    out_cfg = SimpleNamespace(throttle={
+        "min_send_interval_s": 0.0, "page_char_limit": 2000,
+        "daily_send_limit": 500, "progress_window_s": 0.0})
+    # token_ref 必须带非空 token：_drain_once 的 I-1 守卫对空 token 直接 return
+    # 不 claim（test_outbound 空窗期用例专测该守卫），此处走正常发送路径
+    outbound = OutboundLoop(db, fake, out_cfg, {"token": "T", "base_url": ""}, {})
+    loop_task = asyncio.create_task(outbound.run_forever())
+    try:
+        for _ in range(200):    # ≤10s：出站协程 0.5s 批读
+            if any("🔔 部署完成" in t for _, _, t in fake.sent):
+                break
+            await asyncio.sleep(0.05)
+        assert any(t == "🔔 部署完成\n耗时 3 分钟" for _, _, t in fake.sent), fake.sent
     finally:
         loop_task.cancel()
         await asyncio.gather(loop_task, return_exceptions=True)
