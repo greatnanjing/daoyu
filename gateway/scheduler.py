@@ -64,12 +64,21 @@ def _broadcast(db, cfg, text: str) -> None:
 
 def ensure_ops_session(db, cfg) -> int:
     """ops 话题（固定 UUID）：分析任务的挂靠点——历史聚一处、Claude 有先前
-    分析上下文。无白名单（异常配置/测试）兜底本地用户名。"""
+    分析上下文。无白名单（异常配置/测试）兜底本地用户名。每次调用顺带做
+    transcript 在场检查：首次任务被中断（进程重启杀 claude、runner 未及置
+    claude_session_inited）后重入，--session-id 会撞已存在会话报 "already
+    in use"——transcript 在即置位转 --resume（对齐 /adopt 语义，真机实证
+    2026-08-21：部署重启竞态三连击杀，task 80 重试耗尽死信）。"""
     s = db.get_session_by_uuid(OPS_UUID)
-    if s is not None:
-        return s.id
-    user = min(cfg.whitelist) if getattr(cfg, "whitelist", None) else "ops@local"
-    return db.create_fixed_session(user, cfg.default_cwd, OPS_UUID).id
+    if s is None:
+        user = min(cfg.whitelist) if getattr(cfg, "whitelist", None) else "ops@local"
+        s = db.create_fixed_session(user, cfg.default_cwd, OPS_UUID)
+    inited_key = f"claude_session_inited:{OPS_UUID}"
+    if not db.get_state(inited_key):
+        projects = Path(getattr(cfg, "repo_root", ".")) / "data" / "claude-home" / "projects"
+        if projects.is_dir() and any(projects.glob(f"*/{OPS_UUID}.jsonl")):
+            db.set_state(inited_key, "1")
+    return s.id
 
 
 def _media_mb(cfg) -> float:

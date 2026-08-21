@@ -469,3 +469,19 @@ async def test_e2e_cron_flow(db, tmp_path):
     assert outbox_n("%巡检告警%") == before + 1
     assert db._conn.execute(
         "SELECT COUNT(*) c FROM tasks").fetchone()["c"] == n_tasks
+
+
+def test_ensure_ops_session_transcript_inited(db, tmp_path):
+    """中断重入保护（真机实证 2026-08-21）：首次分析任务被进程重启击杀、
+    runner 未及置 claude_session_inited 时，claude 侧会话文件已建——重入
+    --session-id 报 "already in use"。ensure_ops_session 检测 transcript
+    在场即置位转 --resume（对齐 /adopt 语义）；无 transcript 不置位。"""
+    from gateway.scheduler import ensure_ops_session, OPS_UUID
+    cfg = _dcfg(tmp_path)
+    sid = ensure_ops_session(db, cfg)
+    assert db.get_state(f"claude_session_inited:{OPS_UUID}") is None   # 无 transcript
+    proj = tmp_path / "data" / "claude-home" / "projects" / "-repo"
+    proj.mkdir(parents=True)
+    (proj / f"{OPS_UUID}.jsonl").write_text("{}\n", encoding="utf-8")
+    assert ensure_ops_session(db, cfg) == sid                          # 幂等同行
+    assert db.get_state(f"claude_session_inited:{OPS_UUID}") == "1"
