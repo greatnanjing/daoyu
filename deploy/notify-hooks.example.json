@@ -3,14 +3,14 @@
     "Stop": [
       {
         "hooks": [
-          {"type": "command", "command": "daoyu-notify --hook stop"}
+          {"type": "command", "command": "/home/<user>/proj/daoyu/.venv/bin/daoyu-notify --hook stop"}
         ]
       }
     ],
     "Notification": [
       {
         "hooks": [
-          {"type": "command", "command": "daoyu-notify --hook notification"}
+          {"type": "command", "command": "/home/<user>/proj/daoyu/.venv/bin/daoyu-notify --hook notification"}
         ]
       }
     ]

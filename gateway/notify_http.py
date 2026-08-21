@@ -60,4 +60,7 @@ async def run_notify_http(db, cfg) -> None:
     except Exception as e:
         # 启动失败（端口占用等）：audit + log，协程安静退出——其余通道不受影响
         log.error("通知 HTTP 入口启动失败（不影响其余通道）: %r", e)
-        db.audit("notify_http_error", repr(e)[:200])
+        try:
+            db.audit("notify_http_error", repr(e)[:200])
+        except Exception:
+            pass   # 双故障：audit 自身不可写时安静放弃，不拖停 gateway（同 scheduler 嵌套防护）

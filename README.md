@@ -161,8 +161,12 @@ longjob && daoyu-notify "任务成功" || daoyu-notify "任务失败"
 
 **2. 终端 Claude Code 会话**（hooks，零代码）：把
 [deploy/notify-hooks.example.json](deploy/notify-hooks.example.json) 的 `hooks`
-节合并进服务器宿主 `~/.claude/settings.json`——终端 TUI 任务完成（Stop）推
-✅、等输入/权限确认（Notification）推 ❓。
+节合并进服务器宿主 `~/.claude/settings.json`——终端 TUI 每轮回复结束（Stop）
+推 ✅、等待输入/权限确认（Notification）推 ❓。注意 Stop 是**每轮回复结束都
+触发**（多轮对话的中间轮次也各推一条，并非仅任务完成），消息较密——嫌吵或
+怕刷爆日限熔断可只合并 Notification 节、或自行限频。示例命令为绝对路径形态
+（按本文部署约定 `/home/<user>/proj/daoyu/.venv/bin/daoyu-notify`），合并前
+按实际安装位置调整。
 
 **3. headless 任务中**（MCP 工具）：Claude 可调 `notify(title, body)` 推送
 阶段性通知（后台任务无 MCP，不可用——同 send_image）。
@@ -219,10 +223,11 @@ python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```
 ├── gateway/   # app 入口 / ilink 协议 / router 命令路由 / bridge 桥命令 /
 │              # proxy 配置代理命令 / outbound 出站节流重试 / media 媒体 CDN AES 上传下载解密 /
-│              # reconnect 连接守护（被动重连）/ login 扫码
+│              # reconnect 连接守护（被动重连）/ login 扫码 / scheduler 定时日报+巡检 /
+│              # notify_http 通知 HTTP 入口 / notify_cli 通知命令行
 ├── worker/    # pool 会话串行调度+bg 后台监视 / cli_builder argv 组装 / runner 子进程执行 /
-│              # stream 解析 / approval_mcp daoyu MCP server（审批+发图，stdio） / ocr_mcp 本地 OCR（daoyu-ocr）
-├── common/    # db（SQLite 五表+approvals+state KV）/ config / models / text（分页）
+│              # stream 解析 / approval_mcp daoyu MCP server（审批+发图+发通知，stdio） / ocr_mcp 本地 OCR（daoyu-ocr）
+├── common/    # db（SQLite 五表+approvals+state KV）/ config / models / text（分页）/ notify（通知入队）
 ├── claude/    # settings.json + mcp.json（进 git）、secrets.env（gitignore）
 ├── tests/     # 单测 + E2E（fixtures/ 模拟 claude 子进程：-p 流回放与 --bg 两种形态）
 ├── deploy/    # daoyu.service（systemd 单元）
