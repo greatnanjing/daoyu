@@ -318,18 +318,18 @@ async def test_fail_error_message_includes_result_text(db, cfg, tmp_path):
 
 
 async def test_daoyu_mcp_merged_all_policies(db, cfg, tmp_path, monkeypatch):
-    """M3：四档（-p 路径）都合并 daoyu 条目——strict=approve,send_image,notify，
-    其余=send_image,notify；静态清单 server 保留。"""
+    """M3：四档（-p 路径）都合并 daoyu 条目——strict=approve,send_image,send_file,notify，
+    其余=send_image,send_file,notify；静态清单 server 保留。"""
     args_log = tmp_path / "mcp_args.log"
     monkeypatch.setenv("FAKE_CLAUDE_ARGS_LOG", str(args_log))
     claude_dir = cfg.repo_root / "claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
     (claude_dir / "mcp.json").write_text(json.dumps({"mcpServers": {"context7": {
         "type": "stdio", "command": "x", "args": []}}}), encoding="utf-8")
-    for policy, expect_tools in (("auto", "send_image,notify"),
-                                 ("strict", "approve,send_image,notify"),
-                                 ("bypass", "send_image,notify"),
-                                 ("plan", "send_image,notify")):
+    for policy, expect_tools in (("auto", "send_image,send_file,notify"),
+                                 ("strict", "approve,send_image,send_file,notify"),
+                                 ("bypass", "send_image,send_file,notify"),
+                                 ("plan", "send_image,send_file,notify")):
         s = db.get_or_create_session("u@im.wechat", str(cfg.repo_root))
         db.set_policy(s.id, policy)
         s = db.get_session(s.id)                 # 刷新拿带 policy 的绑定
@@ -364,7 +364,7 @@ async def test_daoyu_mcp_config_bad_static_json_fails_open(db, cfg, tmp_path, mo
     servers = log["mcp_config"]["mcpServers"]      # fake_claude 已快照文件内容
     # 坏清单按空合并，无残留条目；系统条目（daoyu + daoyu-ocr）恒注入
     assert set(servers) == {"daoyu", "daoyu-ocr"}
-    assert servers["daoyu"]["env"]["DAOYU_TOOLS"] == "send_image,notify"   # auto 档
+    assert servers["daoyu"]["env"]["DAOYU_TOOLS"] == "send_image,send_file,notify"   # auto 档
 
 
 async def test_mcp_disabled_filtered_and_platform_expanded(

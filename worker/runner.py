@@ -147,10 +147,12 @@ class TaskRunner:
             strict = session.policy == "strict"
             # M3：四档都合并 daoyu server（strict=approve+send_image+notify，
             # 其余=send_image+notify）。M5A：notify 四档恒装（中间通知）。
+            # M5B：send_file 四档恒装（发文件三路由，image 扩展名转 send_image）。
             # 临时文件生命周期不变（finally 删 + 启动清扫）。
             tmp_mcp = self._write_daoyu_mcp_config(
                 task, session, static_mcp,
-                tools="approve,send_image,notify" if strict else "send_image,notify")
+                tools=("approve,send_image,send_file,notify" if strict
+                       else "send_image,send_file,notify"))
             # 该 Claude 会话是否已被首次调用过（--session-id 建立后才能 --resume；
             # 对不存在的 UUID 直接 --resume 会报错，所以必须显式记录。
             # 不能用 task.attempts>0 判定：claim_next_pending 领取时已把 attempts 置 ≥1）
@@ -398,7 +400,7 @@ class TaskRunner:
     def _write_daoyu_mcp_config(self, task, session, static_path: Path, tools: str) -> str:
         """四档通用临时 mcp config：静态 mcp.json 的 mcpServers 过滤 disabled、
         按平台展开（Windows npx/uvx 包 cmd /c）后合并 daoyu server 条目
-        （tools 按档传 approve,send_image,notify 或 send_image,notify）与 daoyu-ocr 能力面
+        （tools 按档传 approve,send_image,send_file,notify 或 send_image,send_file,notify）与 daoyu-ocr 能力面
         条目（恒注入，无 env）。daoyu server 是
         claude 拉起的孙进程，env 经 config 条目注入（claude 子进程 env 无需感知）；
         command 用 sys.executable（runner 与 server 同解释器，Windows 下为 venv

@@ -1,6 +1,6 @@
 """strict 档审批接线（M2 Task 2，M3 起四档通用）：
 - runner：四档任务都生成临时合并 mcp config（静态清单 + daoyu server 条目；
-  strict=approve,send_image,notify，其余=send_image,notify）传给 claude 子进程，任务结束即删。
+  strict=approve,send_image,send_file,notify，其余=send_image,send_file,notify）传给 claude 子进程，任务结束即删。
 - gateway：pending 审批存在时 Y/N 单字拦截本地秒回（decide + 回执），其他文本
   照常路由。
 - 拼接冒烟：runner 生成的 daoyu 条目手工起真实 approval_mcp 子进程，握手 +
@@ -89,14 +89,14 @@ async def test_strict_task_temp_merged_mcp_config_and_cleanup(db, tmp_path, monk
     assert entry["env"] == {"DAOYU_DB": os.path.abspath(db.path),
                             "DAOYU_TASK_ID": str(t),
                             "DAOYU_TO_USER": USER,
-                            "DAOYU_TOOLS": "approve,send_image,notify"}
+                            "DAOYU_TOOLS": "approve,send_image,send_file,notify"}
     # 任务结束：临时文件已删，静态文件原样保留
     assert not os.path.exists(tmp_cfg_path)
     assert (tmp_path / "claude" / "mcp.json").exists()
 
 
 async def test_non_strict_task_merges_send_image_only(db, tmp_path, monkeypatch):
-    """M3：非 strict 档同样走临时合并 config（daoyu=send_image,notify，无审批
+    """M3：非 strict 档同样走临时合并 config（daoyu=send_image,send_file,notify，无审批
     工具引用），静态 mcp.json 不删不改、临时文件结束即删。"""
     static = {"context7": {"type": "stdio", "command": "cmd", "args": [], "env": {}}}
     cfg = RunnerCfg(tmp_path, monkeypatch, static_servers=static)
@@ -112,7 +112,7 @@ async def test_non_strict_task_merges_send_image_only(db, tmp_path, monkeypatch)
     assert "--permission-prompt-tool" not in log["argv"]   # 审批工具引用仅 strict 档
     servers = log["mcp_config"]["mcpServers"]
     assert servers["context7"] == static["context7"]       # 静态清单完整合并
-    assert servers[APPROVAL_MCP_SERVER]["env"]["DAOYU_TOOLS"] == "send_image,notify"
+    assert servers[APPROVAL_MCP_SERVER]["env"]["DAOYU_TOOLS"] == "send_image,send_file,notify"
     static_file = tmp_path / "claude" / "mcp.json"
     assert static_file.exists()   # 静态文件不删不改
     assert json.loads(static_file.read_text(encoding="utf-8"))["mcpServers"]["context7"]

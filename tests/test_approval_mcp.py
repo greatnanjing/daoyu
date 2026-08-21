@@ -365,3 +365,57 @@ async def test_mcp_notify_tool_roundtrip(tmp_path):
     finally:
         p.terminate()
         await p.wait()
+
+
+async def test_mcp_send_file_roundtrip(tmp_path):
+    """M5B：send_file 三路由——video/pdf 写 kind='file' 行（保留原名），
+    png 转 _send_image 写 kind='image' 行。"""
+    import shutil as _sh
+    db = Database(tmp_path / "m.db")
+    db.ensure_schema()
+    env = _srv_env(str(db.path))
+    env["DAOYU_TOOLS"] = "send_image,send_file,notify"
+
+    async def call_send_file(src_path: Path) -> dict:
+        """每次调用新起一个 server 子进程（单请求一进程，时序最简）。"""
+        p = await _start(env)
+        try:
+            await _send(p, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": "send_file",
+                                       "arguments": {"path": str(src_path),
+                                                     "caption": "配文"}}})
+            return await _recv(p)
+        finally:
+            p.terminate()
+            await p.wait()
+
+    # ① mp4 → kind='file'，保留原名
+    mp4 = tmp_path / "clip.mp4"
+    mp4.write_bytes(b"\x00" * 64)
+    resp = await call_send_file(mp4)
+    assert not resp["result"].get("isError")
+    assert "视频条" in resp["result"]["content"][0]["text"]
+    row = db._conn.execute(
+        "SELECT kind, media_path, caption FROM outbox ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["kind"] == "file" and row["media_path"].endswith("clip.mp4")
+    assert row["caption"] == "配文"
+    # ② pdf → kind='file'（文件条）
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    resp = await call_send_file(pdf)
+    assert "文件条" in resp["result"]["content"][0]["text"]
+    row = db._conn.execute(
+        "SELECT kind FROM outbox ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["kind"] == "file"
+    # ③ png → 转 _send_image（kind='image'，magic bytes 校验通过）
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    resp = await call_send_file(png)
+    assert not resp["result"].get("isError")
+    row = db._conn.execute(
+        "SELECT kind FROM outbox ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["kind"] == "image"
+    # ④ 不存在 → 普通文本错误返回（非崩）
+    resp = await call_send_file(tmp_path / "no.bin")
+    assert "读文件失败" in resp["result"]["content"][0]["text"]

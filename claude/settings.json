@@ -4,6 +4,7 @@
       "WebSearch",
       "WebFetch",
       "mcp__daoyu__send_image",
+      "mcp__daoyu__send_file",
       "mcp__daoyu__notify",
       "mcp__daoyu-ocr__ocr",
       "mcp__chrome-devtools__*",

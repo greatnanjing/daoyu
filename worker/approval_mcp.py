@@ -1,4 +1,4 @@
-"""刀鱼 daoyu MCP server（stdio）：approve（审批）+ send_image（发图）+ notify（中间通知），按 DAOYU_TOOLS 装配。
+"""刀鱼 daoyu MCP server（stdio）：approve（审批）+ send_image（发图）+ send_file（发文件）+ notify（中间通知），按 DAOYU_TOOLS 装配。
 
 approve 由 claude 子进程经 --permission-prompt-tool 调用：与主进程共享同一
 SQLite（WAL 多进程安全）→ 写 approvals 行 + 写 outbox 推微信 → 轮询用户 Y/N →
@@ -11,6 +11,7 @@ send_image 是普通工具（非 permission prompt tool），返回纯文本结�
 import json
 import os
 import secrets
+import shutil
 import sqlite3
 import sys
 import time
@@ -57,6 +58,17 @@ def _tools():
             "name": "send_image",
             "description": "发送本地图片文件到用户微信（自动上传 CDN 原图；"
                            "支持 PNG/JPEG/GIF/WebP，≤20MB）",
+            "inputSchema": {"type": "object",
+                            "properties": {"path": {"type": "string"},
+                                           "caption": {"type": "string"}},
+                            "required": ["path"]},
+        })
+    if "send_file" in enabled:
+        tools.append({
+            "name": "send_file",
+            "description": "发送本地文件到用户微信（≤100MB）——图片扩展名自动"
+                           "转 send_image 原图发送；视频扩展名发视频条（微信端"
+                           "可直接播放）；其余发文件条",
             "inputSchema": {"type": "object",
                             "properties": {"path": {"type": "string"},
                                            "caption": {"type": "string"}},
@@ -177,6 +189,50 @@ def _notify(conn, args) -> str:
     return f"已推送通知：{title}"
 
 
+def _send_file(conn, args) -> str:
+    """普通工具（M5B）：按扩展名三路由（官方 sendWeixinMediaFile 同构）——
+    image 扩展名转 _send_image 既有链路（微信端原图显示）；其余复制
+    data/media/outbound/ 保留原名（file 条显示名=basename，官方同构）→
+    写 kind='file' 行（投递层再按扩展名分 video/file 条）。"""
+    from gateway.media import IMAGE_EXTS, MAX_FILE_BYTES, VIDEO_EXTS
+    path = str(args.get("path", ""))
+    caption = str(args.get("caption", ""))
+    src = Path(path)
+    try:
+        size = src.stat().st_size
+    except OSError as e:
+        return f"读文件失败: {e}"
+    if size > MAX_FILE_BYTES:
+        return f"文件超 {MAX_FILE_BYTES // 1024 // 1024}MB 上限"
+    if src.suffix.lstrip(".").lower() in IMAGE_EXTS:
+        return _send_image(conn, args)   # 图片：M3 既有链路（含 magic bytes 校验）
+    out_dir = Path(os.environ["DAOYU_DB"]).parent / "media" / "outbound"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / src.name
+    if dest.exists():
+        if dest.samefile(src):
+            pass          # 源就在 outbound：直接引用，不自我复制
+        else:
+            dest = out_dir / f"{src.stem}-{secrets.token_hex(4)}{src.suffix}"
+            shutil.copyfile(src, dest)
+    else:
+        shutil.copyfile(src, dest)
+    task_id = int(os.environ.get("DAOYU_TASK_ID", "0"))
+    to_user = os.environ.get("DAOYU_TO_USER", "")
+    try:
+        conn.execute(
+            "INSERT INTO outbox(task_id, to_user, text, kind, media_path, caption, "
+            "created_at) VALUES(?,?,?,?,?,?,?)",
+            (task_id, to_user, "", "file", str(dest), caption, int(time.time())))
+        conn.commit()
+    except Exception:
+        conn.rollback()   # 清残缺事务，保住连接给后续调用（异常交外圈转 isError）
+        raise
+    kind_note = "视频条" if src.suffix.lstrip(".").lower() in VIDEO_EXTS else "文件条"
+    return f"已排队发送：{dest.name}（{kind_note}）" + \
+           (f"（配文：{caption}）" if caption else "")
+
+
 def main():
     sys.stdin.reconfigure(encoding="utf-8")     # Windows 管道默认 cp936，JSON-RPC 必须 UTF-8
     sys.stdout.reconfigure(encoding="utf-8")
@@ -217,6 +273,9 @@ def main():
                 elif name == "notify":
                     _resp(msg["id"], {"content": [{"type": "text",
                                                    "text": _notify(conn, args)}]})
+                elif name == "send_file":
+                    _resp(msg["id"], {"content": [{"type": "text",
+                                                   "text": _send_file(conn, args)}]})
                 else:
                     _resp(msg["id"], {"content": [{"type": "text",
                                                    "text": "unknown tool"}],
