@@ -194,18 +194,12 @@ class ILinkClient:
                 raise ILinkError(f"CDN 下载 {res.status}: {url[:40]}…")
             return await res.read()
 
-    async def send_image_message(self, to_user: str, context_token: str, *,
-                                 download_param: str, aes_key_hex: str,
-                                 size_cipher: int, token: str | None = None,
+    async def send_media_message(self, to_user: str, context_token: str, *,
+                                 item: dict, token: str | None = None,
                                  base_url: str | None = None) -> bool:
-        """发图（sendmessage 媒体 item）。容错与 sendmessage 一致：网络/协议
-        异常不逃逸，返回 False 交 outbox 重试。
-
-        aes_key_hex 是 hex32 字符串；media.aes_key = base64(hex32 ASCII)——
-        官方 send.ts 形态（Buffer.from(aeskey.toString("hex")).toString("base64"))。
-        M3 真机验收（2026-08-19）实证：传 base64(raw16B)（24 字符）微信端解不出
-        key、图片空白；微信自身发图也是 base64(hex32 ASCII)（44 字符）。CDN 密文
-        本身仍用 raw16B 加密（两个形态编码的是同一把 key）。"""
+        """发任意媒体条（sendmessage 单 item；调用方按官方形态构造
+        image_item/video_item/file_item——见 media.py build_*）。容错与
+        sendmessage 一致：网络/协议异常不逃逸，返回 False 交 outbox 重试。"""
         client_id = f"daoyu-{random.randint(0, 0xFFFFFFFFF):09x}"
         try:
             data = await self._post(
@@ -217,20 +211,33 @@ class ILinkClient:
                     "message_type": 2,
                     "message_state": 2,
                     "context_token": context_token,
-                    "item_list": [{"type": 2, "image_item": {
-                        "media": {"encrypt_query_param": download_param,
-                                   "aes_key": base64.b64encode(
-                                       aes_key_hex.encode("ascii")).decode(),
-                                   "encrypt_type": 1},
-                        "mid_size": size_cipher}}],
+                    "item_list": [item],
                 },
                     "base_info": base_info()}, token, base_url)
         except (ILinkError, aiohttp.ClientError, ValueError) as e:
-            log.warning("send_image_message 发送失败（送达未确认）: %s", e,
+            log.warning("send_media_message 发送失败（送达未确认）: %s", e,
                         exc_info=True)
             return False
         errcode = data.get("errcode", 0)
         if errcode:
-            log.warning("send_image_message 被拒: errcode=%s errmsg=%s",
+            log.warning("send_media_message 被拒: errcode=%s errmsg=%s",
                         errcode, data.get("errmsg"))
         return not errcode
+
+    async def send_image_message(self, to_user: str, context_token: str, *,
+                                 download_param: str, aes_key_hex: str,
+                                 size_cipher: int, token: str | None = None,
+                                 base_url: str | None = None) -> bool:
+        """发图（M3 真机验收路径，签名不变）——构造 image_item 后委托
+        send_media_message。aes_key 形态注释见 git 历史/M3 spec：
+        aes_key_hex 是 hex32 字符串，media.aes_key = base64(hex32 ASCII)
+        （官方 send.ts 形态；M3 真机实证传 base64(raw16B) 微信端解不出
+        key、图片空白——CDN 密文仍用 raw16B 加密，同一把 key 两种编码）。"""
+        item = {"type": 2, "image_item": {
+            "media": {"encrypt_query_param": download_param,
+                      "aes_key": base64.b64encode(
+                          aes_key_hex.encode("ascii")).decode(),
+                      "encrypt_type": 1},
+            "mid_size": size_cipher}}
+        return await self.send_media_message(to_user, context_token, item=item,
+                                             token=token, base_url=base_url)

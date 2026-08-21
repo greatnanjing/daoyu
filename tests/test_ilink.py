@@ -212,3 +212,21 @@ async def test_send_image_message_errcode_false(client):
         ok = await client.send_image_message(
             "u@im.wechat", "CTX", download_param="p", aes_key_hex="0f", size_cipher=1)
         assert ok is False
+
+
+async def test_send_media_message_item_passthrough(client):
+    """M5B：泛化媒体条——item 原样进 item_list（video/file 条构造在 media.py）。"""
+    item = {"type": 4, "file_item": {"media": {"encrypt_query_param": "P",
+                                               "aes_key": "QQ==", "encrypt_type": 1},
+                                     "file_name": "a.pdf", "len": "1200"}}
+    with aioresponses() as m:
+        m.post(f"{BASE_URL}/ilink/bot/sendmessage", payload={})
+        ok = await client.send_media_message("u", "CTX", item=item)
+        assert ok is True
+        req = m.requests[("POST", __import__("yarl").URL(
+            f"{BASE_URL}/ilink/bot/sendmessage"))][0]
+        body = _body(req)
+        msg = body["msg"]
+        assert msg["message_type"] == 2 and msg["message_state"] == 2
+        assert msg["context_token"] == "CTX"
+        assert msg["item_list"] == [item]      # 深度相等：原样透传不增删字段

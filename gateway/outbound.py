@@ -3,9 +3,11 @@ import asyncio
 import logging
 import random
 import time
+from pathlib import Path
 
 from common.text import split_text
-from gateway.media import upload_media
+from gateway.media import (MEDIA_TYPE_FILE, MEDIA_TYPE_VIDEO, VIDEO_EXTS,
+                           build_file_item, build_video_item, upload_media)
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +99,18 @@ class OutboundLoop:
                         self._db.audit("dead_letter",
                                        f"count={self._db.dead_letter_count()} id={item.id}")
                         self._alert_all(f"⚠️ 出站图片死信（id={item.id}）："
+                                        f"{item.media_path}")
+                continue
+            elif item.kind == "file":
+                err = await self._send_file_media(item)
+                if err is None:
+                    self._db.mark_sent(item.id)
+                else:
+                    self._db.mark_send_failed(item.id, err)
+                    if self._db.get_outbox(item.id).state == "dead":
+                        self._db.audit("dead_letter",
+                                       f"count={self._db.dead_letter_count()} id={item.id}")
+                        self._alert_all(f"⚠️ 出站文件死信（id={item.id}）："
                                         f"{item.media_path}")
                 continue
             pages = split_text(item.text, self._cfg.throttle["page_char_limit"])
@@ -221,6 +235,58 @@ class OutboundLoop:
                 pass
         if ok:
             self._sent_today += 1   # 图片条实发 1 条（caption 已在 _send 内计）
+            return None
+        return _UNCONFIRMED_ERR
+
+    async def _send_file_media(self, item) -> str | None:
+        """kind='file' 行投递（M5B）：按扩展名分 video 条（media_type=2）/
+        file 条（media_type=3）。caption 先发文本条。重试语义 = 整行重做
+        （同图片行：caption 已发出而媒体条失败时，重试会重发 caption——
+        单用户自用可接受）。"""
+        ctx = self._db.latest_context_token(item.to_user)
+        if not ctx:
+            return _NO_TOKEN_ERR
+        token = self._token_ref["token"]
+        base = self._token_ref["base_url"] or None
+        path = item.media_path or ""
+        ext = Path(path).suffix.lstrip(".").lower()
+        media_type = MEDIA_TYPE_VIDEO if ext in VIDEO_EXTS else MEDIA_TYPE_FILE
+        try:
+            up = await upload_media(self._ilink, path, item.to_user, token, base,
+                                    media_type=media_type)
+        except FileNotFoundError:
+            return f"文件不存在: {item.media_path}"
+        except Exception as e:
+            return f"CDN 上传失败: {e!r}"
+        if media_type == MEDIA_TYPE_VIDEO:
+            m_item = build_video_item(up)
+        else:
+            m_item = build_file_item(up, Path(path).name)
+        caption = (item.caption or "").strip()
+        if caption:
+            await self._respect_interval()
+            err = await self._send(item.to_user, caption)
+            if err:
+                return f"caption 发送失败: {err}"
+        await self._respect_interval()
+        try:
+            try:
+                await self._typing_on(item.to_user, ctx)
+            except Exception as e:
+                log.warning("typing_on 失败（忽略，继续发送）: user=%s err=%r",
+                            item.to_user, e)
+            ok = await self._ilink.send_media_message(
+                item.to_user, ctx, item=m_item, token=token, base_url=base)
+        except Exception as e:
+            log.warning("send_media_message 异常: user=%s err=%r", item.to_user, e)
+            return f"send_media_message 异常: {e!r}"
+        finally:
+            try:
+                await self._typing_off(item.to_user)
+            except Exception:
+                pass
+        if ok:
+            self._sent_today += 1   # 媒体条实发 1 条（caption 已在 _send 内计）
             return None
         return _UNCONFIRMED_ERR
 

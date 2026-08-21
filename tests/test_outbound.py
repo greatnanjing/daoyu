@@ -253,9 +253,15 @@ class FakeMediaILink:
                                  "size_cipher": size_cipher})
         return True
 
+    async def send_media_message(self, to_user, context_token, *, item,
+                                 token=None, base_url=None):
+        self.sent_media_items = getattr(self, "sent_media_items", [])
+        self.sent_media_items.append((to_user, item))
+        return True
+
     async def getuploadurl(self, **kw):
         self.upload_calls += 1
-        self.got_upload = kw
+        self.upload_kwargs = kw
         return {"upload_full_url": "https://cdn/up"}
 
     async def cdn_upload(self, url, ciphertext):
@@ -347,6 +353,12 @@ class CaptionFailFirstILink(FakeMediaILink):
                                  download_param, aes_key_hex, size_cipher,
                                  token=None, base_url=None):
         self.events.append(("image", download_param))
+        return True
+
+    async def send_media_message(self, to_user, context_token, *, item,
+                                 token=None, base_url=None):
+        self.sent_media_items = getattr(self, "sent_media_items", [])
+        self.sent_media_items.append((to_user, item))
         return True
 
 
@@ -482,3 +494,54 @@ async def test_daily_count_image_row_counts_caption_and_image(db, tmp_path):
     await loop._drain_once()
     assert len(fake.sent_texts) == 1 and len(fake.sent_images) == 1
     assert loop._sent_today == 2
+
+
+# ---- M5B：kind='file' 出站（video/file 两分支） ----
+
+def _mk_file_outbox_row(db, path, caption="配文", to_user="u@im.wechat"):
+    db._conn.execute(
+        "INSERT INTO outbox(task_id, to_user, text, kind, media_path, caption, "
+        "created_at) VALUES(?,?,?,?,?,?,?)",
+        (None, to_user, "", "file", str(path), caption, 1))
+    db._conn.commit()
+    return db._conn.execute("SELECT id FROM outbox ORDER BY id DESC LIMIT 1"
+                            ).fetchone()["id"]
+
+
+async def test_outbound_file_video_branch(db, tmp_path):
+    """mp4 → media_type=2 + video 条（video_size 密文）；先 caption 文本条。"""
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"\x00" * 100)
+    oid = _mk_file_outbox_row(db, f)
+    db.insert_message(InboundMessage(msg_id="1", from_user="u@im.wechat",
+                                     text="hi", context_token="CTX", received_at=1))
+    fake = FakeMediaILink()   # 复用 M3 图片 fake（getuploadurl 记录 upload_kwargs）
+    loop = OutboundLoop(db, fake, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    await loop._drain_once()
+    assert fake.upload_kwargs["media_type"] == 2
+    to_user, item = fake.sent_media_items[-1]
+    assert to_user == "u@im.wechat"
+    assert item["type"] == 5 and "video_item" in item
+    assert item["video_item"]["video_size"] == fake.upload_kwargs["filesize"]
+    texts = [t for t in fake.sent_texts if t == "配文"]
+    assert texts                                       # caption 先发
+    assert db.get_outbox(oid).state == "sent"
+
+
+async def test_outbound_file_plain_branch(db, tmp_path):
+    """pdf → media_type=3 + file 条（len 明文字符串 + file_name 原名）。"""
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4")
+    oid = _mk_file_outbox_row(db, f)
+    db.insert_message(InboundMessage(msg_id="1", from_user="u@im.wechat",
+                                     text="hi", context_token="CTX", received_at=1))
+    fake = FakeMediaILink()
+    loop = OutboundLoop(db, fake, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    await loop._drain_once()
+    assert fake.upload_kwargs["media_type"] == 3
+    _, item = fake.sent_media_items[-1]
+    assert item["type"] == 4 and item["file_item"]["file_name"] == "doc.pdf"
+    assert item["file_item"]["len"] == str(f.stat().st_size)   # 明文大小字符串
+    assert db.get_outbox(oid).state == "sent"
