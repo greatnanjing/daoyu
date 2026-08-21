@@ -163,7 +163,10 @@ longjob && daoyu-notify "任务成功" || daoyu-notify "任务失败"
 
 **2. 终端 Claude Code 会话**（hooks，零代码）：把
 [deploy/notify-hooks.example.json](deploy/notify-hooks.example.json) 的 `hooks`
-节合并进服务器宿主 `~/.claude/settings.json`——终端 TUI 每轮回复结束（Stop）
+节合并进服务器 **`data/claude-home/settings.json`**（TUI 经
+`deploy/daoyu-tui.sh` 启动、CLAUDE_CONFIG_DIR 指此目录——2026-08-21 真机落定：
+宿主 `~/.claude/settings.json` 不被 TUI 读取，hooks 必须放 claude-home）——
+终端 TUI 每轮回复结束（Stop）
 推 ✅、等待输入/权限确认（Notification）推 ❓。注意 Stop 是**每轮回复结束都
 触发**（多轮对话的中间轮次也各推一条，并非仅任务完成），消息较密——嫌吵或
 怕刷爆日限熔断可只合并 Notification 节、或自行限频。示例命令为绝对路径形态

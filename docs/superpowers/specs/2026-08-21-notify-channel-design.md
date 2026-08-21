@@ -1,7 +1,7 @@
 # 刀鱼 M5A：通知通道（事件接入）设计
 
 - **日期**: 2026-08-21
-- **状态**: 已实现（2026-08-21，400 测试全绿；真机验收另行）
+- **状态**: 已实现并真机验收通过（2026-08-21，400 测试全绿；CLI/MCP/HTTP/hooks 四入口微信端全过——hooks 放置位置真机落定为 data/claude-home/settings.json，见 §1 勘误）
 - **配套文档**: [PRD.md](../../PRD.md) / [TRD.md](../../TRD.md)
 - **背景**: M4 主动服务完成后，余下三方向（通知通道事件接入 / 媒体二期 / 输入体验增强）按「通知 → 媒体 → 输入」顺序立项。本 spec 覆盖通知通道全量；媒体二期、输入体验为后续独立 spec。
 
@@ -16,7 +16,7 @@
 | 架构 | **outbox 直写复用**：所有入口写 outbox 行，现有出站协程照常投递——节流/重试/死信/分页/崩溃恢复全部自然继承。弃内存事件总线（进程重启丢通知，且 CLI/MCP 跨进程仍绕不开 DB）；弃仅 CLI 最小集（四入口已全选） |
 | MCP notify 目标 | **任务属主**（`DAOYU_TO_USER` 注入，同 send_image 先例）——headless 任务是某用户发起的，通知回该用户，免白名单管道 |
 | CLI / HTTP 目标 | **全部白名单广播**（先例四处：app.py / scheduler / outbound / reconnect 的告警广播） |
-| 终端 hooks 接入 | **零代码**：`--hook` 模式的 CLI + deploy/ 配置片段示例，用户一次性配进宿主 `~/.claude/settings.json`；daoyu 不自动安装 hooks |
+| 终端 hooks 接入 | **零代码**：`--hook` 模式的 CLI + deploy/ 配置片段示例，用户一次性配进服务器 `data/claude-home/settings.json`（TUI 的 CLAUDE_CONFIG_DIR 目标——**2026-08-21 真机落定**：原文「宿主 ~/.claude/settings.json」有误，宿主配置不被 TUI 读取）；daoyu 不自动安装 hooks |
 | HTTP 鉴权 | 绑定 `127.0.0.1`；`secrets.env` 设 `notify_token` 则要求 `Authorization: Bearer <token>`，不设则免鉴权（仅 localhost 可达） |
 | 前缀约定 | 🔔 通用通知；✅ 终端任务完成（Stop）；❓ Claude 等待确认（Notification）——与现有 ⚠️（告警）/ 🔐（审批）同一前缀语言 |
 | 日限熔断关系 | 通知行走 outbox，**日限熔断对其同样生效**（防滥用兜底）。代价：外部源刷爆会触发全局熔断暂停全部出站——单用户 localhost 场景可接受，README 明示 |
@@ -81,7 +81,7 @@ daoyu-notify --hook notification
 ### 3.5 终端 hooks 配置（deploy/ 示例 + README，零代码）
 
 - 新增 [deploy/notify-hooks.example.json](../../../deploy/)：Stop 与 Notification 两事件的 hooks JSON 片段，命令均为 `daoyu-notify --hook <event>`。
-- README 新增「通知通道」小节：粘贴方法（宿主 `~/.claude/settings.json` 的 `hooks` 节）、CLI 直用示例、HTTP curl 示例。
+- README 新增「通知通道」小节：粘贴方法（服务器 `data/claude-home/settings.json` 的 `hooks` 节——真机落定，见 §1 勘误）、CLI 直用示例、HTTP curl 示例。
 
 ## 4. 配置与安全
 
