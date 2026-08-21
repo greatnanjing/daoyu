@@ -57,3 +57,29 @@ def test_forward_with_args_kept_verbatim():
 def test_bare_slash_treated_as_unknown():
     r = route("/", set())
     assert r.kind == "unknown"
+
+
+# ---------------- M5C3：内置短别名 ----------------
+
+def test_builtin_aliases():
+    for short, full in [("t", "tasks"), ("s", "status"),
+                        ("c", "cancel"), ("cs", "sessions")]:
+        r = route(f"/{short}", set())
+        assert r.kind == "bridge" and r.command == full, short
+
+
+def test_builtin_alias_args_follow():
+    r = route("/c 5", set())
+    assert r.kind == "bridge" and r.command == "cancel" and r.args == "5"
+
+
+def test_builtin_alias_beats_slash_commands():
+    # 内置映射先于动态 slash 清单：claude 若也暴露 /t 命令不遮蔽内置别名
+    r = route("/t", {"t", "tasks"})
+    assert r.kind == "bridge" and r.command == "tasks"
+
+
+def test_builtin_alias_target_not_overridden():
+    # 映射目标必须仍是合法桥命令（防常量改错后掉进 unknown）
+    from gateway.router import BUILTIN_ALIASES, BRIDGE_COMMANDS
+    assert set(BUILTIN_ALIASES.values()) <= BRIDGE_COMMANDS

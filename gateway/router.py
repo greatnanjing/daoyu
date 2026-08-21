@@ -6,6 +6,10 @@ import difflib
 from dataclasses import dataclass
 
 BRIDGE_COMMANDS = {"cancel", "tasks", "status", "cd", "sessions", "policy", "bg", "new", "adopt", "delete", "cron"}
+# M5C3 内置短别名：route() 开头静态映射（纯函数）。用户自定义别名在
+# gateway/app.py route 调用前查 KV 展开（先于此层——同名时用户定义覆盖内置）。
+BUILTIN_ALIASES = {"t": "tasks", "s": "status", "c": "cancel",
+                   "cs": "sessions"}
 ILINK_COMMANDS = {"time", "重新连接", "help"}
 # TUI 交互专属（静态维护，官方 commands 文档），M2 提供完整代理实现
 PROXY_COMMANDS = {"permissions", "hooks", "plugins", "login", "config", "mcp",
@@ -38,6 +42,8 @@ def route(text: str, slash_commands: set[str]) -> Route:
     if not name:
         return Route(kind="unknown", command=None, args="命令为空",
                      detail={"suggestion": None})
+
+    name = BUILTIN_ALIASES.get(name, name)
 
     if name in BRIDGE_COMMANDS:
         return Route(kind="bridge", command=name, args=args, detail={})
