@@ -8,6 +8,7 @@ dependencies = ["aiohttp>=3.9", "cryptography>=42", "rapidocr-onnxruntime>=1.4",
 [project.scripts]
 daoyu = "gateway.app:start"
 daoyu-login = "gateway.login:main"
+daoyu-notify = "gateway.notify_cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "aioresponses>=0.7"]
