@@ -335,3 +335,84 @@ async def test_sessions_shows_uuid_hint(db, tmp_path):
     reply = await execute_bridge(db, FakePool([]), _route("sessions", ""),
                                  "u@im.wechat", FakeCfg())
     assert "·" in reply and "/adopt" in reply
+
+
+# ---------------- M5C3：/alias 自定义快捷命令 ----------------
+
+def _load_aliases(db, user="u@im.wechat"):
+    return json.loads(db.get_state(f"alias:{user}") or "{}")
+
+
+async def test_alias_add_and_list(db):
+    reply = await execute_bridge(db, FakePool([]), _route("alias"),
+                                 "u@im.wechat", FakeCfg())
+    assert "暂无自定义别名" in reply and "/t=/tasks" in reply
+    reply = await execute_bridge(
+        db, FakePool([]), _route("alias", "add go 跑全量测试并总结"),
+        "u@im.wechat", FakeCfg())
+    assert "已定义 /go" in reply
+    assert _load_aliases(db) == {"go": "跑全量测试并总结"}
+    reply = await execute_bridge(db, FakePool([]), _route("alias", "list"),
+                                 "u@im.wechat", FakeCfg())
+    assert "/go → 跑全量测试并总结" in reply
+    assert any(r["kind"] == "alias_add"
+               for r in db._conn.execute("SELECT kind FROM audit_log"))
+
+
+async def test_alias_del(db):
+    await execute_bridge(db, FakePool([]), _route("alias", "add go x"),
+                         "u@im.wechat", FakeCfg())
+    reply = await execute_bridge(db, FakePool([]), _route("alias", "del go"),
+                                 "u@im.wechat", FakeCfg())
+    assert "已删除别名 /go" in reply
+    assert _load_aliases(db) == {}
+    reply = await execute_bridge(db, FakePool([]), _route("alias", "del go"),
+                                 "u@im.wechat", FakeCfg())
+    assert "没有别名 /go" in reply
+
+
+async def test_alias_add_validation(db):
+    # 系统命令撞名拒绝（桥/运维/代理/alias 自身）
+    for bad in ("tasks", "time", "config", "alias"):
+        reply = await execute_bridge(
+            db, FakePool([]), _route("alias", f"add {bad} x"),
+            "u@im.wechat", FakeCfg())
+        assert "系统命令" in reply, bad
+    # 名超长
+    reply = await execute_bridge(
+        db, FakePool([]), _route("alias", f"add {'n' * 17} x"),
+        "u@im.wechat", FakeCfg())
+    assert "1~16" in reply
+    # 值超长
+    reply = await execute_bridge(
+        db, FakePool([]), _route("alias", f"add ok {'v' * 2001}"),
+        "u@im.wechat", FakeCfg())
+    assert "1~2000" in reply
+    # 用法缺参
+    reply = await execute_bridge(db, FakePool([]), _route("alias", "add onlyname"),
+                                 "u@im.wechat", FakeCfg())
+    assert "用法" in reply
+
+
+async def test_alias_can_override_builtin_and_warns_slash(db):
+    # 内置别名可覆盖（t/s/c/cs 不在禁止集）——附注提示
+    reply = await execute_bridge(
+        db, FakePool([]), _route("alias", "add t /status"), "u@im.wechat",
+        FakeCfg())
+    assert "已定义 /t" in reply and "覆盖内置" in reply
+    # 撞 Claude 动态命令：允许但提示
+    db.set_state("slash_commands", json.dumps(["review"]))
+    reply = await execute_bridge(
+        db, FakePool([]), _route("alias", "add review 看代码"), "u@im.wechat",
+        FakeCfg())
+    assert "已定义 /review" in reply and "重名" in reply
+
+
+async def test_alias_count_limit(db):
+    for i in range(50):
+        await execute_bridge(db, FakePool([]), _route("alias", f"add a{i} v"),
+                             "u@im.wechat", FakeCfg())
+    reply = await execute_bridge(
+        db, FakePool([]), _route("alias", "add overflow v"), "u@im.wechat",
+        FakeCfg())
+    assert "上限" in reply

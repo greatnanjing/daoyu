@@ -4,6 +4,9 @@ import os
 import time
 from pathlib import Path
 
+from gateway.router import (BUILTIN_ALIASES, BRIDGE_COMMANDS, ILINK_COMMANDS,
+                            PROXY_COMMANDS)
+
 BRIDGE_HELP = {
     "cancel": "/cancel <任务号> — 取消任务",
     "tasks": "/tasks — 查看 running/pending 任务",
@@ -16,6 +19,8 @@ BRIDGE_HELP = {
     "policy": "/policy <auto|strict|bypass|plan> — 当前话题的权限档位",
     "bg": "/bg <任务描述> — 转入后台长任务（claude --bg，完成自动回报结果）",
     "cron": "/cron — 定时任务（日报/巡检）：on|off、time daily <HH:MM>、interval patrol <分钟>",
+    "alias": "/alias add <名> <内容> — 自定义快捷命令（del <名>、list 查看；"
+             "内置：/t=/tasks /s=/status /c=/cancel /cs=/sessions）",
 }
 ILINK_HELP = {
     "time": "/time — 连接剩余时间",
@@ -234,6 +239,8 @@ async def execute_bridge(db, pool, route, from_user: str, config) -> str:
         return f"已转后台（任务 #{tid}），/tasks 查进度、/cancel 取消。"
     if cmd == "cron":
         return _cron(db, route.args.strip())
+    if cmd == "alias":
+        return _alias(db, route.args.strip(), from_user)
     return f"未知桥命令 {cmd}"
 
 
@@ -377,3 +384,73 @@ def _cron(db, arg: str) -> str:
         db.audit("cron", f"interval patrol {parts[2]}")
         return f"巡检间隔已改为 {parts[2]} 分钟。"
     return usage
+
+
+def _alias(db, arg: str, from_user: str) -> str:
+    """/alias：用户自定义快捷命令（M5C3，spec §3.6）。存 KV alias:<user> 单键
+    JSON dict（merge_pending 同构先例）。撞名规则：系统命令（桥/运维/代理/
+    alias 自身）禁止；内置别名（t/s/c/cs）可覆盖（app 层用户展开先于内置映射，
+    天然生效）；撞 Claude 动态命令允许但回执提示（用户显式意图优先）。"""
+    parts = arg.split(None, 1)
+    op = parts[0] if parts else "list"
+    rest = parts[1] if len(parts) > 1 else ""
+    key = f"alias:{from_user}"
+
+    def _load() -> dict:
+        try:
+            return json.loads(db.get_state(key) or "{}")
+        except ValueError:
+            return {}
+
+    if op == "list":
+        aliases = _load()
+        if not aliases:
+            return ("暂无自定义别名。内置：/t=/tasks /s=/status "
+                    "/c=/cancel /cs=/sessions")
+        lines = [f"快捷命令（{len(aliases)} 条）："]
+        for name, value in sorted(aliases.items()):
+            lines.append(f"· /{name} → {' '.join(value.split())[:30]}")
+        return "\n".join(lines)
+
+    if op == "add":
+        sub = rest.split(None, 1)
+        if len(sub) != 2:
+            return "用法：/alias add <名> <内容>（内容可含空格；del/list 见 /help）"
+        name, value = sub[0], sub[1].strip()
+        if not name or len(name) > 16:
+            return "别名名须为 1~16 个字符（不含空格）。"
+        if not value or len(value) > 2000:
+            return "别名内容须为 1~2000 字符。"
+        reserved = BRIDGE_COMMANDS | ILINK_COMMANDS | PROXY_COMMANDS | {"alias"}
+        if name in reserved:
+            return f"/{name} 是系统命令，不能用作别名。"
+        aliases = _load()
+        if name not in aliases and len(aliases) >= 50:
+            return "别名已达上限（50 条），请先 /alias del 清理。"
+        try:
+            slash = set(json.loads(db.get_state("slash_commands") or "[]"))
+        except ValueError:
+            slash = set()
+        aliases[name] = value
+        db.set_state(key, json.dumps(aliases, ensure_ascii=False))
+        db.audit("alias_add", f"user={from_user} name={name}")
+        note = ""
+        if name in BUILTIN_ALIASES:
+            note = "（已覆盖内置同名别名）"
+        elif name in slash:
+            note = f"（注意：与 Claude 命令 /{name} 重名，别名优先）"
+        return f"✅ 已定义 /{name} → {' '.join(value.split())[:30]}{note}"
+
+    if op == "del":
+        if not rest:
+            return "用法：/alias del <名>"
+        name = rest.split()[0]
+        aliases = _load()
+        if name not in aliases:
+            return f"没有别名 /{name}（/alias list 查看）。"
+        del aliases[name]
+        db.set_state(key, json.dumps(aliases, ensure_ascii=False))
+        db.audit("alias_del", f"user={from_user} name={name}")
+        return f"已删除别名 /{name}。"
+
+    return "用法：/alias add <名> <内容> | /alias del <名> | /alias list"

@@ -5,7 +5,8 @@ headless 下非预期行为），永远到不了 proxy 实现。"""
 import difflib
 from dataclasses import dataclass
 
-BRIDGE_COMMANDS = {"cancel", "tasks", "status", "cd", "sessions", "policy", "bg", "new", "adopt", "delete", "cron"}
+BRIDGE_COMMANDS = {"cancel", "tasks", "status", "cd", "sessions", "policy",
+                   "bg", "new", "adopt", "delete", "cron", "alias"}
 # M5C3 内置短别名：route() 开头静态映射（纯函数）。用户自定义别名在
 # gateway/app.py route 调用前查 KV 展开（先于此层——同名时用户定义覆盖内置）。
 BUILTIN_ALIASES = {"t": "tasks", "s": "status", "c": "cancel",
