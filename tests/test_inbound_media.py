@@ -167,3 +167,106 @@ async def test_partial_images_one_ok_one_failed(tmp_path):
     assert rows[0]["prompt"].count("已保存到") == 1     # 只带成功的那张
     assert any("图片接收失败" in r["text"] for r in db._conn.execute(
         "SELECT text FROM outbox"))                     # ⚠️ 部分失败回执
+
+
+# ---- M5B：语音/文件/视频入站 ----
+
+def _media_msg(msg_id, item: dict, text: str | None = None):
+    items = [item]
+    if text is not None:
+        items = [{"type": 1, "text_item": {"text": text}}, item]
+    return {"message_id": msg_id, "seq": msg_id, "from_user_id": USER,
+            "message_type": 1, "context_token": "CTX", "item_list": items}
+
+
+def _file_item(key: bytes, name="报表.xlsx", raw=b"PK\x03\x04data"):
+    import base64
+    return {"type": 4, "file_item": {
+        "file_name": name,
+        "media": {"encrypt_query_param": "EQ",
+                  "aes_key": base64.b64encode(key.hex().encode()).decode()}}}
+
+
+async def test_voice_transcript_treated_as_text(tmp_path):
+    """有转写的语音：text 直接当用户文字建任务（零解码成本，官方同构）。"""
+    db = Database(tmp_path / "t.db"); db.ensure_schema()
+    msg = _media_msg(11, {"type": 3, "voice_item": {"text": "帮我看下日志"}})
+    await handle_inbound(db, Cfg(tmp_path), None, None, msg, ilink=None)
+    rows = _tasks(db)
+    assert len(rows) == 1 and rows[0]["prompt"] == "帮我看下日志"
+    assert db._conn.execute(
+        "SELECT COUNT(*) c FROM messages").fetchone()["c"] == 1   # 落盘正常
+
+
+async def test_voice_no_transcript_archived_receipt_no_task(tmp_path):
+    """无转写语音：下载 SILK 存档 + ⚠️ 回执 + 不建任务。"""
+    import secrets as _s
+    db = Database(tmp_path / "t.db"); db.ensure_schema()
+    key = _s.token_bytes(16)
+    raw = b"silk-bytes" + _s.token_bytes(16)
+    fake = FakeDownloadILink(aes_ecb_encrypt(raw, key))
+    item = {"type": 3, "voice_item": {
+        "media": {"encrypt_query_param": "EQ",
+                  "aes_key": __import__("base64").b64encode(key.hex().encode()).decode()}}}
+    await handle_inbound(db, Cfg(tmp_path), None, None, _media_msg(12, item),
+                         ilink=fake)
+    assert _tasks(db) == []                          # 不建任务
+    texts = [r["text"] for r in db._conn.execute("SELECT text FROM outbox")]
+    assert any("语音未能转写" in t for t in texts)   # ⚠️ 回执
+    saved = list((tmp_path / "data" / "media" / "inbound").glob("voice-*.silk"))
+    assert len(saved) == 1 and saved[0].read_bytes() == raw
+
+
+async def test_file_message_creates_task_with_name_and_size(tmp_path):
+    import secrets as _s
+    db = Database(tmp_path / "t.db"); db.ensure_schema()
+    key = _s.token_bytes(16)
+    fake = FakeDownloadILink(aes_ecb_encrypt(b"PK\x03\x04xlsx", key))
+    await handle_inbound(db, Cfg(tmp_path), None, None,
+                         _media_msg(13, _file_item(key)), ilink=fake)
+    prompt = _tasks(db)[0]["prompt"]
+    assert "用户发来文件 报表.xlsx" in prompt and "已保存到" in prompt
+    saved = list((tmp_path / "data" / "media" / "inbound").glob("file-*.xlsx"))
+    assert len(saved) == 1
+    assert db._conn.execute(
+        "SELECT media_path FROM messages").fetchone()["media_path"] == str(saved[0])
+
+
+async def test_video_message_creates_task_with_ffmpeg_hint(tmp_path):
+    import secrets as _s
+    db = Database(tmp_path / "t.db"); db.ensure_schema()
+    key = _s.token_bytes(16)
+    raw = b"\x00\x00\x00\x18ftypmp42" + _s.token_bytes(32)
+    fake = FakeDownloadILink(aes_ecb_encrypt(raw, key))
+    item = {"type": 5, "video_item": {
+        "media": {"encrypt_query_param": "EQ",
+                  "aes_key": __import__("base64").b64encode(key.hex().encode()).decode()}}}
+    await handle_inbound(db, Cfg(tmp_path), None, None, _media_msg(14, item),
+                         ilink=fake)
+    prompt = _tasks(db)[0]["prompt"]
+    assert "用户发来视频" in prompt and "ffmpeg" in prompt
+    assert list((tmp_path / "data" / "media" / "inbound").glob("vid-*.mp4"))
+
+
+async def test_file_with_text_appends_to_prompt(tmp_path):
+    import secrets as _s
+    db = Database(tmp_path / "t.db"); db.ensure_schema()
+    key = _s.token_bytes(16)
+    fake = FakeDownloadILink(aes_ecb_encrypt(b"PK\x03\x04", key))
+    await handle_inbound(db, Cfg(tmp_path), None, None,
+                         _media_msg(15, _file_item(key), text="这份报表汇总下"),
+                         ilink=fake)
+    prompt = _tasks(db)[0]["prompt"]
+    assert prompt.startswith("这份报表汇总下")
+    assert "用户发来文件" in prompt
+
+
+async def test_file_download_failure_receipt_no_task(tmp_path):
+    import secrets as _s
+    db = Database(tmp_path / "t.db"); db.ensure_schema()
+    bad = FakeDownloadILink(b"garbage")
+    await handle_inbound(db, Cfg(tmp_path), None, None,
+                         _media_msg(16, _file_item(_s.token_bytes(16))),
+                         ilink=bad)
+    assert _tasks(db) == []
+    assert any("文件" in r["text"] for r in db._conn.execute("SELECT text FROM outbox"))

@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 
 import aiohttp
 
@@ -11,7 +12,8 @@ from common.db import Database
 from common.models import InboundMessage
 from gateway.bridge import execute_bridge, execute_ilink_op
 from gateway.ilink import ILinkClient
-from gateway.media import MediaError, download_inbound_image
+from gateway.media import (MediaError, download_inbound_image,
+                           download_inbound_media)
 from gateway.outbound import OutboundLoop
 from gateway.proxy import execute_proxy
 from gateway.reconnect import ReconnectTimer
@@ -48,7 +50,8 @@ async def _save_inbound_images(db, cfg, ilink, image_items, from_user):
 
 async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None:
     """入站管道：类型过滤 → 白名单 → 落盘去重 → 路由 → 本地秒回或入队。
-    M3：item_list 遍历——文本照旧，图片（type==2）下载落盘后"发图即对话"。"""
+    M3：图片（type==2）下载落盘后"发图即对话"；M5B：语音（3）转写即文字/
+    无转写存档回执、文件（4）带名入 prompt、视频（5）ffmpeg 抽帧提示。"""
     if msg.get("message_type") != 1:
         return
     if msg.get("group_id"):
@@ -60,9 +63,24 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
 
     text_parts: list[str] = []
     image_items: list[dict] = []
+    voice_items: list[dict] = []    # M5B：无转写的语音（有转写的并入 text_parts）
+    file_items: list[dict] = []
+    video_items: list[dict] = []
     for item in msg.get("item_list") or []:
-        if item.get("type") == 2:
+        t = item.get("type")
+        if t == 2:
             image_items.append(item.get("image_item") or {})
+        elif t == 3:
+            vi = item.get("voice_item") or {}
+            vt = str(vi.get("text") or "").strip()
+            if vt:
+                text_parts.append(vt)   # 服务端转写：当用户文字（官方同构）
+            else:
+                voice_items.append(vi)
+        elif t == 4:
+            file_items.append(item.get("file_item") or {})
+        elif t == 5:
+            video_items.append(item.get("video_item") or {})
         elif item.get("text_item"):
             # 文本判定不看 type==1：兼容缺 type 键的既有消息构造（M1 起仅取
             # text_item 不校验 type），非图元素带 text_item 即文本。
@@ -79,12 +97,62 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
     if db.message_exists(msg_key):
         return
     media_path: str | None = None
+    media_lines: list[str] = []   # 建任务用的媒体提示行（图/文件/视频，M5B 泛化）
     if image_items:
         image_paths, fail_err = await _save_inbound_images(
             db, cfg, ilink, image_items, from_user)
         media_path = image_paths[0] if image_paths else None
+        media_lines += [f"[用户发来图片，已保存到 {p}，请查看并回应]"
+                        for p in image_paths]
     else:
         image_paths, fail_err = [], None
+    # M5B：无转写语音存档回执不建任务；文件/视频下载落盘入 prompt 行。
+    # in_dir 惰性求值：纯文本消息的 cfg 可无 repo_root（与 _save_inbound_images
+    # 内部访问时机一致——只有存在媒体项才触碰）。
+    if voice_items or file_items or video_items:
+        in_dir = cfg.repo_root / "data" / "media" / "inbound"
+    for vi in voice_items:
+        try:
+            if ilink is None:
+                raise MediaError("iLink 连接不可用")
+            p = await download_inbound_media(ilink, vi.get("media") or {},
+                                             in_dir, "voice", "silk")
+            db.enqueue(None, from_user,
+                       f"⚠️ 语音未能转写（已存档 {Path(p).name}），"
+                       f"请补发文字或转写内容")
+        except Exception as e:
+            log.warning("入站语音处理失败: %r", e)
+            db.enqueue(None, from_user, "⚠️ 语音接收失败，请重发或改用文字")
+    for fi in file_items:
+        try:
+            if ilink is None:
+                raise MediaError("iLink 连接不可用")
+            name = str(fi.get("file_name") or "file.bin")
+            ext = Path(name).suffix.lstrip(".") or "bin"
+            p = await download_inbound_media(ilink, fi.get("media") or {},
+                                             in_dir, "file", ext)
+            size_mb = Path(p).stat().st_size / 1048576
+            media_lines.append(
+                f"[用户发来文件 {name}（{size_mb:.1f}MB），已保存到 {p}，请查看处理]")
+            if media_path is None:
+                media_path = p
+        except Exception as e:
+            log.warning("入站文件处理失败: %r", e)
+            db.enqueue(None, from_user, f"⚠️ 文件接收失败（{e}），请重发")
+    for vd in video_items:
+        try:
+            if ilink is None:
+                raise MediaError("iLink 连接不可用")
+            p = await download_inbound_media(ilink, vd.get("media") or {},
+                                             in_dir, "vid", "mp4")
+            media_lines.append(
+                f"[用户发来视频，已保存到 {p}，请查看处理"
+                f"（如需看内容可用 ffmpeg 抽帧，未装则如实告知）]")
+            if media_path is None:
+                media_path = p
+        except Exception as e:
+            log.warning("入站视频处理失败: %r", e)
+            db.enqueue(None, from_user, f"⚠️ 视频接收失败（{e}），请重发")
     if db.insert_message(InboundMessage(
             msg_id=msg_key, from_user=from_user, text=text,
             context_token=msg.get("context_token", ""),
@@ -143,15 +211,15 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
             outbound.notify()
         return
 
-    if image_items and not text and not image_paths:
-        return   # 纯图且全部下载失败：已有 ⚠️ 回执，不建任务（防空文本进路由）
-    if image_paths and not text:
-        # 纯图消息：不走路由（空文本无命令语义），直接 chat 任务——发图即对话
+    if ((image_items or voice_items or file_items or video_items)
+            and not text and not media_lines):
+        return   # 纯媒体无可用内容（全部下载失败/纯语音存档回执）：已有 ⚠️ 回执，
+        # 不建任务（防空文本进路由——route("") 判 chat 会建空 prompt 任务）
+    if media_lines and not text:
+        # 纯媒体消息：不走路由（空文本无命令语义），直接 chat 任务——媒体即对话
         session = db.get_active_binding(from_user, cfg.default_cwd)
-        prompt = "\n".join(
-            f"[用户发来图片，已保存到 {p}，请查看并回应]" for p in image_paths)
-        db.create_task(None, session.id, prompt, kind="chat")
-        db.enqueue(None, from_user, "✅ 收到图片，处理中")
+        db.create_task(None, session.id, "\n".join(media_lines), kind="chat")
+        db.enqueue(None, from_user, "✅ 收到媒体，处理中")
         if pool:
             await pool.submit_check()
         if outbound:
@@ -183,9 +251,8 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
     else:  # chat / forward
         session = db.get_active_binding(from_user, cfg.default_cwd)   # 当前话题指针
         prompt = text if r.kind == "chat" else f"/{r.command} {r.args}".strip()
-        if image_paths:
-            prompt += "\n" + "\n".join(
-                f"[用户发来图片，已保存到 {p}，请查看]" for p in image_paths)
+        if media_lines:
+            prompt += "\n" + "\n".join(media_lines)
         db.create_task(None, session.id, prompt, kind=r.kind)
         db.enqueue(None, from_user, "✅ 收到，处理中")
         if pool:
