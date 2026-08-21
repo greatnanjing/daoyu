@@ -1,4 +1,4 @@
-"""刀鱼 daoyu MCP server（stdio）：approve（审批）+ send_image（发图），按 DAOYU_TOOLS 装配。
+"""刀鱼 daoyu MCP server（stdio）：approve（审批）+ send_image（发图）+ notify（中间通知），按 DAOYU_TOOLS 装配。
 
 approve 由 claude 子进程经 --permission-prompt-tool 调用：与主进程共享同一
 SQLite（WAL 多进程安全）→ 写 approvals 行 + 写 outbox 推微信 → 轮询用户 Y/N →
@@ -61,6 +61,16 @@ def _tools():
                             "properties": {"path": {"type": "string"},
                                            "caption": {"type": "string"}},
                             "required": ["path"]},
+        })
+    if "notify" in enabled:
+        tools.append({
+            "name": "notify",
+            "description": "推送一条通知到用户微信（🔔 前缀，不进对话流）——"
+                           "阶段性成果、需要用户知晓的中间状态",
+            "inputSchema": {"type": "object",
+                            "properties": {"title": {"type": "string"},
+                                           "body": {"type": "string"}},
+                            "required": ["title"]},
         })
     return {"tools": tools}
 
@@ -155,6 +165,18 @@ def _send_image(conn, args) -> str:
     return f"已排队发送：{dest.name}" + (f"（配文：{caption}）" if caption else "")
 
 
+def _notify(conn, args) -> str:
+    """普通工具：headless 任务中主动推中间通知（定向任务属主，不广播）。"""
+    from common.notify import push_notification
+    to_user = os.environ.get("DAOYU_TO_USER", "")
+    if not to_user:
+        return "DAOYU_TO_USER 未注入，无法推送"
+    title = str(args.get("title", "")).strip() or "任务通知"
+    body = str(args.get("body", ""))
+    push_notification(conn, [to_user], title, body, source="mcp")
+    return f"已推送通知：{title}"
+
+
 def main():
     sys.stdin.reconfigure(encoding="utf-8")     # Windows 管道默认 cp936，JSON-RPC 必须 UTF-8
     sys.stdout.reconfigure(encoding="utf-8")
@@ -192,6 +214,9 @@ def main():
                 elif name == "send_image":
                     _resp(msg["id"], {"content": [{"type": "text",
                                                    "text": _send_image(conn, args)}]})
+                elif name == "notify":
+                    _resp(msg["id"], {"content": [{"type": "text",
+                                                   "text": _notify(conn, args)}]})
                 else:
                     _resp(msg["id"], {"content": [{"type": "text",
                                                    "text": "unknown tool"}],

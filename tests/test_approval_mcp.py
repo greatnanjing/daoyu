@@ -331,3 +331,37 @@ async def test_send_image_io_error_returns_iserror_server_survives(tmp_path):
     finally:
         p.terminate()
         await p.wait()
+
+
+async def test_mcp_notify_tool_roundtrip(tmp_path):
+    """M5A：notify 普通工具——定向任务属主（DAOYU_TO_USER），🔔 前缀 + audit。
+    通知行 task_id=None 是 M5A 计划 Global Constraints 钉死的口径（所有入口
+    统一 task_id=NULL，task 归属不落在通知行上）。"""
+    db = Database(tmp_path / "m.db")
+    db.ensure_schema()
+    env = _srv_env(str(db.path))
+    env["DAOYU_TOOLS"] = "send_image,notify"
+    p = await _start(env)
+    try:
+        await _send(p, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        await _recv(p)
+        await _send(p, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        resp = await _recv(p)
+        assert [t["name"] for t in resp["result"]["tools"]] == ["send_image", "notify"]
+        await _send(p, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                        "params": {"name": "notify",
+                                   "arguments": {"title": "阶段成果",
+                                                 "body": "已跑完一半"}}})
+        resp = await _recv(p)
+        assert resp["id"] == 3 and not resp["result"].get("isError")
+        assert "阶段成果" in resp["result"]["content"][0]["text"]
+        row = db._conn.execute(
+            "SELECT to_user, task_id, text FROM outbox").fetchone()
+        assert row["to_user"] == TO_USER and row["task_id"] is None   # 任务属主定向
+        assert row["text"] == "🔔 阶段成果\n已跑完一半"
+        audits = db._conn.execute(
+            "SELECT detail FROM audit_log WHERE kind='notify'").fetchall()
+        assert audits and audits[0]["detail"] == "mcp: 阶段成果"
+    finally:
+        p.terminate()
+        await p.wait()
