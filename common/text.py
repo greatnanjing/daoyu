@@ -1,5 +1,7 @@
 """长文本分页：gateway 出站与 worker 最终回复共用（放 common，避免 worker→gateway 反向依赖）。"""
 
+from common.mdclean import md_clean
+
 # 微信 iLink 单条文本硬上限：16384 字节 UTF-8（2026-08-20 真机实测钉死：
 # 16384 ✓ / 16385 ✗ errmsg='prepare failed'，且 errcode 仍为 0 → 静默不投递）。
 # 上限按字节而非字符（同批实证：中文 5450 字≈16350B ✓ / 5500 字≈16500B ✗；
@@ -34,13 +36,13 @@ def split_text(text: str, limit: int) -> list[str]:
     return [f"(第 {i}/{len(pages)} 页)\n{p}" for i, p in enumerate(pages, 1)]
 
 
-def outbox_sent_pages(rows, page_char_limit: int) -> int:
+def outbox_sent_pages(rows, page_char_limit: int,
+                      md_clean_enabled: bool = True) -> int:
     """已送达 outbox 行折算微信侧实际发送条数（出站日计数口径，gateway 出站
     协程运行时与 bridge /status、重启恢复共用——三处必须同一折算）：
-    文本行 = len(split_text(...))；图片/文件行（kind='image'/'file'）= 媒体条
-    1 条 + caption（非空时）1 条（caption 走 _send 单发整条不分页，与
-    gateway/outbound._send_media / _send_file_media 运行时一致——file 行 text
-    恒空串，若走文本分支只折算 1，带 caption 行实发 2 会被低估）。
+    文本行 = len(split_text(md_clean 后文本))——与运行时「先清洗后分页」一致
+    （M5C2 起四处口径同步，折算仍是近似值：重试重发的页运行时会再计）；
+    图片/文件行（kind='image'/'file'）= 媒体条 1 条 + caption（非空时）1 条。
 
     行需含 kind/text/caption 键（sqlite3.Row 或 dict 均可）。"""
     n = 0
@@ -48,5 +50,6 @@ def outbox_sent_pages(rows, page_char_limit: int) -> int:
         if r["kind"] in ("image", "file"):
             n += 1 + (1 if str(r["caption"] or "").strip() else 0)
         else:
-            n += len(split_text(r["text"], page_char_limit))
+            t = md_clean(r["text"]) if md_clean_enabled else r["text"]
+            n += len(split_text(t, page_char_limit))
     return n

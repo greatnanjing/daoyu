@@ -584,3 +584,102 @@ async def test_daily_count_file_row_counts_caption_and_media(db, tmp_path):
     loop2 = OutboundLoop(db, FakeMediaILink(), FakeCfg(),
                          token_ref={"token": "T", "base_url": ""}, typing_state={})
     assert loop2._sent_today == 2                  # 重启从 sent 行折算回来同为 2
+
+
+# ---------------- M5C2：出站 Markdown 清洗 ----------------
+
+async def test_outbound_cleans_markdown(db):
+    """文本行先 md_clean 再分页——fake iLink 收到清洗后纯文本（outbox 存原文）。"""
+    il = FakeILink()
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    loop = OutboundLoop(db, il, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""},
+                        typing_state={})
+    db.enqueue(None, "u@im.wechat", "## 标题\n**粗** 与 `code`")
+    task = asyncio.create_task(loop.run_forever())
+    try:
+        assert await wait_until(lambda: db.get_outbox(1).state == "sent")
+        assert il.sent[0][2] == "【标题】\n粗 与 「code」"
+        row = db._conn.execute("SELECT text FROM outbox WHERE id=1").fetchone()
+        assert row["text"] == "## 标题\n**粗** 与 `code`"   # 原文留存
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_outbound_md_clean_off_raw(db):
+    class CfgOff(FakeCfg):
+        def __init__(self):
+            super().__init__()
+            self.throttle["md_clean"] = False
+
+    il = FakeILink()
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    loop = OutboundLoop(db, il, CfgOff(),
+                        token_ref={"token": "T", "base_url": ""},
+                        typing_state={})
+    db.enqueue(None, "u@im.wechat", "**粗**")
+    task = asyncio.create_task(loop.run_forever())
+    try:
+        assert await wait_until(lambda: db.get_outbox(1).state == "sent")
+        assert il.sent[0][2] == "**粗**"   # 开关关闭：原文直发
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_outbound_cleans_caption(db, monkeypatch, tmp_path):
+    """caption 同过 _mdc（M5B caption 单发整条——清洗点三处之一）。"""
+    from types import SimpleNamespace
+    import gateway.outbound as ob
+
+    async def fake_upload(ilink, path, to_user, token, base_url=None,
+                          media_type=None):
+        return SimpleNamespace(download_param="dp", aes_key=b"k" * 16,
+                               size_cipher="1")
+
+    monkeypatch.setattr(ob, "upload_media", fake_upload)
+
+    class FakeImgILink(FakeILink):
+        async def send_image_message(self, to_user, ctx, download_param="",
+                                     aes_key_hex="", size_cipher="",
+                                     token=None, base_url=None):
+            self.sent.append((to_user, ctx, "IMG"))
+            return True
+
+    il = FakeImgILink()
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    p = tmp_path / "a.png"
+    p.write_bytes(b"\x89PNG\r\n\x1a\n")
+    db.enqueue_media(None, "u@im.wechat", str(p), caption="**图注**")
+    loop = OutboundLoop(db, il, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""},
+                        typing_state={})
+    task = asyncio.create_task(loop.run_forever())
+    try:
+        assert await wait_until(lambda: db.get_outbox(1).state == "sent")
+        assert il.sent[0][2] == "图注"      # caption 清洗后
+        assert il.sent[1][2] == "IMG"       # 图片条随后
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+def test_outbox_sent_pages_md_clean_param(db):
+    """折算口径：md_clean_enabled=True 时文本行按清洗后页数折算（四处一致）。"""
+    from common.text import outbox_sent_pages
+    from common.mdclean import md_clean
+    raw = "**x**" * 400 + "y" * 1000      # 原文 3000 字符、清洗后 1400
+    db.enqueue(None, "u@im.wechat", raw)
+    db.mark_sent(1)
+    rows = db._conn.execute(
+        "SELECT kind, text, caption FROM outbox").fetchall()
+    assert outbox_sent_pages(rows, 2000, md_clean_enabled=True) == \
+        len(split_text(md_clean(raw), 2000))
+    assert outbox_sent_pages(rows, 2000, md_clean_enabled=False) == \
+        len(split_text(raw, 2000))
+    assert db.sent_pages_today(2000) == \
+        len(split_text(md_clean(raw), 2000))   # db 层透传默认 True

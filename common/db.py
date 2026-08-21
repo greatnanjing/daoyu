@@ -566,15 +566,17 @@ class Database:
             (int(time.time()), outbox_id))
         self._conn.commit()
 
-    def sent_pages_today(self, page_char_limit: int) -> int:
+    def sent_pages_today(self, page_char_limit: int,
+                         md_clean_enabled: bool = True) -> int:
         """今日（本地零点起）已送达的微信侧发送条数——出站熔断计数的重启恢复
-        与 /status 展示共用。折算口径见 common.text.outbox_sent_pages；
+        与 /status 展示共用。折算口径见 common.text.outbox_sent_pages（M5C2 起
+        文本行同过 md_clean，md_clean_enabled 与运行时开关一致）；
         迁移前的历史 sent 行 sent_at 为 NULL 不计（当日略低估，次日归零）。"""
         rows = self._conn.execute(
             "SELECT kind, text, caption FROM outbox "
             "WHERE state='sent' AND sent_at IS NOT NULL AND sent_at>=?",
             (local_midnight_ts(),)).fetchall()
-        return outbox_sent_pages(rows, page_char_limit)
+        return outbox_sent_pages(rows, page_char_limit, md_clean_enabled)
 
     def active_media_paths(self) -> set[str]:
         """未终态（pending/failed/dead）outbox 行引用的 media_path 集合——

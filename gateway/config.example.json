@@ -10,7 +10,8 @@
     "progress_window_s": 2.5,
     "page_char_limit": 2000,
     "daily_send_limit": 500,
-    "merge_window_s": 2.0
+    "merge_window_s": 2.0,
+    "md_clean": true
   },
   "budget": {
     "max_turns": 50,
