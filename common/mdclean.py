@@ -18,7 +18,7 @@ _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _HR_RE = re.compile(r"^ {0,3}(-{3,}|\*{3,})\s*$")
 _HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+(.*?)\s*#*\s*$")
 _ULIST_RE = re.compile(r"^(\s*)[-*+]\s+(.+)$")
-_QUOTE_RE = re.compile(r"^(\s*)>\s?(.*)$")
+_QUOTE_RE = re.compile(r"^(\s*)((?:>\s?)+)(.*)$")
 _INDENT_RE = re.compile(r"^ {4,}")
 _TABLE_SEP_RE = re.compile(
     r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
@@ -114,13 +114,16 @@ def _clean_line(line: str) -> str:
         return f"{m.group(1)}• {_inline(m.group(2))}"
     m = _QUOTE_RE.match(line)
     if m:
-        return f"{m.group(1)}｜ {_inline(m.group(2))}"
+        # 连续多个 > 各转一个 ｜（嵌套引用，spec §3.1 备注）
+        depth = m.group(2).count(">")
+        return f"{m.group(1)}{'｜ ' * depth}{_inline(m.group(3))}"
     return _inline(line)
 
 
 def _inline(line: str) -> str:
     """行内转写：行内代码先占位（内容不参与后续规则），粗→斜→删→图→链，
-    还原占位为「内容」，最后去反斜杠转义。"""
+    去反斜杠转义，最后还原占位为「内容」（转义先于还原——行内代码内容
+    里的 \\* 等得以在「」内原样保留）。"""
     stash: list[str] = []
     line = _INLINE_CODE_RE.sub(
         lambda m: (stash.append(m.group(1)) or f"\x00{len(stash) - 1}\x00"),

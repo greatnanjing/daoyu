@@ -42,6 +42,8 @@ def test_lists():
 
 def test_quote_hr():
     assert md_clean("> 引用行") == "｜ 引用行"
+    assert md_clean(">> 嵌套引用") == "｜ ｜ 嵌套引用"   # 连续 > 各转一个 ｜（spec §3.1 备注）
+    assert md_clean(">>> 三层") == "｜ ｜ ｜ 三层"
     assert md_clean("---") == "—————————"
     assert md_clean("***") == "—————————"
     assert md_clean("- 有内容的列表") == "• 有内容的列表"   # 非水平线
