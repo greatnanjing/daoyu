@@ -359,6 +359,7 @@ class CaptionFailFirstILink(FakeMediaILink):
                                  token=None, base_url=None):
         self.sent_media_items = getattr(self, "sent_media_items", [])
         self.sent_media_items.append((to_user, item))
+        self.events.append(("media", item))   # 与 text/image 同入统一顺序日志
         return True
 
 
@@ -545,3 +546,41 @@ async def test_outbound_file_plain_branch(db, tmp_path):
     assert item["type"] == 4 and item["file_item"]["file_name"] == "doc.pdf"
     assert item["file_item"]["len"] == str(f.stat().st_size)   # 明文大小字符串
     assert db.get_outbox(oid).state == "sent"
+
+
+async def test_outbound_file_caption_fail_retry_order(db, tmp_path):
+    """M5B 终审 #11/#12：file 行顺序回归锁（同构图片行 CaptionFailFirst 形态）——
+    caption 首发失败 → 媒体条未发、整行留 pending；重试整行重做后 events 顺序
+    caption 文本在前、媒体条在后（send_media_message 已入 events 统一日志）。"""
+    f = tmp_path / "doc.pdf"; f.write_bytes(b"%PDF-1.4")
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    _mk_file_outbox_row(db, f, caption="配文")
+    fake = CaptionFailFirstILink()
+    loop = OutboundLoop(db, fake, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    await loop._drain_once()
+    assert fake.events == []                        # caption 失败 → 媒体条未发
+    row = db._conn.execute(
+        "SELECT state, last_error FROM outbox WHERE kind='file'").fetchone()
+    assert row["state"] == "pending" and "caption 发送失败" in row["last_error"]
+    await loop._drain_once()                        # 整行重试
+    assert [e[0] for e in fake.events] == ["text", "media"]   # caption 重发在前
+    assert fake.events[0][1] == "配文"
+    assert db._conn.execute(
+        "SELECT state FROM outbox WHERE kind='file'").fetchone()["state"] == "sent"
+
+
+async def test_daily_count_file_row_counts_caption_and_media(db, tmp_path):
+    """M5B 终审 #0：file 行运行时实发 2 条（caption 文本条经 _send + 媒体条
+    各计 1），重启恢复折算同为 2——outbox_sent_pages 已把 file 并入 image
+    同支（此前 file 行走空文本分支只折算 1，恢复口径低估）。"""
+    f = tmp_path / "doc.pdf"; f.write_bytes(b"%PDF-1.4")
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    _mk_file_outbox_row(db, f, caption="配文")
+    loop = OutboundLoop(db, FakeMediaILink(), FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""}, typing_state={})
+    await loop._drain_once()
+    assert loop._sent_today == 2
+    loop2 = OutboundLoop(db, FakeMediaILink(), FakeCfg(),
+                         token_ref={"token": "T", "base_url": ""}, typing_state={})
+    assert loop2._sent_today == 2                  # 重启从 sent 行折算回来同为 2

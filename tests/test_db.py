@@ -314,3 +314,17 @@ def test_mark_sent_stamps_and_sent_pages_today_folds(db):
     db._conn.commit()
     assert db.sent_pages_today(2000) == 2 + 1   # 只剩今日的两行图片
 
+
+def test_sent_pages_today_folds_file_rows(db):
+    """M5B 终审 #0：kind='file' 行并入 image 同支折算——媒体条 1 + 非空
+    caption 1（file 行 text 恒空串，走文本分支只计 1 会低估带配文行实发 2）。"""
+    import time as _time
+    now = int(_time.time())
+    for caption, path in (("配文", "/x/a.pdf"), ("", "/x/b.zip")):
+        db._conn.execute(
+            "INSERT INTO outbox(to_user, text, kind, media_path, caption, "
+            "created_at, state, sent_at) VALUES(?,?,?,?,?,?,?,?)",
+            ("u@im.wechat", "", "file", path, caption, now, "sent", now))
+    db._conn.commit()
+    assert db.sent_pages_today(2000) == 2 + 1      # 带 caption=2、无 caption=1
+

@@ -37,13 +37,15 @@ def split_text(text: str, limit: int) -> list[str]:
 def outbox_sent_pages(rows, page_char_limit: int) -> int:
     """已送达 outbox 行折算微信侧实际发送条数（出站日计数口径，gateway 出站
     协程运行时与 bridge /status、重启恢复共用——三处必须同一折算）：
-    文本行 = len(split_text(...))；图片行 = 图片 1 条 + caption（非空时）1 条
-    （caption 走 _send 单发整条不分页，与 gateway/outbound._send_media 一致）。
+    文本行 = len(split_text(...))；图片/文件行（kind='image'/'file'）= 媒体条
+    1 条 + caption（非空时）1 条（caption 走 _send 单发整条不分页，与
+    gateway/outbound._send_media / _send_file_media 运行时一致——file 行 text
+    恒空串，若走文本分支只折算 1，带 caption 行实发 2 会被低估）。
 
     行需含 kind/text/caption 键（sqlite3.Row 或 dict 均可）。"""
     n = 0
     for r in rows:
-        if r["kind"] == "image":
+        if r["kind"] in ("image", "file"):
             n += 1 + (1 if str(r["caption"] or "").strip() else 0)
         else:
             n += len(split_text(r["text"], page_char_limit))

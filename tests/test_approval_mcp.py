@@ -419,3 +419,70 @@ async def test_mcp_send_file_roundtrip(tmp_path):
     # ④ 不存在 → 普通文本错误返回（非崩）
     resp = await call_send_file(tmp_path / "no.bin")
     assert "读文件失败" in resp["result"]["content"][0]["text"]
+    # ⑤ bmp → kind='file'（终审 #8：IMAGE_EXTS 有意不含 bmp——sniff 白名单无
+    #    BMP，路由图片链路必被拒；走文件条可正常发送）
+    bmp = tmp_path / "pic.bmp"
+    bmp.write_bytes(b"BM\x36\x00\x00\x00" + b"\x00" * 32)
+    resp = await call_send_file(bmp)
+    assert not resp["result"].get("isError")
+    row = db._conn.execute(
+        "SELECT kind FROM outbox ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["kind"] == "file"
+
+
+async def test_mcp_send_file_defensive_branches(tmp_path):
+    """M5B 终审 #9：_send_file 防御三分支——重名防覆盖（hex4 后缀）、源就在
+    outbound（samefile 直引不自我复制）、超 100MB 拒绝且不写 outbox。"""
+    import re
+    from gateway.media import MAX_FILE_BYTES
+    db = Database(tmp_path / "m.db")
+    db.ensure_schema()
+    env = _srv_env(str(db.path))
+    env["DAOYU_TOOLS"] = "send_file"
+    outbound = tmp_path / "media" / "outbound"    # = DAOYU_DB 同级 media/outbound
+
+    async def call_send_file(src_path: Path) -> dict:
+        p = await _start(env)
+        try:
+            await _send(p, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": "send_file",
+                                       "arguments": {"path": str(src_path)}}})
+            return await _recv(p)
+        finally:
+            p.terminate()
+            await p.wait()
+
+    # ① 重名防覆盖：outbound 已有同名不同内容文件 → 新落盘带 hex4 后缀，
+    #    既有文件原内容保持
+    first = tmp_path / "report.pdf"; first.write_bytes(b"%PDF-OLD")
+    await call_send_file(first)                   # 首次：原名复制 outbound/report.pdf
+    assert (outbound / "report.pdf").read_bytes() == b"%PDF-OLD"
+    second = tmp_path / "renamed" / "report.pdf"  # 同名不同内容
+    second.parent.mkdir()
+    second.write_bytes(b"%PDF-NEW")
+    resp = await call_send_file(second)
+    assert not resp["result"].get("isError")
+    row = db._conn.execute(
+        "SELECT media_path FROM outbox ORDER BY id DESC LIMIT 1").fetchone()
+    assert re.fullmatch(r"report-[0-9a-f]{8}\.pdf",
+                        Path(row["media_path"]).name)          # <stem>-<hex4>.<ext>
+    assert Path(row["media_path"]).read_bytes() == b"%PDF-NEW"
+    assert (outbound / "report.pdf").read_bytes() == b"%PDF-OLD"   # 原文件未被覆盖
+
+    # ② 源就在 outbound：samefile 直引（不自我复制），media_path == 源路径
+    resp = await call_send_file(outbound / "report.pdf")
+    assert not resp["result"].get("isError")
+    row = db._conn.execute(
+        "SELECT media_path FROM outbox ORDER BY id DESC LIMIT 1").fetchone()
+    assert Path(row["media_path"]) == outbound / "report.pdf"
+    assert len(list(outbound.iterdir())) == 2     # 未新增副本（原名 + hex4 各一）
+
+    # ③ 超限：>100MB 拒绝且不写 outbox 行（.bin 不入 IMAGE_EXTS，超限判定在
+    #    扩展名路由之前——纯大小分支）
+    huge = tmp_path / "huge.bin"
+    huge.write_bytes(b"\x00" * (MAX_FILE_BYTES + 1))
+    before = db._conn.execute("SELECT COUNT(*) c FROM outbox").fetchone()["c"]
+    resp = await call_send_file(huge)
+    assert "100MB 上限" in resp["result"]["content"][0]["text"]
+    assert db._conn.execute(
+        "SELECT COUNT(*) c FROM outbox").fetchone()["c"] == before

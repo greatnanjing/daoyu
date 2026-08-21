@@ -30,8 +30,10 @@ MAX_FILE_BYTES = 100 * 1024 * 1024    # 协议全局上限（官方 WEIXIN_MEDIA
 ITEM_TYPE_VOICE, ITEM_TYPE_FILE, ITEM_TYPE_VIDEO = 3, 4, 5
 MEDIA_TYPE_VIDEO, MEDIA_TYPE_FILE = 2, 3
 
-# send_file 出站三路由扩展名表（对齐官方 mime.ts；语音出站无专用条——音频走文件条）
-IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
+# send_file 出站三路由扩展名表（对齐官方 mime.ts；语音出站无专用条——音频走文件条）。
+# 有意不含 bmp（终审 #8 裁定的与官方一处偏离）：sniff_image 白名单无 BMP，
+# 路由到图片链路必被拒；.bmp 走文件条可正常发送。
+IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp"}
 VIDEO_EXTS = {"mp4", "mov", "webm", "mkv", "avi"}
 
 
