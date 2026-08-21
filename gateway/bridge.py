@@ -7,33 +7,48 @@ from pathlib import Path
 from gateway.router import (BUILTIN_ALIASES, BRIDGE_COMMANDS, ILINK_COMMANDS,
                             PROXY_COMMANDS)
 
-BRIDGE_HELP = {
-    "cancel": "/cancel <任务号> — 取消任务",
-    "tasks": "/tasks — 查看 running/pending 任务",
-    "status": "/status — 队列深度、死信数、当日费用、连接剩余",
-    "new": "/new — 在当前目录开新话题（新 Claude 会话，上下文从零开始）",
-    "adopt": "/adopt [uuid前缀] — 收养终端里创建的 Claude 会话为当前话题（无参数=最新一个）",
-    "delete": "/delete #<序号> — 删话题；/delete task <任务号> — 删任务记录（均需回 Y 确认）",
-    "cd": "/cd <目录|#序号> — 切目录或切话题（#序号见 /sessions）",
-    "sessions": "/sessions — 按目录列出全部话题（/cd #n 切换、/new 开新）",
-    "policy": "/policy <auto|strict|bypass|plan> — 当前话题的权限档位",
-    "bg": "/bg <任务描述> — 转入后台长任务（claude --bg，完成自动回报结果）",
-    "cron": "/cron — 定时任务（日报/巡检）：on|off、time daily <HH:MM>、interval patrol <分钟>",
-    "alias": "/alias add <名> <内容> — 自定义快捷命令（del <名>、list 查看；"
-             "内置：/t=/tasks /s=/status /c=/cancel /cs=/sessions）",
-}
-ILINK_HELP = {
-    "time": "/time — 连接剩余时间",
-    "重新连接": "/重新连接 — 立即重新扫码连接",
-    "help": "/help — 本帮助",
-}
-# 配置代理层（gateway/proxy.py 已实现的三个；hooks/plugins/login 等未提供，
-# 不列——/help 只列当前实际可用命令）
-PROXY_HELP = {
-    "permissions": "/permissions — 查看权限规则；deny add/del、allow add 读写",
-    "mcp": "/mcp — 列出 MCP server；off/on <序号|名字> 启停（下一任务生效）",
-    "config": "/config — gateway 配置概览；set <键> <值> 改常用键（重启生效）",
-}
+# /help 呈现层：桥/iLink 运维/代理三层合并后按用户视角分组（组标题用 ##
+# Markdown——微信新版原生渲染黑体；md_clean 逃生通道下转【】同样可读）。
+# 三层完整性由测试钉住（桥/运维/代理/转发各层至少一条在场，防重组丢层）。
+HELP_INTRO = (
+    "## 🐟 刀鱼 — 微信里的 Claude Code\n\n"
+    "把微信变成服务器上 Claude Code 的遥控器：发任意文字即对话——写代码、"
+    "跑测试、查资料、操控浏览器，进度与结果实时回微信。图片/文件/语音/视频"
+    "直接发即是任务；长任务可转后台；每日自动日报与巡检。命令与 Claude Code "
+    "同一套语法。"
+)
+HELP_GROUPS = [
+    ("任务与会话", [
+        "/tasks（/t）— 运行中/排队任务",
+        "/cancel <任务号>（/c）— 取消任务（无参=当前最新运行中）",
+        "/bg <任务描述> — 转后台长任务，完成自动回报结果",
+        "/status（/s）— 队列/费用/死信/连接状态",
+        "/sessions（/cs）— 话题列表（按目录分组，#序号切换）",
+        "/cd <目录|#序号> — 切目录或切话题",
+        "/new — 当前目录开新话题（上下文从零开始）",
+        "/delete #<序号>|task <任务号> — 删话题/任务（回 Y 确认）",
+        "/policy <auto|strict|bypass|plan> — 当前话题权限档位",
+    ]),
+    ("配置与运维", [
+        "/config — 配置概览；set <键> <值> 改常用键（重启生效）",
+        "/permissions — 权限规则（deny add/del、allow add 读写）",
+        "/mcp — MCP server 列表与 on/off 启停（下一任务生效）",
+        "/cron — 定时日报/巡检开关与参数",
+        "/alias add <名> <内容>|del <名>|list — 自定义快捷命令",
+        "/time — 连接剩余时间",
+        "/重新连接 — 立即重连微信（静默优先，必要时推二维码）",
+        "/help — 本帮助",
+    ]),
+]
+# 末段：微信 ↔ 电脑（服务器终端）交替接续同一话题的用法。
+HELP_HANDOFF = (
+    "## 微信 ↔ 电脑接续同一话题\n"
+    "  · 微信 → 电脑：服务器终端跑 deploy/daoyu-tui.sh 进 TUI，"
+    "选同一会话接着聊\n"
+    "  · 电脑 → 微信：终端退出后，微信发 /adopt（无参=最新）"
+    "收养该会话为当前话题，上下文延续\n"
+    "  · 两端交替续写、上下文一贯；同一话题不能两端同时开（并发冲突）"
+)
 POLICIES = ("auto", "strict", "bypass", "plan")
 
 
@@ -269,14 +284,20 @@ def build_help(db) -> str:
         forwarded = json.loads(db.get_state("slash_commands") or "[]")
     except ValueError:
         forwarded = []
-    lines = ["刀鱼可用命令（与 Claude Code CLI 同一套语法）：", ""]
-    lines += [f"  {d}" for d in BRIDGE_HELP.values()]
-    lines += [f"  {d}" for d in ILINK_HELP.values()]
-    lines += [f"  {d}" for d in PROXY_HELP.values()]
+    lines = [HELP_INTRO, ""]
+    for title, items in HELP_GROUPS:
+        lines.append(f"## {title}")
+        lines += [f"  {it}" for it in items]
+        lines.append("")
     if forwarded:
-        lines.append(f"  可转发给 Claude：{' '.join('/' + c for c in forwarded)}")
-    lines.append("")
-    lines.append("其余文本直接作为对话发给 Claude。")
+        # 转发集可能 20+ 个（superpowers 全套），全列一长行即旧版「乱」源之一：
+        # 列前 8 个实际存在的 + 总数，与实际能力一致且可读。
+        shown = " ".join("/" + c for c in forwarded[:8])
+        more = f" 等 {len(forwarded)} 个" if len(forwarded) > 8 else ""
+        lines.append("## 可转发命令")
+        lines.append(f"  {shown}{more} — 原样转发给 Claude 执行")
+        lines.append("")
+    lines.append(HELP_HANDOFF)
     return "\n".join(lines)
 
 

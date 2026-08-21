@@ -205,10 +205,31 @@ def test_sessions_routed_as_bridge():
 def test_help_merges_three_layers(db):
     db.set_state("slash_commands", json.dumps(["review", "model"]))
     text = build_help(db)
-    assert "/cancel" in text          # 桥命令层
-    assert "/time" in text            # iLink 运维层
+    assert "/cancel" in text          # 桥命令层（任务与会话组）
+    assert "/time" in text            # iLink 运维层（配置与运维组）
     assert "/help" in text            # /help 自身也在列（Minor #8：曾缺失）
     assert "/review" in text          # headless 转发层
+
+
+def test_help_opens_with_intro_and_closes_with_handoff(db):
+    """首段功能概述 + 末段微信 ↔ 电脑接续用法（2026-08-22 重排）。"""
+    text = build_help(db)
+    lines = text.split("\n")
+    assert lines[0] == "## 🐟 刀鱼 — 微信里的 Claude Code"
+    assert "遥控器" in "\n".join(lines[1:5])           # 首段功能概述紧随标题
+    assert "任务与会话" in text and "配置与运维" in text   # 分组标题
+    # 末段接续：/adopt 与 daoyu-tui.sh 两个方向都在，且排在分组之后
+    assert "/adopt" in text and "daoyu-tui.sh" in text
+    assert text.index("## 微信 ↔ 电脑接续同一话题") > text.index("## 任务与会话")
+
+
+def test_help_forwarded_list_truncated_with_count(db):
+    """转发集超 8 个时列前 8 + 总数（全列一长行是旧版可读性痛点）。"""
+    db.set_state("slash_commands",
+                 json.dumps([f"cmd{i}" for i in range(12)]))
+    text = build_help(db)
+    assert "/cmd0" in text and "/cmd7" in text
+    assert "/cmd8" not in text and "等 12 个" in text
 
 
 def test_help_includes_implemented_proxy_commands(db):
