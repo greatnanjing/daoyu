@@ -491,6 +491,30 @@ async def test_config_set_merge_window_zero_disables(db, tmp_path):
     assert _read_gateway_config(tmp_path)["throttle"]["merge_window_s"] == 0.0
 
 
+async def test_config_set_bool_md_clean(db, tmp_path):
+    """M5C2：throttle.md_clean 布尔键——true/false 可写、非法值拒绝、
+    JSON 落盘为 true/false 布尔而非字符串。"""
+    _write_gateway_config(tmp_path)
+    reply = await execute_proxy(
+        db, _route("config", "set throttle.md_clean false"), FakeCfg(tmp_path))
+    assert "已写入" in reply and "重启生效" in reply
+    assert _read_gateway_config(tmp_path)["throttle"]["md_clean"] is False
+    reply = await execute_proxy(
+        db, _route("config", "set throttle.md_clean true"), FakeCfg(tmp_path))
+    assert "已写入" in reply
+    assert _read_gateway_config(tmp_path)["throttle"]["md_clean"] is True
+    reply = await execute_proxy(
+        db, _route("config", "set throttle.md_clean 开"), FakeCfg(tmp_path))
+    assert "不是合法" in reply
+    assert _read_gateway_config(tmp_path)["throttle"]["md_clean"] is True  # 未改
+
+
+async def test_config_overview_shows_md_clean(db, tmp_path):
+    _write_gateway_config(tmp_path)
+    reply = await execute_proxy(db, _route("config"), FakeCfg(tmp_path))
+    assert "md_clean" in reply
+
+
 async def test_config_set_creates_missing_section(db, tmp_path):
     # worker 节在原文件缺失 → set 自动建节，其余键保留
     (tmp_path / "gateway").mkdir()

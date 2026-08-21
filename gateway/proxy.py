@@ -16,7 +16,8 @@ PERMISSIONS_USAGE = ("用法：/permissions deny add <规则> | "
 MCP_USAGE = "用法：/mcp — 列表；/mcp off <序号|名字> 停用；/mcp on <序号|名字> 启用"
 CONFIG_USAGE = ("用法：/config — 概览；/config set <键> <值>（可改键："
                 "throttle.min_send_interval_s/progress_window_s/"
-                "page_char_limit/daily_send_limit/merge_window_s、budget.max_turns/max_usd、"
+                "page_char_limit/daily_send_limit/merge_window_s/md_clean、"
+                "budget.max_turns/max_usd、"
                 "worker.concurrency、cron.disk_threshold_pct/cpu_threshold_pct/"
                 "mem_threshold_pct/load_sustain_min/cert_warn_days/"
                 "alert_silence_h/queue_backlog_warn；重启生效）")
@@ -269,6 +270,7 @@ _THROTTLE_LABELS = (
     ("page_char_limit", "分页字数(page_char_limit)"),
     ("daily_send_limit", "日发送上限(daily_send_limit)"),
     ("merge_window_s", "合并窗口(merge_window_s)"),
+    ("md_clean", "Markdown清洗(md_clean)"),
 )
 
 # /config set 白名单：key -> (解析器, 校验器, 类型名)。范围外的键拒绝（whitelist
@@ -286,12 +288,18 @@ def _is_float(s: str) -> bool:
         return False
 
 
+def _parse_bool(s: str) -> bool:
+    return s.lower() == "true"
+
+
 CONFIG_KEYS = {
     "throttle.min_send_interval_s": (float, lambda v: v > 0, "数值"),
     "throttle.progress_window_s": (float, lambda v: v > 0, "数值"),
     "throttle.page_char_limit": (int, lambda v: v >= 200, "整数"),
     "throttle.daily_send_limit": (int, lambda v: v >= 1, "整数"),
     "throttle.merge_window_s": (float, lambda v: v >= 0, "数值"),
+    "throttle.md_clean": (_parse_bool, lambda v: isinstance(v, bool),
+                          "布尔(true/false)"),
     "budget.max_turns": (int, lambda v: v >= 1, "整数"),
     "budget.max_usd": (float, lambda v: v > 0, "数值"),
     "worker.concurrency": (int, lambda v: 1 <= v <= 10, "整数"),
@@ -364,7 +372,10 @@ def _config_set(path, raw, rest) -> str:
         return (f"键 {key} 不开放微信修改，请直接改 gateway/config.json"
                 f"（可改键见 /config 用法行）")
     parser, check, type_name = spec
-    if not (_is_int(val) if parser is int else _is_float(val)):
+    if parser is _parse_bool:
+        if val.lower() not in ("true", "false"):
+            return f"值 {val} 不是合法{type_name}。"
+    elif not (_is_int(val) if parser is int else _is_float(val)):
         return f"值 {val} 不是合法{type_name}。"
     v = parser(val)
     if parser is float and not math.isfinite(v):
