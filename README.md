@@ -125,7 +125,7 @@ fc-cache -f ~/.local/share/fonts && fc-list :lang=zh   # 应列出 Noto Sans CJK
 | 配置代理（改刀鱼专属配置，效果同 TUI） | `/permissions` | 查看 deny/allow/ask 列表；`/permissions deny add <规则>`、`/permissions deny del <序号>`、`/permissions allow add <规则>` 读写 `claude/settings.json` |
 | | `/mcp` | 列出 `claude/mcp.json` 已装 MCP server（✅/⛔ 状态）；`/mcp off|on <序号|名字>` 启停（下一任务生效，停用不丢配置） |
 | | `/config` | 查看 gateway 配置概要（节流/预算/白名单数，secret 只计个数不回显）；`set <键> <值>` 改白名单键（throttle/budget/worker.concurrency + cron 阈值七键，含 `throttle.merge_window_s`、`throttle.md_clean`，共 16 键，重启生效） |
-| iLink 运维 | `/help` | 全部可用命令（按实际能力动态生成） |
+| iLink 运维 | `/help` | 帮助：功能概述 + 分组命令清单 + 微信 ↔ 电脑接续指南（按实际能力动态生成） |
 | | `/time` | 连接剩余时间 |
 | | `/重新连接` | 立即重连（静默优先免扫码，需扫码时推二维码；Y/N 确认） |
 | 转发 | `/review`、`/compact` 等 | Claude Code headless 可用的斜杠命令原样转发执行（可用集从 `system/init` 事件同步缓存） |
