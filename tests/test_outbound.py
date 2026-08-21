@@ -44,7 +44,11 @@ class TypingBrokenILink(FakeILink):
 class FakeCfg:
     def __init__(self):
         self.throttle = {"min_send_interval_s": 0.0, "page_char_limit": 2000,
-                         "daily_send_limit": 500, "progress_window_s": 0.0}
+                         "daily_send_limit": 500, "progress_window_s": 0.0,
+                         # 显式开清洗：生产默认已翻 False（2026-08-21 真机实测
+                         # 微信双端原生渲染 Markdown），本文件的清洗行为测试
+                         # 不吃 fallback、自带开关
+                         "md_clean": True}
 
 
 def common_msg(user, token, msg_id="1"):
@@ -710,7 +714,9 @@ async def test_outbound_cleans_file_caption(db, monkeypatch, tmp_path):
 
 
 def test_outbox_sent_pages_md_clean_param(db):
-    """折算口径：md_clean_enabled=True 时文本行按清洗后页数折算（四处一致）。"""
+    """折算口径：md_clean_enabled 两态按对应口径折算（四处一致）；
+    签名默认 False（与生产默认同步——2026-08-21 真机实测微信双端原生渲染
+    Markdown 后翻转）。"""
     from common.text import outbox_sent_pages
     from common.mdclean import md_clean
     raw = "**x**" * 400 + "y" * 1000      # 原文 3000 字符、清洗后 1400
@@ -722,5 +728,7 @@ def test_outbox_sent_pages_md_clean_param(db):
         len(split_text(md_clean(raw), 2000))
     assert outbox_sent_pages(rows, 2000, md_clean_enabled=False) == \
         len(split_text(raw, 2000))
+    assert db.sent_pages_today(2000, md_clean_enabled=True) == \
+        len(split_text(md_clean(raw), 2000))
     assert db.sent_pages_today(2000) == \
-        len(split_text(md_clean(raw), 2000))   # db 层透传默认 True
+        len(split_text(raw, 2000))   # db 层默认 False（透传签名默认）

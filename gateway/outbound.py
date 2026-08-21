@@ -32,7 +32,7 @@ class OutboundLoop:
         # _send/_send_media 递增一致（见 common.text.outbox_sent_pages）
         self._sent_today = self._db.sent_pages_today(
             int(self._cfg.throttle["page_char_limit"]),
-            md_clean_enabled=bool(self._cfg.throttle.get("md_clean", True)))
+            md_clean_enabled=bool(self._cfg.throttle.get("md_clean", False)))
         self._day = time.localtime().tm_yday
         self._last_send = 0.0
         self._limit_audited_day = -1         # daily_limit 熔断 audit 已记过的 yday
@@ -66,7 +66,7 @@ class OutboundLoop:
         与 page_char_limit 同一刷新粒度，生产口径均为重启生效）。清洗必须发生
         在 split_text 之前——分页后清洗会让单页增量越过 MAX_PAGE_BYTES 字节硬闸
         （16384B 静默丢消息）。"""
-        if not bool(self._cfg.throttle.get("md_clean", True)):
+        if not bool(self._cfg.throttle.get("md_clean", False)):
             return text
         return md_clean(text)
 
@@ -79,7 +79,7 @@ class OutboundLoop:
             self._day = today
             self._sent_today = self._db.sent_pages_today(
                 int(self._cfg.throttle["page_char_limit"]),
-                md_clean_enabled=bool(self._cfg.throttle.get("md_clean", True)))
+                md_clean_enabled=bool(self._cfg.throttle.get("md_clean", False)))
             await self._media_cleanup_once()
         if not self._token_ref["token"]:
             # I-1 守卫：token 空窗期（401/403 清空 → 重连扫码窗最长 600s）绝不

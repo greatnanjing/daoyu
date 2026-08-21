@@ -37,7 +37,7 @@ def split_text(text: str, limit: int) -> list[str]:
 
 
 def outbox_sent_pages(rows, page_char_limit: int,
-                      md_clean_enabled: bool = True) -> int:
+                      md_clean_enabled: bool = False) -> int:
     """已送达 outbox 行折算微信侧实际发送条数（出站日计数口径，gateway 出站
     协程运行时与 bridge /status、重启恢复共用——三处必须同一折算）：
     文本行 = len(split_text(md_clean 后文本))——与运行时「先清洗后分页」一致

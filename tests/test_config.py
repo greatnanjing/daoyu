@@ -43,7 +43,7 @@ def test_load_config_maps_fields(tmp_path):
     assert cfg.claude_bin == ["node", "/opt/claude.js"]
     assert cfg.throttle == {"min_send_interval_s": 2.0, "progress_window_s": 3.0,
                             "page_char_limit": 1500, "daily_send_limit": 300,
-                            "merge_window_s": 2.0, "md_clean": True}
+                            "merge_window_s": 2.0, "md_clean": False}
     assert cfg.budget == Budget(max_turns=30, max_usd=2.5)
     assert cfg.worker == {"concurrency": 2, "poll_interval_s": 0.2,
                           "bg_poll_s": 10, "bg_blocked_timeout_s": 1800}

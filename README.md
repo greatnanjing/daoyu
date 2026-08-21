@@ -135,7 +135,7 @@ fc-cache -f ~/.local/share/fonts && fc-list :lang=zh   # 应列出 Noto Sans CJK
 
 **连发消息自动合并（M5C1）**：连发几条纯文本会合并成**一个 prompt**（Claude 一轮看全上下文，而非逐段各答）——首条即时 ACK「正在合并」、窗口内（默认 2s）追加的消息静默、到点「已合并 N 条，开始处理」。语音转写文字同样合并。`/config set throttle.merge_window_s <秒>` 可调（0 = 禁用，退回逐条即建任务）。任务排队时 ACK 显示「排在第 M 位（当前任务完成后接上）」——追加输入会作为下一轮接上（`claude -p` stdin 一次性关闭，无法中途注入运行中回合，诚实告知队列位次）。
 
-**出站 Markdown 清洗（M5C2）**：Claude 的回复常带 Markdown（标题/粗体/代码围栏/表格），微信纯文本渲染会露出原样的 `##`、`**`、`` ``` `` 记号——投递前自动转写为纯文本可读形态（标题转【】、围栏代码缩进块、表格转竖排列表等；outbox 恒存**原文**，清洗只在发送侧、幂等可重放）。`throttle.md_clean`（默认 true）为总开关，`/config set throttle.md_clean false` 关闭后原文直发，重启生效。
+**出站 Markdown 清洗（M5C2，默认关闭）**：Claude 的回复常带 Markdown（标题/粗体/代码围栏/表格）。2026-08-21 真机实测发现**微信新版手机+PC 双端原生渲染 Markdown**（`##`→黑体标题、`**`→粗体、表格可读、代码块吞围栏保留内容）——故默认**原文直发**享受原生渲染；`throttle.md_clean` 开关默认 false。老客户端/某类消息渲染异常时可 `/config set throttle.md_clean true` 开启清洗（投递前转写为纯文本可读形态：标题转【】、围栏代码缩进块、表格转竖排列表等；outbox 恒存**原文**，清洗只在发送侧、幂等可重放），重启生效。
 
 ### strict 档审批（M2）
 

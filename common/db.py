@@ -567,7 +567,7 @@ class Database:
         self._conn.commit()
 
     def sent_pages_today(self, page_char_limit: int,
-                         md_clean_enabled: bool = True) -> int:
+                         md_clean_enabled: bool = False) -> int:
         """今日（本地零点起）已送达的微信侧发送条数——出站熔断计数的重启恢复
         与 /status 展示共用。折算口径见 common.text.outbox_sent_pages（M5C2 起
         文本行同过 md_clean，md_clean_enabled 与运行时开关一致）；
