@@ -48,6 +48,98 @@ async def _save_inbound_images(db, cfg, ilink, image_items, from_user):
     return paths, last_err
 
 
+_pending_timers: dict[str, asyncio.TimerHandle] = {}
+
+
+def _merge_window_s(cfg) -> float | None:
+    """合并窗口秒数；throttle 缺失或 merge_window_s<=0 → None（禁用：立即建任务，
+    旧路径行为）。生产 load_config 默认 merge_window_s=2.0 恒启用；测试 fake cfg
+    常不设 throttle 或缺 merge_window_s 键 → 禁用，既有断言立即建任务的测试零回归。"""
+    t = getattr(cfg, "throttle", None)
+    if not t:
+        return None
+    try:
+        w = float(t.get("merge_window_s", 0))
+    except (TypeError, ValueError):
+        return None
+    return w if w > 0 else None
+
+
+async def _flush_merge_pending(db, cfg, pool, outbound, from_user,
+                               *, recover: bool = False) -> None:
+    """flush 该用户暂存：拼 texts → create_task → 队列感知 ACK → 清 KV/计时。
+    recover=True 时 ACK 措辞「已恢复」（启动恢复路径）。无暂存则空操作。"""
+    _pending_timers.pop(from_user, None)
+    key = f"merge_pending:{from_user}"
+    raw = db.get_state(key)
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        db.delete_state(key)
+        return
+    db.delete_state(key)
+    session = db.get_session(data.get("session_id")) or \
+        db.get_active_binding(from_user, cfg.default_cwd)
+    prompt = "\n".join(data.get("texts") or [])
+    if not prompt:
+        return
+    db.create_task(None, session.id, prompt, kind="chat")
+    # create_task 已 commit；pending_task_count 此刻含刚建的本条 → 即队列位次（pos==1 无前序）
+    pos = db.pending_task_count(session.id)
+    verb = "已恢复" if recover else "已合并"
+    ack = f"✅ {verb} {len(data['texts'])} 条消息，开始处理"
+    if pos > 1:
+        ack += f"（当前任务完成后接上，你排在第 {pos} 位）"
+    db.enqueue(None, from_user, ack)
+    if recover:
+        db.audit("merge_recover", f"user={from_user} count={len(data['texts'])}")
+    if pool:
+        await pool.submit_check()
+    if outbound:
+        outbound.notify()
+
+
+def _schedule_flush(db, cfg, pool, outbound, from_user) -> None:
+    """重置/设置该用户的 flush 计时器（asyncio call_later；重启丢 KV 兜底）。"""
+    window = float(cfg.throttle.get("merge_window_s", 2.0))
+    old = _pending_timers.pop(from_user, None)
+    if old:
+        old.cancel()
+    loop = asyncio.get_event_loop()
+    _pending_timers[from_user] = loop.call_later(
+        window, lambda: asyncio.create_task(
+            _flush_merge_pending(db, cfg, pool, outbound, from_user)))
+
+
+async def _append_merge_pending(db, cfg, pool, outbound, from_user,
+                                text: str, msg_id: str) -> None:
+    """纯 chat 文本进窗口：KV 在则追加+重置计时；不在则建+首条 ACK+调度 flush。"""
+    key = f"merge_pending:{from_user}"
+    cur = db.get_state(key)
+    if cur:
+        try:
+            data = json.loads(cur)
+            data["texts"] = (data.get("texts") or []) + [text]
+            db.set_state(key, json.dumps(data, ensure_ascii=False))
+        except ValueError:
+            db.delete_state(key)
+            cur = None
+    if not cur:
+        session = db.get_active_binding(from_user, cfg.default_cwd)
+        data = {"texts": [text], "session_id": session.id,
+                "first_msg_id": msg_id, "started_at": int(time.time())}
+        db.set_state(key, json.dumps(data, ensure_ascii=False))
+        window = float(cfg.throttle.get("merge_window_s", 2.0))
+        db.enqueue(None, from_user,
+                   f"✅ 收到，正在合并后续消息"
+                   f"（{window:.0f}s 内无新增即开始处理）")
+        if outbound:
+            outbound.notify()
+    _schedule_flush(db, cfg, pool, outbound, from_user)
+
+
 async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None:
     """入站管道：类型过滤 → 白名单 → 落盘去重 → 路由 → 本地秒回或入队。
     M3：图片（type==2）下载落盘后"发图即对话"；M5B：语音（3）转写即文字/
@@ -218,6 +310,7 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
     if media_lines and not text:
         # 纯媒体消息：不走路由（空文本无命令语义），直接 chat 任务——媒体即对话
         session = db.get_active_binding(from_user, cfg.default_cwd)
+        await _flush_merge_pending(db, cfg, pool, outbound, from_user)
         db.create_task(None, session.id, "\n".join(media_lines), kind="chat")
         db.enqueue(None, from_user, "✅ 收到媒体，处理中")
         if pool:
@@ -250,13 +343,23 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
         db.enqueue(None, from_user, await execute_proxy(db, r, cfg))
     else:  # chat / forward
         session = db.get_active_binding(from_user, cfg.default_cwd)   # 当前话题指针
-        prompt = text if r.kind == "chat" else f"/{r.command} {r.args}".strip()
-        if media_lines:
-            prompt += "\n" + "\n".join(media_lines)
-        db.create_task(None, session.id, prompt, kind=r.kind)
-        db.enqueue(None, from_user, "✅ 收到，处理中")
-        if pool:
-            await pool.submit_check()   # 即时唤醒调度，不等下一个轮询周期
+        if r.kind == "chat" and not media_lines and _merge_window_s(cfg) is not None:
+            # M5C1：纯文本进合并窗口（不立即建任务）；语音转写并入 text_parts
+            # 同样走此路径（语义即用户文字）。合并禁用（merge_window_s<=0 或
+            # throttle 缺失）时落 else 立即建任务，保持既有行为零回归。
+            await _append_merge_pending(db, cfg, pool, outbound, from_user,
+                                        text, msg_key)
+        else:
+            # forward（slash 转发）或 chat-with-media 或合并禁用：先 flush 暂存
+            # （序不倒）再建任务
+            await _flush_merge_pending(db, cfg, pool, outbound, from_user)
+            prompt = text if r.kind == "chat" else f"/{r.command} {r.args}".strip()
+            if media_lines:
+                prompt += "\n" + "\n".join(media_lines)
+            db.create_task(None, session.id, prompt, kind=r.kind)
+            db.enqueue(None, from_user, "✅ 收到，处理中")
+            if pool:
+                await pool.submit_check()
     if outbound:
         outbound.notify()
 
@@ -345,6 +448,16 @@ async def main_async() -> None:
         log.info("崩溃恢复：failed 出站消息已重置为 pending")
     if db.dead_letter_count():
         db.audit("startup_dead_letter", f"count={db.dead_letter_count()}")
+
+    # M5C1：合并窗口崩溃恢复——残留 merge_pending KV 逐个 flush
+    recovered = db.scan_merge_pending()
+    for user, raw in recovered:
+        try:
+            await _flush_merge_pending(db, cfg, None, None, user, recover=True)
+        except Exception as e:
+            log.warning("合并窗口恢复失败 user=%s: %r", user, e)
+    if recovered:
+        log.info("崩溃恢复：恢复 %d 个合并窗口暂存", len(recovered))
 
     # ---- 版本探测（TRD §11 版本漂移对策）：实测版本 vs EXPECTED_CLAUDE_VERSION，
     # 漂移/失败只 audit+warning 不阻断（fail-open）。放启动一次性，不进
