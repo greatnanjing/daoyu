@@ -51,6 +51,30 @@ async def _save_inbound_images(db, cfg, ilink, image_items, from_user):
 _pending_timers: dict[str, asyncio.TimerHandle] = {}
 
 
+def _expand_alias(db, from_user: str, text: str) -> str | None:
+    """用户别名展开（M5C3）：仅斜杠消息；KV alias:<user> 命中返回「值 + 空格 +
+    附加参数」。未命中/非斜杠/坏 JSON 返回 None。展开结果不再二次展开——
+    调用方只调一次（防 /a→/b→/a 链式循环；内置别名在 router 层兜底）。"""
+    stripped = text.strip()
+    if not stripped.startswith("/"):
+        return None
+    parts = stripped[1:].split(None, 1)
+    if not parts:
+        return None
+    raw = db.get_state(f"alias:{from_user}")
+    if not raw:
+        return None
+    try:
+        aliases = json.loads(raw)
+    except ValueError:
+        return None          # 坏 KV 容错：当无别名，不炸入站
+    value = aliases.get(parts[0])
+    if not value:
+        return None
+    args = parts[1] if len(parts) > 1 else ""
+    return f"{value} {args}".strip()
+
+
 def _merge_window_s(cfg) -> float | None:
     """合并窗口秒数；throttle 缺失或 merge_window_s<=0 → None（禁用：立即建任务，
     旧路径行为）。生产 load_config 默认 merge_window_s=2.0 恒启用；测试 fake cfg
@@ -331,6 +355,10 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
     if not text and not media_lines:
         return   # 空消息（无 text_item 亦无已知媒体——贴纸/未知 item）不建任务、
         # 不进合并窗口（防空 prompt + 误导性「正在合并」ACK）
+    if text.startswith("/"):
+        expanded = _expand_alias(db, from_user, text)
+        if expanded is not None:
+            text = expanded   # 展开后照常 route（一次，不再展开）
     r = route(text, slash)
 
     if r.kind == "ilink":
