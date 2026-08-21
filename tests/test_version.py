@@ -6,6 +6,8 @@ FAKE_CLAUDE_VERSION env 注入可模拟匹配/漂移两分支。
 import sys
 from pathlib import Path
 
+import pytest
+
 from worker.cli_builder import wrap_windows_command
 from worker.version import (EXPECTED_CLAUDE_VERSION, check_claude_version,
                             parse_claude_version, probe_claude_version)
@@ -43,6 +45,9 @@ def test_wrap_windows_command():
     assert wrap_windows_command([]) == []
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="npm shim 解析是 Windows 专属行为（.cmd 内 %dp0% 反斜杠"
+                           "路径仅 Windows 解析直达 exe；Linux 走 cmd /c 回退）")
 def test_wrap_windows_command_resolves_npm_shim_exe(tmp_path):
     """npm shim 解析：.cmd 内 "%dp0%\\...\\x.exe" 指向真实 exe 时直达
     （cmd /c 对含空格引号路径有剥引号切分的静默失败坑，exe 直达是首选）。"""

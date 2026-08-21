@@ -81,7 +81,15 @@ async def test_strict_task_temp_merged_mcp_config_and_cleanup(db, tmp_path, monk
     assert os.path.basename(tmp_cfg_path).startswith("daoyu-mcp-")
     # 子进程存活期快照的临时 config 内容：静态清单完整合并 + daoyu 审批条目
     servers = log["mcp_config"]["mcpServers"]
-    assert servers["chrome-devtools"] == static["chrome-devtools"]
+    # 静态清单完整合并：锚定身份字段（type/command/args 前缀）。Linux 有 chrome
+    # 装配（~/chrome-libs + headless-shell 在场）时 env/args 会被 inject_linux_chrome
+    # 注入增量（env 加 LD_LIBRARY_PATH/清代理、args 追加 --headless 等）——生产
+    # 期望行为（服务器实测依赖），不锚定 env。
+    merged = servers["chrome-devtools"]
+    assert merged["type"] == static["chrome-devtools"]["type"]
+    assert merged["command"] == static["chrome-devtools"]["command"]
+    assert merged["args"][:len(static["chrome-devtools"]["args"])] == \
+        static["chrome-devtools"]["args"]
     entry = servers[APPROVAL_MCP_SERVER]
     assert entry["type"] == "stdio"
     assert entry["command"] == sys.executable
