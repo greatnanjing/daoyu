@@ -30,10 +30,9 @@ class OutboundLoop:
         # 重启恢复：当日已发送量按已送达 outbox 行折算（文本分页 + 图片 caption+图），
         # 熔断日计数不再重启清零（M1 Task 11 Minor 清偿）。折算口径与运行时
         # _send/_send_media 递增一致（见 common.text.outbox_sent_pages）
-        self._mdclean = bool(self._cfg.throttle.get("md_clean", True))
         self._sent_today = self._db.sent_pages_today(
             int(self._cfg.throttle["page_char_limit"]),
-            md_clean_enabled=self._mdclean)
+            md_clean_enabled=bool(self._cfg.throttle.get("md_clean", True)))
         self._day = time.localtime().tm_yday
         self._last_send = 0.0
         self._limit_audited_day = -1         # daily_limit 熔断 audit 已记过的 yday
@@ -63,10 +62,13 @@ class OutboundLoop:
             self._db.enqueue(None, user, text)
 
     def _mdc(self, text: str) -> str:
-        """出站 Markdown 清洗（M5C2）：throttle.md_clean 开关（默认开）。
-        清洗必须发生在 split_text 之前——分页后清洗会让单页增量越过
-        MAX_PAGE_BYTES 字节硬闸（16384B 静默丢消息）。"""
-        return md_clean(text) if self._mdclean else text
+        """出站 Markdown 清洗（M5C2）：throttle.md_clean 开关（默认开，现读——
+        与 page_char_limit 同一刷新粒度，生产口径均为重启生效）。清洗必须发生
+        在 split_text 之前——分页后清洗会让单页增量越过 MAX_PAGE_BYTES 字节硬闸
+        （16384B 静默丢消息）。"""
+        if not bool(self._cfg.throttle.get("md_clean", True)):
+            return text
+        return md_clean(text)
 
     async def _drain_once(self) -> None:
         today = time.localtime().tm_yday
@@ -77,7 +79,7 @@ class OutboundLoop:
             self._day = today
             self._sent_today = self._db.sent_pages_today(
                 int(self._cfg.throttle["page_char_limit"]),
-                md_clean_enabled=self._mdclean)
+                md_clean_enabled=bool(self._cfg.throttle.get("md_clean", True)))
             await self._media_cleanup_once()
         if not self._token_ref["token"]:
             # I-1 守卫：token 空窗期（401/403 清空 → 重连扫码窗最长 600s）绝不

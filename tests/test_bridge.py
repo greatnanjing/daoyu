@@ -366,9 +366,17 @@ async def test_alias_del(db):
                                  "u@im.wechat", FakeCfg())
     assert "已删除别名 /go" in reply
     assert _load_aliases(db) == {}
+    assert any(r["kind"] == "alias_del"
+               for r in db._conn.execute("SELECT kind FROM audit_log"))
     reply = await execute_bridge(db, FakePool([]), _route("alias", "del go"),
                                  "u@im.wechat", FakeCfg())
     assert "没有别名 /go" in reply
+
+
+async def test_alias_unknown_subcommand(db):
+    reply = await execute_bridge(db, FakePool([]), _route("alias", "foo x"),
+                                 "u@im.wechat", FakeCfg())
+    assert "用法" in reply and "add" in reply and "del" in reply and "list" in reply
 
 
 async def test_alias_add_validation(db):

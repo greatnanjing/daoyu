@@ -398,9 +398,10 @@ def _alias(db, arg: str, from_user: str) -> str:
 
     def _load() -> dict:
         try:
-            return json.loads(db.get_state(key) or "{}")
+            v = json.loads(db.get_state(key) or "{}")
         except ValueError:
             return {}
+        return v if isinstance(v, dict) else {}   # 非 dict JSON（手改/损坏）当无别名
 
     if op == "list":
         aliases = _load()
@@ -417,7 +418,7 @@ def _alias(db, arg: str, from_user: str) -> str:
         if len(sub) != 2:
             return "用法：/alias add <名> <内容>（内容可含空格；del/list 见 /help）"
         name, value = sub[0], sub[1].strip()
-        if not name or len(name) > 16:
+        if len(name) > 16:   # split(None) 产物必非空，仅校验上限
             return "别名名须为 1~16 个字符（不含空格）。"
         if not value or len(value) > 2000:
             return "别名内容须为 1~2000 字符。"

@@ -104,3 +104,42 @@ def test_nested_inline_in_block():
 
 def test_escaped_punctuation():
     assert md_clean(r"1\. 不是有序") == "1. 不是有序"
+
+
+# ---- Minor 清偿批：嵌套 fence / 表格转义与畸形回退 / 角落补齐 ----
+
+def test_nested_fence_inner_not_closing():
+    """外层 ````` 内层 ```：内层长度不足不当闭围栏（CommonMark 语义），
+    内容保留原样（含内层围栏行）。"""
+    md = "````\nouter\n```inner\n````\nafter"
+    assert md_clean(md) == "    outer\n    ```inner\nafter"
+
+
+def test_table_escaped_pipe_in_cell():
+    md = "| 命令 \\| 参数 | 说明 |\n|---|---|\n| ls \\| -l | 列目录 |"
+    assert md_clean(md) == "• 命令 | 参数：ls | -l\n• 说明：列目录"
+
+
+def test_table_ragged_row_falls_back():
+    """两列 header 配三列数据行：不转置不截断，走通用竖线形态。"""
+    md = "| a | b |\n|---|---|\n| 1 | 2 | 3 |"
+    assert md_clean(md) == "• a ｜ b\n• 1 ｜ 2 ｜ 3"
+
+
+def test_unclosed_fence_to_eof():
+    """未闭合 fence 到 EOF：内容原样缩进、自然终止不炸。"""
+    assert md_clean("前\n```\ncode") == "前\n    code"
+
+
+def test_table_header_and_sep_only():
+    """仅 header+分隔行无数据行：通用形态输出 header 一行。"""
+    assert md_clean("| a | b |\n|---|---|") == "• a ｜ b"
+
+
+def test_truncated_markdown_fragment_harmless():
+    """死信告警 60 字符截断产生的不完整模式（不成对 **、单反引号）：
+    残缺模式原样保留——不炸不误转。行中 ## 不在行首不转写（heading 行首
+    锚定是设计语义，放宽会误伤正常文本；brief 断言原期望行中 ## 转写，
+    与实现保守语义冲突，按实际行为钉住，见 minor-fix-report.md）。"""
+    s = "⚠️ 出站死信（id=1）：## 标题 **加粗未闭 `code"
+    assert md_clean(s) == s

@@ -512,7 +512,7 @@ async def test_config_set_bool_md_clean(db, tmp_path):
 async def test_config_overview_shows_md_clean(db, tmp_path):
     _write_gateway_config(tmp_path)
     reply = await execute_proxy(db, _route("config"), FakeCfg(tmp_path))
-    assert "md_clean" in reply
+    assert "Markdown清洗" in reply   # 中文标签只在 _THROTTLE_LABELS 出现（CONFIG_USAGE 干扰关掉）
 
 
 async def test_config_set_creates_missing_section(db, tmp_path):

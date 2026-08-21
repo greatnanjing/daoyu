@@ -298,6 +298,7 @@ CONFIG_KEYS = {
     "throttle.page_char_limit": (int, lambda v: v >= 200, "整数"),
     "throttle.daily_send_limit": (int, lambda v: v >= 1, "整数"),
     "throttle.merge_window_s": (float, lambda v: v >= 0, "数值"),
+    # bool 值域无范围可校——check 为槽位占位（isinstance 恒真，防未来换解析器）
     "throttle.md_clean": (_parse_bool, lambda v: isinstance(v, bool),
                           "布尔(true/false)"),
     "budget.max_turns": (int, lambda v: v >= 1, "整数"),

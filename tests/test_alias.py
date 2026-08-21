@@ -124,6 +124,16 @@ async def test_alias_expansion_single_layer_builtin_fallback(tmp_path):
     assert any("没有运行中或排队的任务" in t for t in _outbox_texts(db))
 
 
+async def test_alias_leading_space_slash(tmp_path):
+    """前导空格斜杠消息同样走别名展开（与 route 的 strip 语义一致）。"""
+    db = Database(tmp_path / "t.db"); db.ensure_schema()
+    _set_alias(db, "go", "跑全量测试")
+    cfg = Cfg(tmp_path, window=0.05)
+    await handle_inbound(db, cfg, None, None, _msg(1, " /go"), ilink=None)
+    await asyncio.sleep(0.15)
+    assert _task_prompts(db) == ["跑全量测试"]
+
+
 async def test_builtin_alias_without_user_override(tmp_path):
     """无用户覆盖时 /t 走 router 内置映射（Task 4）→ bridge tasks。"""
     db = Database(tmp_path / "t.db"); db.ensure_schema()

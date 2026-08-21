@@ -68,11 +68,14 @@ def _expand_alias(db, from_user: str, text: str) -> str | None:
         aliases = json.loads(raw)
     except ValueError:
         return None          # 坏 KV 容错：当无别名，不炸入站
+    if not isinstance(aliases, dict):
+        return None
     value = aliases.get(parts[0])
     if not value:
         return None
     args = parts[1] if len(parts) > 1 else ""
-    return f"{value} {args}".strip()
+    expanded = f"{value} {args}".strip()
+    return expanded or None   # 纯空白值展开为空串时当无别名（防绕过空消息守卫）
 
 
 def _merge_window_s(cfg) -> float | None:
@@ -355,7 +358,7 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
     if not text and not media_lines:
         return   # 空消息（无 text_item 亦无已知媒体——贴纸/未知 item）不建任务、
         # 不进合并窗口（防空 prompt + 误导性「正在合并」ACK）
-    if text.startswith("/"):
+    if text.strip().startswith("/"):   # 与 route 的 strip 语义对齐（前导空格斜杠同走展开）
         expanded = _expand_alias(db, from_user, text)
         if expanded is not None:
             text = expanded   # 展开后照常 route（一次，不再展开）

@@ -43,8 +43,12 @@ def md_clean(text: str) -> str:
     while i < n:
         marker = _fence_marker(lines[i])
         if marker:
+            ch, ln = marker
             i += 1
-            while i < n and _fence_marker(lines[i]) != marker:
+            while i < n:
+                m2 = _fence_marker(lines[i])
+                if m2 and m2[0] == ch and m2[1] >= ln:
+                    break
                 out.append("    " + lines[i] if lines[i].strip() else lines[i])
                 i += 1
             i += 1   # 闭围栏（未闭合到 EOF 也自然终止）
@@ -63,10 +67,12 @@ def md_clean(text: str) -> str:
     return "\n".join(out)
 
 
-def _fence_marker(line: str) -> str | None:
-    """行是 fenced 开/闭围栏时返回规范标记（```/~~~），否则 None。"""
+def _fence_marker(line: str) -> tuple[str, int] | None:
+    """行是 fenced 开/闭围栏时返回 (围栏字符, 长度)，否则 None。闭围栏须
+    同字符且长度 ≥ 开围栏（CommonMark 嵌套语义：外层 ````` 内层 ``` 时内层
+    不是闭围栏，是内容）。"""
     m = _FENCE_RE.match(line)
-    return m.group(1)[0] * 3 if m else None
+    return (m.group(1)[0], len(m.group(1))) if m else None
 
 
 def _is_table_row(line: str) -> bool:
@@ -85,7 +91,10 @@ def _cells(row: str) -> list[str]:
         s = s[1:]
     if s.endswith("|"):
         s = s[:-1]
-    return [c.strip() for c in s.split("|")]
+    # GFM 语义：cell 内 \| 是转义竖线（字面 |），先占位再 split 再还原，
+    # 防止转义竖线被当列分隔切开
+    parts = s.replace("\\|", "\x00").split("|")
+    return [c.replace("\x00", "|").strip() for c in parts]
 
 
 def _clean_table(rows: list[str]) -> list[str]:
@@ -93,7 +102,9 @@ def _clean_table(rows: list[str]) -> list[str]:
     • c0 ｜ c1 ｜ …（header 同形态）。分隔行不进 rows（收集时已跳过）。"""
     header = _cells(rows[0])
     data = [_cells(r) for r in rows[1:]]
-    if len(header) == 2 and len(data) == 1:
+    # 转置须 header 与唯一数据行列数都为 2：畸形行（列数不齐）不满足则走
+    # 通用形态，防 zip 静默截断丢列
+    if len(header) == 2 and len(data) == 1 and len(data[0]) == 2:
         return [_inline(f"• {h}：{v}") for h, v in zip(header, data[0])]
     out = [_inline("• " + " ｜ ".join(header))]
     out += [_inline("• " + " ｜ ".join(r)) for r in data]

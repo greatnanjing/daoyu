@@ -9,11 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from common.db import Database
+from common.mdclean import md_clean
 from common.models import Budget
 from gateway.app import handle_inbound
 from gateway.outbound import OutboundLoop
 from worker.pool import WorkerPool
-from worker.runner import TaskRunner
+from worker.runner import TaskRunner, _PROMPT_SUFFIX
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ROOT = Path(__file__).resolve().parents[1]
@@ -363,7 +364,6 @@ async def test_e2e_markdown_result_kept_raw_in_outbox(tmp_path, monkeypatch):
               "| 环境 | 版本 |\n|---|---|\n| prod | 2.1.235 |\n\n"
               "```bash\nsystemctl restart daoyu\n```")
         assert any(t == md for t in _texts(db))       # outbox 原文
-        from common.mdclean import md_clean
         assert md_clean(md) == (
             "【部署报告】\n\n状态：「成功」，详见 日志(http://x/y)。\n\n"
             "• 环境：prod\n• 版本：2.1.235\n\n"
@@ -390,7 +390,6 @@ async def test_e2e_alias_full_pipeline(tmp_path, monkeypatch):
         # fake claude 的 stdin 收到展开后 prompt（不是 /go）；展开后是普通文本
         # → runner 恒追加 _PROMPT_SUFFIX 环境约定后缀（brief 精确相等断言未计
         # 入该既有机制，此处按实际形态钉住）
-        from worker.runner import _PROMPT_SUFFIX
         assert (tmp_path / "stdin.log").read_text(encoding="utf-8") == \
             "跑全量测试并总结" + _PROMPT_SUFFIX
     finally:

@@ -668,6 +668,47 @@ async def test_outbound_cleans_caption(db, monkeypatch, tmp_path):
             await task
 
 
+async def test_outbound_cleans_file_caption(db, monkeypatch, tmp_path):
+    """kind='file' 行 caption 同过 _mdc（M5B file 投递路径）。"""
+    from types import SimpleNamespace
+    import gateway.outbound as ob
+
+    # fake 字段照 build_file_item(up, name) 实际读取补齐：download_param /
+    # aes_key（.hex()）/ size_raw（str()）——对齐 media.UploadedMedia 字段集
+    async def fake_upload(ilink, path, to_user, token, base_url=None,
+                          media_type=None):
+        return SimpleNamespace(filekey="f" * 32, download_param="dp",
+                               aes_key=b"k" * 16, size_cipher=1, size_raw=3)
+
+    monkeypatch.setattr(ob, "upload_media", fake_upload)
+
+    class FakeFileILink(FakeILink):
+        async def send_media_message(self, to_user, ctx, item=None,
+                                     token=None, base_url=None):
+            self.sent.append((to_user, ctx, "FILE"))
+            return True
+
+    il = FakeFileILink()
+    db.insert_message(common_msg("u@im.wechat", "CTX"))
+    p = tmp_path / "a.txt"
+    p.write_text("abc", encoding="utf-8")
+    _mk_file_outbox_row(db, p, caption="**文件说明**")   # kind='file' 行
+    loop = OutboundLoop(db, il, FakeCfg(),
+                        token_ref={"token": "T", "base_url": ""},
+                        typing_state={})
+    task = asyncio.create_task(loop.run_forever())
+    try:
+        assert await wait_until(lambda: db._conn.execute(
+            "SELECT state FROM outbox WHERE kind='file'"
+        ).fetchone()["state"] == "sent")
+        assert il.sent[0][2] == "文件说明"      # caption **文件说明** 清洗后
+        assert il.sent[1][2] == "FILE"         # 媒体条随后
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 def test_outbox_sent_pages_md_clean_param(db):
     """折算口径：md_clean_enabled=True 时文本行按清洗后页数折算（四处一致）。"""
     from common.text import outbox_sent_pages

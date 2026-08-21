@@ -48,7 +48,13 @@ def outbox_sent_pages(rows, page_char_limit: int,
     n = 0
     for r in rows:
         if r["kind"] in ("image", "file"):
-            n += 1 + (1 if str(r["caption"] or "").strip() else 0)
+            cap = str(r["caption"] or "").strip()
+            if md_clean_enabled:
+                # 与运行时同构：清洗后判空。md_clean 转写保内容（规则均要求
+                # 紧贴非空白字符），非空 caption 清洗后必非空——此判定在现行
+                # 规则下等价，加清洗只为口径绝对一致。
+                cap = md_clean(cap).strip()
+            n += 1 + (1 if cap else 0)
         else:
             t = md_clean(r["text"]) if md_clean_enabled else r["text"]
             n += len(split_text(t, page_char_limit))
