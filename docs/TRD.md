@@ -245,7 +245,7 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 
 ## 10. 测试策略
 
-> 终态：487 个自动化测试全绿（Windows）/ 486 passed + 1 skipped（Linux，skip 为 Windows 专属 npm shim 测试）——单元/集成/E2E 三层，E2E 用 fake iLink + fake claude 子进程覆盖收发/审批往返/bg 冒烟/媒体双向/通知/连发合并/别名全链路；真机 E2E 项（多轮对话、/review、崩溃恢复、审批 Y/N、bg、媒体、playwright、/cancel 进程清理、日报/巡检、通知四入口、连发合并、md_clean 开关双态）已在 M1~M5C3 各验收期逐项实证，记录见 `.superpowers/sdd/progress.md` 台账与各 spec 验收结论节。
+> 终态：489 个自动化测试全绿（Windows）/ 488 passed + 1 skipped（Linux，skip 为 Windows 专属 npm shim 测试）——单元/集成/E2E 三层，E2E 用 fake iLink + fake claude 子进程覆盖收发/审批往返/bg 冒烟/媒体双向/通知/连发合并/别名全链路；真机 E2E 项（多轮对话、/review、崩溃恢复、审批 Y/N、bg、媒体、playwright、/cancel 进程清理、日报/巡检、通知四入口、连发合并、md_clean 开关双态）已在 M1~M5C3 各验收期逐项实证，记录见 `.superpowers/sdd/progress.md` 台账与各 spec 验收结论节。
 
 | 层 | 内容 |
 |---|---|
