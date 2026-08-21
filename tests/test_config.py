@@ -8,7 +8,8 @@ from common.models import Budget
 
 
 def _write_config(tmp_path, raw):
-    (tmp_path / "gateway").mkdir()
+    # exist_ok：同一测试内可多次覆写 config（notify 默认+合并测试写两次）
+    (tmp_path / "gateway").mkdir(exist_ok=True)
     (tmp_path / "gateway" / "config.json").write_text(
         json.dumps(raw, ensure_ascii=False), encoding="utf-8")
 
@@ -75,6 +76,17 @@ def test_load_config_partial_throttle_merged(tmp_path):
     cfg = load_config(tmp_path)
     assert cfg.throttle["page_char_limit"] == 800
     assert cfg.throttle["progress_window_s"] == 2.5
+
+
+def test_load_config_notify_defaults_and_merge(tmp_path):
+    # M5A：notify 节默认 + 部分覆盖合并（不整体替换）
+    _write_config(tmp_path, {})
+    cfg = load_config(tmp_path)
+    assert cfg.notify == {"listen": "127.0.0.1:8417", "http_enabled": True}
+    _write_config(tmp_path, {"notify": {"listen": "127.0.0.1:9000"}})
+    cfg = load_config(tmp_path)
+    assert cfg.notify["listen"] == "127.0.0.1:9000"
+    assert cfg.notify["http_enabled"] is True
 
 
 def test_load_config_missing_file_exits(tmp_path):

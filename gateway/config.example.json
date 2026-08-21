@@ -39,5 +39,9 @@
     "cert_paths": ["/etc/letsencrypt/live"],
     "alert_silence_h": 6,
     "queue_backlog_warn": 20
+  },
+  "notify": {
+    "listen": "127.0.0.1:8417",
+    "http_enabled": true
   }
 }

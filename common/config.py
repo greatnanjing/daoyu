@@ -28,6 +28,9 @@ _DEFAULT_CRON = {"disk_threshold_pct": 85, "cpu_threshold_pct": 90,
                  "mem_threshold_pct": 90, "load_sustain_min": 5,
                  "cert_warn_days": 14, "cert_paths": ["/etc/letsencrypt/live"],
                  "alert_silence_h": 6, "queue_backlog_warn": 20}
+# M5A 通知 HTTP 入口（gateway/notify_http.py 读取）。低频运维键直接改文件，
+# 不进 /config set 白名单（同 cert_paths 口径）。
+_DEFAULT_NOTIFY = {"listen": "127.0.0.1:8417", "http_enabled": True}
 
 
 @dataclass
@@ -47,6 +50,8 @@ class Config:
     media_retention_days: float = 14.0
     # M4 主动服务阈值（/config set 可改数值键，重启生效）
     cron: dict = field(default_factory=lambda: dict(_DEFAULT_CRON))
+    # M5A 通知 HTTP 入口（127.0.0.1 单路由 POST /notify）
+    notify: dict = field(default_factory=lambda: dict(_DEFAULT_NOTIFY))
 
 
 def load_config(repo_root: Path | None = None) -> Config:
@@ -73,6 +78,8 @@ def load_config(repo_root: Path | None = None) -> Config:
     reconnect.update(raw.get("reconnect") or {})
     cron = dict(_DEFAULT_CRON)
     cron.update(raw.get("cron") or {})
+    notify = dict(_DEFAULT_NOTIFY)
+    notify.update(raw.get("notify") or {})
 
     budget_raw = raw.get("budget", {})
     try:
@@ -91,6 +98,7 @@ def load_config(repo_root: Path | None = None) -> Config:
         worker=worker,
         reconnect=reconnect,
         cron=cron,
+        notify=notify,
         budget=budget,
         secrets=secrets,
         media_retention_days=float(raw.get("media_retention_days", 14.0)),
