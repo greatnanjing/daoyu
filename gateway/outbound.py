@@ -5,7 +5,7 @@ import random
 import time
 
 from common.text import split_text
-from gateway.media import upload_image
+from gateway.media import upload_media
 
 log = logging.getLogger(__name__)
 
@@ -187,7 +187,7 @@ class OutboundLoop:
         token = self._token_ref["token"]
         base = self._token_ref["base_url"] or None
         try:
-            up = await upload_image(self._ilink, item.media_path or "",
+            up = await upload_media(self._ilink, item.media_path or "",
                                     item.to_user, token, base)
         except FileNotFoundError:
             return f"图片文件不存在: {item.media_path}"

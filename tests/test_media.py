@@ -6,11 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from gateway.media import (CDN_BASE_URL, MAX_IMAGE_BYTES, MediaError,
-                           aes_ecb_decrypt, aes_ecb_encrypt,
+from gateway.media import (CDN_BASE_URL, MAX_FILE_BYTES, MAX_IMAGE_BYTES,
+                           MEDIA_TYPE_FILE, MEDIA_TYPE_VIDEO, MediaError,
+                           UploadedMedia, aes_ecb_decrypt, aes_ecb_encrypt,
                            build_cdn_download_url, build_cdn_upload_url,
-                           download_inbound_image, parse_inbound_aes_key,
-                           pkcs7_padded_size, sniff_image, upload_image)
+                           build_file_item, build_video_item,
+                           download_inbound_image, download_inbound_media,
+                           parse_inbound_aes_key, parse_media_aes_key,
+                           pkcs7_padded_size, sniff_image, upload_media)
 
 KEY = secrets.token_bytes(16)
 
@@ -118,12 +121,12 @@ def test_build_cdn_urls():
     assert up == f"{CDN_BASE_URL}/upload?encrypted_query_param=P&filekey=fk"
 
 
-async def test_upload_image_success(tmp_path):
+async def test_upload_media_success(tmp_path):
     import hashlib
     f = tmp_path / "shot.png"
     f.write_bytes(_PNG_BYTES)
     fake = FakeUploadILink()
-    up = await upload_image(fake, str(f), "u@im.wechat", "TOKEN", None)
+    up = await upload_media(fake, str(f), "u@im.wechat", "TOKEN", None)
     assert up.download_param == "DL-PARAM"
     assert len(up.aes_key) == 16 and len(up.filekey) == 32
     assert up.size_cipher == pkcs7_padded_size(len(_PNG_BYTES))
@@ -141,28 +144,28 @@ async def test_upload_image_success(tmp_path):
     assert "upload" in fake.uploaded_url and "filekey=" in fake.uploaded_url
 
 
-async def test_upload_image_retries_5xx_then_ok(tmp_path):
+async def test_upload_media_retries_5xx_then_ok(tmp_path):
     f = tmp_path / "a.png"; f.write_bytes(_PNG_BYTES)
     fake = FakeUploadILink(fail_times=2, status=503)
-    up = await upload_image(fake, str(f), "u", None, None)
+    up = await upload_media(fake, str(f), "u", None, None)
     assert up.download_param == "DL-PARAM" and fake.calls == 3
 
 
-async def test_upload_image_4xx_no_retry(tmp_path):
+async def test_upload_media_4xx_no_retry(tmp_path):
     from gateway.ilink import CdnClientError
     import pytest
     f = tmp_path / "a.png"; f.write_bytes(_PNG_BYTES)
     fake = FakeUploadILink(fail_times=1, status=403)
     with pytest.raises(CdnClientError):
-        await upload_image(fake, str(f), "u", None, None)
+        await upload_media(fake, str(f), "u", None, None)
     assert fake.calls == 1          # 立败，未重试
 
 
-async def test_upload_image_too_large(tmp_path):
+async def test_upload_media_image_too_large(tmp_path):
     import pytest
     f = tmp_path / "big.png"; f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * MAX_IMAGE_BYTES)
     with pytest.raises(MediaError):
-        await upload_image(FakeUploadILink(), str(f), "u", None, None)
+        await upload_media(FakeUploadILink(), str(f), "u", None, None)
 
 
 class FakeDownloadILink:
@@ -211,3 +214,129 @@ async def test_download_inbound_image_rejects_garbage(tmp_path):
     # 无 CDN 引用
     with pytest.raises(MediaError):
         await download_inbound_image(fake, {"media": {}}, tmp_path / "in")
+
+
+# ---- M5B：文件/语音/视频协议层 ----
+
+def test_parse_media_aes_key_two_forms():
+    import base64 as b64
+    key16 = bytes(range(16))
+    hex32 = key16.hex()
+    # 形态一：base64(raw16B)
+    assert parse_media_aes_key({"aes_key": b64.b64encode(key16).decode()}) == key16
+    # 形态二：base64(hex32 ASCII)——文件/语音/视频的实际形态
+    assert parse_media_aes_key({"aes_key": b64.b64encode(hex32.encode()).decode()}) == key16
+    # 缺字段/坏 base64
+    import pytest
+    from gateway.media import MediaError
+    with pytest.raises(MediaError):
+        parse_media_aes_key({})
+    with pytest.raises(MediaError):
+        parse_media_aes_key({"aes_key": "!!!not-base64!!!"})
+
+
+async def test_upload_media_file_type_body(tmp_path):
+    """media_type=3：getuploadurl body 带正确类型与 100MB 上限（非图片 20MB）。"""
+    import secrets as _s
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4 " + _s.token_bytes(64))
+
+    class Fake:
+        async def getuploadurl(self, **kw):
+            self.kw = kw
+            return {"upload_full_url": "https://cdn/up"}
+
+        async def cdn_upload(self, url, ct):
+            return "DL-PARAM"
+
+    fake = Fake()
+    up = await upload_media(fake, str(f), "u", None, None, media_type=3)
+    assert fake.kw["media_type"] == 3
+    assert up.size_raw == f.stat().st_size            # file 条 len 用明文大小
+    assert up.size_cipher == (up.size_raw + 16) // 16 * 16
+    item = build_file_item(up, "doc.pdf")
+    assert item["type"] == 4
+    fi = item["file_item"]
+    assert fi["file_name"] == "doc.pdf"
+    assert fi["len"] == str(up.size_raw)              # 明文大小十进制字符串
+    import base64 as b64
+    assert fi["media"]["aes_key"] == b64.b64encode(up.aes_key.hex().encode()).decode()
+    assert fi["media"]["encrypt_query_param"] == "DL-PARAM"
+
+
+def test_build_video_item_shape():
+    up = UploadedMedia(filekey="f" * 32, download_param="P", aes_key=bytes(16),
+                       size_cipher=1234, size_raw=1200)
+    item = build_video_item(up)
+    assert item["type"] == 5
+    vi = item["video_item"]
+    assert vi["video_size"] == 1234                   # 密文数字
+    assert set(vi) == {"media", "video_size"}         # 不填 thumb_*（官方同构）
+    assert vi["media"]["encrypt_type"] == 1
+
+
+async def test_upload_media_video_over_image_limit_ok(tmp_path):
+    """视频/文件走 100MB 上限（图片 20MB 语义不变）——大文件 body 正常。"""
+    class Fake:
+        async def getuploadurl(self, **kw):
+            return {"upload_param": "p"}
+
+        async def cdn_upload(self, url, ct):
+            return "DL"
+
+    f = tmp_path / "big.mp4"
+    f.write_bytes(b"\x00" * (21 * 1024 * 1024))       # 21MB：超图片限但低于 100MB
+    up = await upload_media(Fake(), str(f), "u", None, None, media_type=2)
+    assert up.size_raw == 21 * 1024 * 1024
+
+
+class Fake:
+    """getuploadurl/cdn_upload 最小桩（供下方超限测试：超限在网络调用之前
+    抛出，桩方法不会被触达——若实现错误发起调用，此处无对应行为可见）。"""
+
+    async def getuploadurl(self, **kw):
+        return {"upload_param": "p"}
+
+    async def cdn_upload(self, url, ct):
+        return "DL"
+
+
+async def test_upload_media_file_too_large(tmp_path):
+    import pytest
+    from gateway.media import MediaError
+    f = tmp_path / "huge.bin"
+    f.write_bytes(b"\x00" * (MAX_FILE_BYTES + 1))
+    with pytest.raises(MediaError):
+        await upload_media(Fake(), str(f), "u", None, None, media_type=3)
+
+
+async def test_download_inbound_media(tmp_path):
+    import base64 as b64
+    import secrets as _s
+    from gateway.media import aes_ecb_encrypt
+    key = _s.token_bytes(16)
+    raw = b"whatever-bytes-silk-or-pdf" + _s.token_bytes(32)
+    media = {"encrypt_query_param": "EQ",
+             "aes_key": b64.b64encode(key.hex().encode()).decode()}
+
+    class Fake:
+        async def cdn_download(self, url):
+            assert "EQ" in url
+            return aes_ecb_encrypt(raw, key)
+
+    p = await download_inbound_media(Fake(), media, tmp_path, "file", "pdf")
+    from pathlib import Path
+    f = Path(p)
+    assert f.parent == tmp_path and f.name.startswith("file-") and f.suffix == ".pdf"
+    assert f.read_bytes() == raw                       # 落盘内容 = 解密明文
+
+
+async def test_download_inbound_media_no_ref(tmp_path):
+    import pytest
+    from gateway.media import MediaError
+
+    class NoCallFake:
+        pass
+
+    with pytest.raises(MediaError):
+        await download_inbound_media(NoCallFake(), {}, tmp_path, "voice", "silk")

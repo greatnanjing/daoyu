@@ -22,15 +22,19 @@ def _mk(root: Path, sub: str, name: str, age_days: float = 0.0) -> Path:
     return f
 
 
-def test_cleanup_removes_expired_keeps_fresh_and_non_media(tmp_path):
-    old = _mk(tmp_path, "inbound", "img-old1.png", age_days=20)
+def test_cleanup_outbound_full_inbound_prefix_root_conservative(tmp_path):
+    """M5B 清理规则三分：outbound/ 全量（daoyu 独占——img-* 与 M5B 原名复制）；
+    inbound/ 按前缀（img-|file-|voice-|vid-，daoyu 随机名落盘）；media 根目录
+    保守规则不变（claude 工作产物混居，只碰 img-*/图片扩展名）。"""
+    old_out = _mk(tmp_path, "outbound", "manual-note.txt", age_days=99)
+    old_f = _mk(tmp_path, "inbound", "file-old1.pdf", age_days=20)
+    old_v = _mk(tmp_path, "inbound", "vid-old1.mp4", age_days=20)
+    stray = _mk(tmp_path, "inbound", "claude-draft.txt", age_days=99)   # 非前缀不碰
     fresh = _mk(tmp_path, "inbound", "img-fresh.png", age_days=1)
-    note = _mk(tmp_path, "outbound", "manual-note.txt", age_days=99)   # 非 img-* 不碰
     n = cleanup_expired_media(tmp_path, 14.0, protected=set())
-    assert n == 1
-    assert not old.exists()
-    assert fresh.exists()
-    assert note.exists()
+    assert n == 3
+    assert not old_out.exists() and not old_f.exists() and not old_v.exists()
+    assert stray.exists() and fresh.exists()
 
 
 def test_cleanup_covers_media_root_custom_named_images(tmp_path):
@@ -46,13 +50,13 @@ def test_cleanup_covers_media_root_custom_named_images(tmp_path):
 
 
 def test_cleanup_protects_active_outbox_refs_any_path_form(tmp_path):
-    """未终态 outbox 行引用的文件保留（approval_mcp 写绝对路径；斜杠形态
-    差异经 abspath 归一化命中——真实数据流无相对路径形态）。"""
-    gone = _mk(tmp_path, "outbound", "img-free.png", age_days=30)
-    kept = _mk(tmp_path, "outbound", "img-kept.png", age_days=30)
-    kept_fwd = _mk(tmp_path, "outbound", "img-kept-fwd.png", age_days=30)
-    protected = {str(kept),                            # 原生形态（Windows 反斜杠）
-                 str(kept_fwd).replace("\\", "/")}     # 正斜杠形态（env/JSON 传递常见）
+    """未终态 outbox 行引用的文件保留（M5B 起 outbound 全量清理，保护名单
+    更关键——原名复制文件也在 outbound）。"""
+    gone = _mk(tmp_path, "outbound", "report-old.pdf", age_days=30)
+    kept = _mk(tmp_path, "outbound", "report-kept.pdf", age_days=30)
+    kept_fwd = _mk(tmp_path, "outbound", "report-kept-fwd.pdf", age_days=30)
+    protected = {str(kept),
+                 str(kept_fwd).replace("\\", "/")}
     n = cleanup_expired_media(tmp_path, 14.0, protected)
     assert n == 1
     assert not gone.exists()
