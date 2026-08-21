@@ -328,3 +328,34 @@ def test_sent_pages_today_folds_file_rows(db):
     db._conn.commit()
     assert db.sent_pages_today(2000) == 2 + 1      # 带 caption=2、无 caption=1
 
+
+def test_pending_task_count(db):
+    """pending/running 计数；终态不计。"""
+    db.insert_message(InboundMessage(msg_id="m1", from_user="u@im.wechat",
+                                     text="hi", context_token="c", received_at=1))
+    s = db.get_or_create_session("u@im.wechat", "/repo")
+    t1 = db.create_task(None, s.id, "a", kind="chat")
+    assert db.pending_task_count(s.id) == 1
+    t2 = db.create_task(None, s.id, "b", kind="chat")
+    assert db.pending_task_count(s.id) == 2
+    db.finish_task(t1, "done")
+    assert db.pending_task_count(s.id) == 1          # done 不计
+    # running 仍计
+    db._conn.execute("UPDATE tasks SET state='running' WHERE id=?", (t2,))
+    db._conn.commit()
+    assert db.pending_task_count(s.id) == 1
+    # 其他 session 不串
+    s2 = db.get_or_create_session("u@im.wechat", "/other")
+    assert db.pending_task_count(s2.id) == 0
+
+
+def test_scan_merge_pending(db):
+    """扫描 merge_pending:* KV，返回 (user, value) 列表。"""
+    assert db.scan_merge_pending() == []
+    db.set_state("merge_pending:a@im.wechat", '{"texts":["x"]}')
+    db.set_state("merge_pending:b@im.wechat", '{"texts":["y","z"]}')
+    db.set_state("other_key", "noise")              # 非 merge_pending 前缀不收
+    found = dict(db.scan_merge_pending())
+    assert found == {"a@im.wechat": '{"texts":["x"]}',
+                     "b@im.wechat": '{"texts":["y","z"]}'}
+

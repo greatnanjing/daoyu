@@ -196,6 +196,22 @@ class Database:
         self._conn.execute("DELETE FROM state WHERE key=?", (key,))
         self._conn.commit()
 
+    def pending_task_count(self, session_id: int) -> int:
+        """该 session 已有 pending/running 任务数（B 队列位次：不含即将创建的本条）。"""
+        row = self._conn.execute(
+            "SELECT COUNT(*) c FROM tasks "
+            "WHERE session_id=? AND state IN ('pending','running')",
+            (session_id,)).fetchone()
+        return row["c"] if row else 0
+
+    def scan_merge_pending(self) -> list[tuple[str, str]]:
+        """扫描所有 merge_pending:<user> KV（启动崩溃恢复用）。返回 [(user, value_json)]。"""
+        prefix = "merge_pending:"
+        rows = self._conn.execute(
+            "SELECT key, value FROM state WHERE key LIKE ?", (prefix + "%",)
+        ).fetchall()
+        return [(r["key"][len(prefix):], r["value"]) for r in rows]
+
     # ---- audit ----
     def audit(self, kind: str, detail: str) -> None:
         self._conn.execute(
