@@ -340,3 +340,69 @@ async def test_e2e_merge_two_messages_single_task(tmp_path, monkeypatch):
     finally:
         loop_task.cancel()
         await asyncio.gather(loop_task, return_exceptions=True)
+
+
+# ---------------- M5C2/M5C3：清洗留存不变量 + 别名全链路 ----------------
+
+async def test_e2e_markdown_result_kept_raw_in_outbox(tmp_path, monkeypatch):
+    """M5C2：fake claude 回 Markdown 全语法 → outbox 恒存**原文**（清洗发生在
+    投递层——test_outbound.test_outbound_cleans_markdown 已断言清洗后投递，
+    两段拼起来即全链；此处钉住「原文留存」与清洗函数对该产物的正确性）。"""
+    cfg = FakeCfg(tmp_path, monkeypatch)   # 先构造（内部 setenv 默认流）
+    monkeypatch.setenv("FAKE_CLAUDE_SCRIPT",   # 再覆盖为 Markdown 回放流
+                       str(FIXTURES / "md_result_stream.jsonl"))
+    db = Database(tmp_path / "e2e.db")
+    db.ensure_schema()
+    runner = TaskRunner(db, cfg, process_registry={})
+    pool = WorkerPool(db, cfg, runner=runner, concurrency=2, poll_interval_s=0.01)
+    loop_task = asyncio.create_task(pool.run_forever())
+    try:
+        await handle_inbound(db, cfg, pool, None, inbound(1, "跑部署"))
+        await _wait_done(db, timeout=10)
+        md = ("## 部署报告\n\n**状态**：`成功`，详见 [日志](http://x/y)。\n\n"
+              "| 环境 | 版本 |\n|---|---|\n| prod | 2.1.235 |\n\n"
+              "```bash\nsystemctl restart daoyu\n```")
+        assert any(t == md for t in _texts(db))       # outbox 原文
+        from common.mdclean import md_clean
+        assert md_clean(md) == (
+            "【部署报告】\n\n状态：「成功」，详见 日志(http://x/y)。\n\n"
+            "• 环境：prod\n• 版本：2.1.235\n\n"
+            "    systemctl restart daoyu")
+    finally:
+        loop_task.cancel()
+        await asyncio.gather(loop_task, return_exceptions=True)
+
+
+async def test_e2e_alias_full_pipeline(tmp_path, monkeypatch):
+    """/alias add go <prompt>（桥命令秒回）→ /go 展开建任务 → fake claude 收到
+    展开后 prompt（stdin.log）；/t 内置别名等价 /tasks 秒回。"""
+    cfg = FakeCfg(tmp_path, monkeypatch)
+    db = Database(tmp_path / "e2e.db")
+    db.ensure_schema()
+    runner = TaskRunner(db, cfg, process_registry={})
+    pool = WorkerPool(db, cfg, runner=runner, concurrency=2, poll_interval_s=0.01)
+    loop_task = asyncio.create_task(pool.run_forever())
+    try:
+        await handle_inbound(db, cfg, pool, None, inbound(1, "/alias add go 跑全量测试并总结"))
+        assert any("已定义 /go" in t for t in _texts(db))
+        await handle_inbound(db, cfg, pool, None, inbound(2, "/go"))
+        await _wait_done(db, timeout=10)
+        # fake claude 的 stdin 收到展开后 prompt（不是 /go）；展开后是普通文本
+        # → runner 恒追加 _PROMPT_SUFFIX 环境约定后缀（brief 精确相等断言未计
+        # 入该既有机制，此处按实际形态钉住）
+        from worker.runner import _PROMPT_SUFFIX
+        assert (tmp_path / "stdin.log").read_text(encoding="utf-8") == \
+            "跑全量测试并总结" + _PROMPT_SUFFIX
+    finally:
+        loop_task.cancel()
+        await asyncio.gather(loop_task, return_exceptions=True)
+
+
+async def test_e2e_builtin_alias_t(tmp_path, monkeypatch):
+    cfg = FakeCfg(tmp_path, monkeypatch)
+    db = Database(tmp_path / "e2e.db")
+    db.ensure_schema()
+    pool = WorkerPool(db, cfg, concurrency=2)   # 真实接线；不启动调度循环
+    await handle_inbound(db, cfg, pool, None, inbound(1, "/t"))
+    assert any("没有运行中或排队的任务" in t for t in _texts(db))
+    assert _count(db, "tasks") == 0             # bridge 秒回不入队

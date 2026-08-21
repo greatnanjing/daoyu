@@ -121,9 +121,10 @@ fc-cache -f ~/.local/share/fonts && fc-list :lang=zh   # 应列出 Noto Sans CJK
 | | `/delete #<序号\|task 任务号>` | 删话题（连同其任务）或单删任务记录；均需回 `Y` 确认，当前话题/运行中任务拒删 |
 | | `/policy <auto\|strict\|bypass\|plan>` | 查看或切换当前话题的权限档位（每话题独立） |
 | | `/cron` | 定时任务管理：日报/巡检 开关、`time daily <HH:MM>`、`interval patrol <分钟>` |
+| | `/alias add <名> <内容> \| del <名> \| list` | 自定义快捷命令（内置 `/t`=`/tasks`、`/s`=`/status`、`/c`=`/cancel`、`/cs`=`/sessions`） |
 | 配置代理（改刀鱼专属配置，效果同 TUI） | `/permissions` | 查看 deny/allow/ask 列表；`/permissions deny add <规则>`、`/permissions deny del <序号>`、`/permissions allow add <规则>` 读写 `claude/settings.json` |
 | | `/mcp` | 列出 `claude/mcp.json` 已装 MCP server（✅/⛔ 状态）；`/mcp off|on <序号|名字>` 启停（下一任务生效，停用不丢配置） |
-| | `/config` | 查看 gateway 配置概要（节流/预算/白名单数，secret 只计个数不回显）；`set <键> <值>` 改白名单键（throttle/budget/worker.concurrency + cron 阈值七键，含 `throttle.merge_window_s`，共 15 键，重启生效） |
+| | `/config` | 查看 gateway 配置概要（节流/预算/白名单数，secret 只计个数不回显）；`set <键> <值>` 改白名单键（throttle/budget/worker.concurrency + cron 阈值七键，含 `throttle.merge_window_s`、`throttle.md_clean`，共 16 键，重启生效） |
 | iLink 运维 | `/help` | 全部可用命令（按实际能力动态生成） |
 | | `/time` | 连接剩余时间 |
 | | `/重新连接` | 立即重连（静默优先免扫码，需扫码时推二维码；Y/N 确认） |
@@ -133,6 +134,8 @@ fc-cache -f ~/.local/share/fonts && fc-list :lang=zh   # 应列出 Noto Sans CJK
 典型流程：发「你好」→ 秒回「✅ 收到，正在合并后续消息（2s 内无新增即开始处理）」→ 工具执行时推送「🔧 工具名」进度 → 最终回复（超长自动分页）。
 
 **连发消息自动合并（M5C1）**：连发几条纯文本会合并成**一个 prompt**（Claude 一轮看全上下文，而非逐段各答）——首条即时 ACK「正在合并」、窗口内（默认 2s）追加的消息静默、到点「已合并 N 条，开始处理」。语音转写文字同样合并。`/config set throttle.merge_window_s <秒>` 可调（0 = 禁用，退回逐条即建任务）。任务排队时 ACK 显示「排在第 M 位（当前任务完成后接上）」——追加输入会作为下一轮接上（`claude -p` stdin 一次性关闭，无法中途注入运行中回合，诚实告知队列位次）。
+
+**出站 Markdown 清洗（M5C2）**：Claude 的回复常带 Markdown（标题/粗体/代码围栏/表格），微信纯文本渲染会露出原样的 `##`、`**`、`` ``` `` 记号——投递前自动转写为纯文本可读形态（标题转【】、围栏代码缩进块、表格转竖排列表等；outbox 恒存**原文**，清洗只在发送侧、幂等可重放）。`throttle.md_clean`（默认 true）为总开关，`/config set throttle.md_clean false` 关闭后原文直发，重启生效。
 
 ### strict 档审批（M2）
 

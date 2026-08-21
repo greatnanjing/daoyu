@@ -1,0 +1,2 @@
+{"type": "system", "subtype": "init", "session_id": "md-1", "slash_commands": ["review"]}
+{"type":"result","subtype":"success","result":"## 部署报告\n\n**状态**：`成功`，详见 [日志](http://x/y)。\n\n| 环境 | 版本 |\n|---|---|\n| prod | 2.1.235 |\n\n```bash\nsystemctl restart daoyu\n```","total_cost_usd":0.1,"is_error":false}
