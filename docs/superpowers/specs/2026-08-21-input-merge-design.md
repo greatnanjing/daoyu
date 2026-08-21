@@ -1,7 +1,7 @@
 # 刀鱼 M5C1：入站文本体验（连发合并 + 队列感知 ACK）设计
 
 - **日期**: 2026-08-21
-- **状态**: 设计已确认（brainstorm 对话结论沉淀），待实现
+- **状态**: 已实现（2026-08-21，434 测试全绿；真机验收另行）
 - **配套文档**: [PRD.md](../../PRD.md) / [TRD.md](../../TRD.md) / [M5B 媒体 spec](2026-08-21-media2-design.md)
 - **背景**: M5B 完成后推进第三方向「输入体验增强」的第一子项。范围经 brainstorm 选定：**纯文本连发消息合并为一个 prompt**（窗口暂存）+ **B 运行中追加的可达部分**（ACK 队列位次，非真注入——结构限制见 §6）。M5C2 出站可读性、M5C3 快捷命令为后续独立 spec。
 
@@ -49,6 +49,8 @@ flush（计时到期 / 被先 flush / 启动恢复）:
 | `scan_merge_pending() -> list[tuple[user, value]]` | `SELECT key, value FROM state WHERE key LIKE 'merge_pending:%'`——启动恢复扫描 |
 
 ### 3.2 入站路由（[gateway/app.py](../../../gateway/app.py) `handle_inbound`）
+
+> **实现期修正（2026-08-21）**：原述「forward/带媒体/其余路径 + Y-N/桥命令 先 flush」经实现分析**收窄**——flush-first 仅在 **task-creating 非 chat 路径**（forward / 媒体即对话 / 纯媒体任务）；Y-N 拦截与 bridge/ilink/proxy/unknown 不建任务，窗口计时器自行 flush 不受影响；session_id 在 append 时锁定，故 `/cd` 切话题不影响已暂存 batch（切前话题仍归切前）。`_flush_merge_pending` 在空暂存时空操作，故这些路径安全。spec 原口径以此收窄为准。
 
 chat/forward 路径（现 [app.py:251-257](../../../gateway/app.py#L251-L257)）改造：
 

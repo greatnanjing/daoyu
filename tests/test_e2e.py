@@ -29,7 +29,8 @@ class FakeCfg:
         self.claude_bin = [sys.executable, str(FIXTURES / "fake_claude.py")]
         self.secrets = {"ANTHROPIC_API_KEY": "sk"}
         self.throttle = {"progress_window_s": 0.0, "page_char_limit": 2000,
-                         "min_send_interval_s": 0.0, "daily_send_limit": 500}
+                         "min_send_interval_s": 0.0, "daily_send_limit": 500,
+                         "merge_window_s": 0.0}
         self.budget = Budget()
         self.worker = {"concurrency": 2, "poll_interval_s": 0.01}
         self.reconnect = {"session_duration_s": 86400}
@@ -316,6 +317,26 @@ async def test_notify_cli_e2e(tmp_path):
                 break
             await asyncio.sleep(0.05)
         assert any(t == "🔔 部署完成\n耗时 3 分钟" for _, _, t in fake.sent), fake.sent
+    finally:
+        loop_task.cancel()
+        await asyncio.gather(loop_task, return_exceptions=True)
+
+
+async def test_e2e_merge_two_messages_single_task(tmp_path, monkeypatch):
+    """M5C1 E2E：连发两条 chat → 单任务 prompt 含两段 → fake claude 跑完。"""
+    cfg = FakeCfg(tmp_path, monkeypatch)
+    cfg.throttle["merge_window_s"] = 0.05      # 测试用短窗口（覆盖 FakeCfg 默认 0.0）
+    db = Database(tmp_path / "e2e.db"); db.ensure_schema()
+    runner = TaskRunner(db, cfg, process_registry={})
+    pool = WorkerPool(db, cfg, runner=runner, concurrency=2, poll_interval_s=0.01)
+    loop_task = asyncio.create_task(pool.run_forever())
+    try:
+        await handle_inbound(db, cfg, pool, None, inbound(1, "第一步"))
+        await handle_inbound(db, cfg, pool, None, inbound(2, "第二步"))
+        await asyncio.sleep(0.15)                    # 过合并窗口 flush 建任务
+        await _wait_done(db, timeout=10)
+        prompts = [r["prompt"] for r in db._conn.execute("SELECT prompt FROM tasks")]
+        assert prompts == ["第一步\n第二步"]
     finally:
         loop_task.cancel()
         await asyncio.gather(loop_task, return_exceptions=True)
