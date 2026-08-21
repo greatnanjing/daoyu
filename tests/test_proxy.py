@@ -481,6 +481,16 @@ async def test_config_set_all_seven_keys(db, tmp_path):
     assert len(_audit_details(db, "config_change")) == 8
 
 
+async def test_config_set_merge_window_zero_disables(db, tmp_path):
+    """M5C1：merge_window_s=0 合法（禁用合并）——spec/README 文档化的禁用路径
+    必须可达（校验 v>=0 而非 v>0）。"""
+    _write_gateway_config(tmp_path)
+    reply = await execute_proxy(db, _route("config", "set throttle.merge_window_s 0"),
+                                FakeCfg(tmp_path))
+    assert "已写入" in reply
+    assert _read_gateway_config(tmp_path)["throttle"]["merge_window_s"] == 0.0
+
+
 async def test_config_set_creates_missing_section(db, tmp_path):
     # worker 节在原文件缺失 → set 自动建节，其余键保留
     (tmp_path / "gateway").mkdir()
@@ -520,7 +530,7 @@ async def test_config_set_rejects_out_of_range(db, tmp_path):
            ("throttle.progress_window_s", "-1"),
            ("throttle.page_char_limit", "199"),          # ≥ 200
            ("throttle.daily_send_limit", "0"),           # ≥ 1
-           ("throttle.merge_window_s", "0"),            # > 0
+           ("throttle.merge_window_s", "-1"),           # >= 0（0 = 禁用合并）
            ("budget.max_turns", "0"),                    # ≥ 1
            ("budget.max_usd", "0"),
            ("worker.concurrency", "11"),                 # 1~10

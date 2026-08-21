@@ -328,6 +328,9 @@ async def handle_inbound(db, cfg, pool, outbound, msg: dict, ilink=None) -> None
         slash = set(json.loads(db.get_state("slash_commands") or "[]"))
     except ValueError:
         slash = set()
+    if not text and not media_lines:
+        return   # 空消息（无 text_item 亦无已知媒体——贴纸/未知 item）不建任务、
+        # 不进合并窗口（防空 prompt + 误导性「正在合并」ACK）
     r = route(text, slash)
 
     if r.kind == "ilink":

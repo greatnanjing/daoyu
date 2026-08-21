@@ -291,7 +291,7 @@ CONFIG_KEYS = {
     "throttle.progress_window_s": (float, lambda v: v > 0, "数值"),
     "throttle.page_char_limit": (int, lambda v: v >= 200, "整数"),
     "throttle.daily_send_limit": (int, lambda v: v >= 1, "整数"),
-    "throttle.merge_window_s": (float, lambda v: v > 0, "数值"),
+    "throttle.merge_window_s": (float, lambda v: v >= 0, "数值"),
     "budget.max_turns": (int, lambda v: v >= 1, "整数"),
     "budget.max_usd": (float, lambda v: v > 0, "数值"),
     "worker.concurrency": (int, lambda v: 1 <= v <= 10, "整数"),
