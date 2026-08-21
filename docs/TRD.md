@@ -1,7 +1,7 @@
 # 刀鱼 (daoyu) 技术需求文档 (TRD)
 
-- **版本**: v1.0
-- **日期**: 2026-08-15
+- **版本**: v1.1
+- **日期**: 2026-08-15（v1.1 终态同步：2026-08-22，增补 §15）
 - **状态**: 已确认（与 [PRD.md](./PRD.md) 配套）
 - **技术选型结论来源**: 本 session 调研与官方文档核实（Claude Code headless 文档、weixin-ClawBot-API 源码调研）
 
@@ -53,9 +53,12 @@
 - 长轮询 `getupdates`（服务器 hold 35s）——**无公众号式 5 秒必须返回的死线**，天然适配慢 agent 任务。
 - 支持 `sendtyping`（"正在输入"状态）。
 - 连接（bot_token）生命周期：**无官方 TTL**（官方 README 仅定义 `errcode -14 = session timeout`，不承诺时长；实证活跃存活 >2.6 天——2026-08-19 本机实例，"24h 过期"系社区讹传）；每次扫码登录 Bot ID 会变化（平台设计）；协议无免扫码续期路径（`binded_redirect` 是扫码时已绑定状态）。
-- 媒体消息（图片）M3 已支持：CDN AES-128-ECB 加密上传/下载（协议细节见
-  `docs/superpowers/specs/2026-08-19-m3-media-design.md` §2，源：官方
-  @tencent-weixin/openclaw-weixin v2.4.6 dist 源码）；语音/文件/视频未实现。
+- 媒体消息全形态已支持：图片（M3）+ 文件/语音/视频（M5B，均真机验收通过）——CDN
+  AES-128-ECB 加密上传/下载（协议细节见
+  `docs/superpowers/specs/2026-08-19-m3-media-design.md` §2 与
+  `2026-08-21-media2-design.md`，源：官方 @tencent-weixin/openclaw-weixin v2.4.6 dist
+  源码）。**两套媒体编号错位（高危）**：入站 item type 语音=3/文件=4/视频=5；出站
+  getuploadurl media_type 视频=2/文件=3——同名不同值，media.py 常量分域防混用。
 - 腾讯保留内容过滤与限速权利，无 SLA。
 
 ### 3.2 已知陷阱与对策（丢消息防线之一）
@@ -242,7 +245,7 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 
 ## 10. 测试策略
 
-> 终态：359 个自动化测试全绿（`python -m pytest`，单元/集成/E2E 三层——E2E 用 fake iLink + fake claude 子进程覆盖收发/审批往返/bg 冒烟/媒体双向）；真机 E2E 项（多轮对话、/review、崩溃恢复、审批 Y/N、bg、媒体、playwright、/cancel 进程清理）已在 M1~M3 与收尾批各验收期逐项实证，记录见 `.superpowers/sdd/progress.md` 台账。
+> 终态：487 个自动化测试全绿（Windows）/ 486 passed + 1 skipped（Linux，skip 为 Windows 专属 npm shim 测试）——单元/集成/E2E 三层，E2E 用 fake iLink + fake claude 子进程覆盖收发/审批往返/bg 冒烟/媒体双向/通知/连发合并/别名全链路；真机 E2E 项（多轮对话、/review、崩溃恢复、审批 Y/N、bg、媒体、playwright、/cancel 进程清理、日报/巡检、通知四入口、连发合并、md_clean 开关双态）已在 M1~M5C3 各验收期逐项实证，记录见 `.superpowers/sdd/progress.md` 台账与各 spec 验收结论节。
 
 | 层 | 内容 |
 |---|---|
@@ -265,7 +268,7 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 
 ## 12. 实现顺序建议（对应 PRD 里程碑）
 
-> 终态：三阶段 + 2026-08-20 收尾批全部完成并真机验收（PRD §9 里程碑表有逐项标记）；下文为当时的设计顺序，"AI 视觉"MCP 最终未做（OCR 以 RapidOCR 本地封装替代）。
+> 终态：三阶段 + 2026-08-20 收尾批 + M4~M5C3 六批增强（2026-08-21）全部完成并真机验收（PRD §9 里程碑表有逐项标记）；下文为当时的设计顺序，"AI 视觉"MCP 最终未做（OCR 以 RapidOCR 本地封装替代）。M4~M5C3 的架构增量见 §15 增补。
 
 1. **M1**：SQLite schema → gateway 收发+落盘去重 → worker 调 `claude -p`（会话绑定、stream 解析、节流推送）→ 命令总线（转发/代理/桥命令）→ 崩溃恢复 → E2E。
 2. **M2**：审批 MCP → `--bg` 长任务 → MCP 装载（chrome-devtools/OCR/AI 视觉/web-reader/context7）→ 配置代理命令全套 → `/policy` 四档完整 → 监控告警。
@@ -289,4 +292,15 @@ audit_log(           -- 审计: 命令/配置变更/审批记录/费用
 2. **§4.1 bg 结果获取口径** —— bg 条目终态实测三值：`done` / `blocked` / `failed`（M2 写码假设的 `completed` 从未出现）；done 条目十字段**无输出/cost 字段**，取结果靠 `--fork-session` 回原会话要结果（直接 `--resume` 被 daemon 持有拒绝且 **rc=0**、错误只在输出——会静默空结果）；`blocked` = 会话等用户后续输入（Claude 结尾反问是常态），bg 无输入通道即永久挂起 → 首次观察即 fork 取结果完结。取结果 prompt 原"≤500 字总结"口径不可用（清单被压缩成统计）→ 改"逐项列出、1500 字内"。
 3. **§4.1 "`--bg` 与 `--mcp-config` 组合"** —— 结构性不兼容：daemon 异步拉起 worker（客户端返回 ~1s 后才读 mcp config），临时文件在 run() 返回即删 → daemon "exit 1 before init" 100% 复现。实现：bg 摘除 `--mcp-config`，bg 会话无 MCP 工具（回执明示）。
 4. **§11 "ClawBot 媒体（CDN 加密上传）未实现"** —— M3 已实现并真机验收（图片双向）。出站 `media.aes_key` 形态实测 = **base64(hex32 ASCII)**（spec 原写 base64(raw16B) 有误：真机传 raw16B 形态微信端收空白图）；MCP 工具 `send_image` 需 `claude/settings.json` allow（acceptEdits 不放行 MCP 工具、headless 无确认通道直接 deny）。协议细节见 M3 spec §2。
+
+## 15. 增补（2026-08-22 终态同步：M4~M5C3 架构增量）
+
+M4 起六批增强（spec 驱动，详见 `docs/superpowers/specs/2026-08-21-*.md` 各文档）对本章原设计的增量：
+
+1. **常驻协程六化**（§1/§2）：poll / outbound / reconnect / worker-pool 之外新增 scheduler（M4 日报+巡检，每分钟整分对齐、每轮现读 cron_jobs 表、**正常轮次零 Claude 调用**）与 notify-http（M5A aiohttp 单路由 `POST /notify`，默认 127.0.0.1:8417）。
+2. **SQLite 增表**（§6）：approvals（M2 审批，v1.0 漏列）、state KV（合并暂存 / 别名 / 告警静默等运行态，DB 持久化崩溃可恢复）、cron_jobs（M4，预置 daily/patrol 两行）；outbox.kind 扩为 text|image|file（M5B，投递层按扩展名再分视频条/文件条）；messages.media_path 落盘入站媒体路径。
+3. **出站管线增清洗层**（M5C2）：文本行与 caption 投递前经 `md_clean` 纯函数清洗（**先清洗后分页**——清洗增量必须先于 `MAX_PAGE_BYTES` 字节硬闸计算，分页后清洗会越 16384B 静默丢；outbox 恒存原文，清洗只在发送侧）；按页折算口径四处一致（运行时计数 / 重启恢复 / 日界重算 / bridge `/status`）。**2026-08-21 真机实测微信新版手机+PC 双端原生渲染 Markdown**（`##`→黑体、`**`→粗体、表格可读、代码块吞围栏）——清洗默认翻转为 false，原文直发享受原生渲染，清洗降级为老客户端/渲染异常的逃生通道（`/config set throttle.md_clean true` 开回）。
+4. **入站合并窗口**（M5C1）：纯文本 chat 进 per-user KV 暂存（默认 2s、`/config set` 可调、0 禁用），到点拼单 prompt 建任务；崩溃恢复扫 KV 逐条 flush；B 队列位次仅 ACK 语义（`-p` stdin 一次性关闭，运行中回合无注入通道——§4 原设计的结构性边界）。
+5. **别名双层展开**（M5C3）：用户别名（state KV 单键 JSON dict，app 层 route 前展开、单层防链式循环）→ 内置别名（router `BUILTIN_ALIASES` 兜底）；展开结果与直发等价，零特判路径。
+6. **通知四入口**（M5A）：CLI / MCP / HTTP / 终端 hooks 统一经 `common/notify.py` 直写 outbox（task_id=None）+ audit 同 commit——不建任务、不进会话，节流/分页/重试/死信/日限熔断全部由现有出站协程自然继承。
 

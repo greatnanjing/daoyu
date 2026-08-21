@@ -66,14 +66,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **崩溃恢复**：`main_async` 启动扫描 `db.scan_merge_pending()` 逐条 flush（`recover=True`，ACK 用「已恢复」措辞 + audit `merge_recover`）；session 已删则回退 active binding 不炸。
 - **不做**：text+media 跨类合并、自适应窗口、bg blocked 喂输入（结构不可）。
 
-**M5C2 功能清单**（出站 Markdown 清洗；已实现 2026-08-21，spec [docs/superpowers/specs/2026-08-21-mdclean-alias-design.md](docs/superpowers/specs/2026-08-21-mdclean-alias-design.md)；真机验收另行）：
+**M5C2 功能清单**（出站 Markdown 清洗；已实现并真机验收通过 2026-08-21，spec [docs/superpowers/specs/2026-08-21-mdclean-alias-design.md](docs/superpowers/specs/2026-08-21-mdclean-alias-design.md)——验收结论与设计修订见 spec §7）：
 
 - **md_clean 纯函数**（[common/mdclean.py](common/mdclean.py)，仅 stdlib re）：处理管线 = fenced 代码块切块保护（```/~~~ 围栏内**原样保留**——代码里 `**` 是 glob、`#` 是注释绝不能洗；整体每行缩进 4 空格、去围栏行与语言名）→ 块级规则（标题 `#{1,6}`→【】、无序列表→`•`、引用 `>`→`｜`、水平线→`———`）→ 表格转写（header + `|---|` 分隔行识别；**两列恰一行**=转置键值竖排 `• h：v`，其余=删分隔行统一 `• c0 ｜ c1`）→ 行内规则（`` `x` ``→「x」占位提取后不碰、粗体/斜体/删除线脱壳、`[t](u)`→`t(u)`、`![a](u)`→`图片 a(u)`、反斜杠转义最后）。**幂等**（产物不再构成 Markdown 输入）；无 Markdown 文本**逐字节不变**（系统回执模板天然无损）；`_x_` 斜体明确不做（snake_case 误伤）、斜体 `*x*` 要求两侧紧贴非空白（`3 * 4 * 5` 不误伤）。
 - **投递前清洗**（[gateway/outbound.py](gateway/outbound.py) `_mdc` helper）：`_drain_once` 文本行 **先 `md_clean` 后 `split_text`**——清洗增量（表格转置/缩进）必须先于字节硬闸 `MAX_PAGE_BYTES` 计算，分页后清洗会越 16384B 静默丢；`_send_media`/`_send_file_media` 的 caption 同清洗（单发短文本无字节风险）；`_send` 纯发送不动。**outbox 恒存原文**——清洗只在发送侧，规则升级后死信重投自动受益、审计无损。
 - **折算四处口径一致**（出站熔断按页计数的延伸）：`outbox_sent_pages` / `db.sent_pages_today` 加 `md_clean_enabled` 参数（签名默认 False），文本行折算同过 md_clean——运行时计数 / 重启恢复 / 日界重算 / bridge `/status` 折算四处统一传 `bool(cfg.throttle.get("md_clean", False))`。
 - **开关**：`throttle.md_clean`（bool **默认 false**——2026-08-21 真机实测微信新版手机+PC 双端原生渲染 Markdown，原文直发视觉优于转写；清洗降级为逃生通道，老客户端/渲染异常时 `/config set throttle.md_clean true` 开回，`_DEFAULT_THROTTLE` + config.example.json 同构）——`/config set` **首个 bool 键**（值认 true/false、parser 转布尔、JSON 写回布尔；既有数值键解析路径不动），白名单 16 键；重启生效。
 
-**M5C3 功能清单**（快捷命令：内置短别名 + 用户自定义；已实现 2026-08-21，同 spec；真机验收另行）：
+**M5C3 功能清单**（快捷命令：内置短别名 + 用户自定义；已实现并真机验收通过 2026-08-21，同 spec）：
 
 - **内置短别名**（[gateway/router.py](gateway/router.py) `BUILTIN_ALIASES`）：`/t`=`/tasks`、`/s`=`/status`、`/c`=`/cancel`、`/cs`=`/sessions`——`route()` 判空后、BRIDGE_COMMANDS 判定前静态映射（route 保持纯函数），args 原样跟随；unknown 建议池不含用户别名（纯函数拿不到 KV，YAGNI）。
 - **`/alias` 桥命令**（[gateway/bridge.py](gateway/bridge.py)）：`add <名> <内容…>` / `del <名>` / `list`（空时列内置四条），state KV `alias:<user>` 单键 JSON dict（`merge_pending:<user>` 同构先例，崩溃天然持久）。校验：name 非空 ≤16 字符无空白、value ≤2000 字符、条数 ≤50；**撞名规则**——撞桥/运维/代理集合及 `alias` 自身拒绝（防自毁管理入口），撞内置别名 t/s/c/cs **允许=覆盖**（用户层先于内置层展开，天然生效），撞 Claude 动态 slash_commands 允许但回执重名提示。

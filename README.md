@@ -251,7 +251,7 @@ python -m gateway.app                   # 前台调试运行（不进 systemd）
 - **`/mcp`、`/config`**：/mcp 列表 + on/off 启停（下一任务生效，停用不丢配置）；/config 概览 + set 改常用键（throttle/budget/concurrency，M4 起 cron 阈值七键并入白名单，重启生效）。whitelist 等不开放，改 gateway/config.json。
 - **语音/视频出站专用条**：不做——音频/视频文件经 `send_file` 走文件条/视频条（官方同款模式，见下节）；语音 SILK 解码亦不做（转写缺失时存档 + 回执兜底）。
 
-## M3+M5B 媒体收发（图片双向已真机验收 2026-08-19；文件/语音/视频已实现、真机验收另行）
+## M3+M5B 媒体收发（图片双向真机验收 2026-08-19；文件/语音/视频真机验收 2026-08-21）
 
 - **发图即对话**（M3）：微信里直接发图片即进入当前对话——刀鱼从 CDN 下载解密落盘后转成 prompt（"[用户发来图片，已保存到 …，请查看并回应]"）发给当前会话的 Claude；图文混发拼接为同一条 prompt。下载失败回 ⚠️ 提示、不建任务。
 - **Claude 回图**（M3）：Claude 调 MCP 工具 `send_image(path, caption)` 把图片经 CDN 加密上传发回微信（caption 作为单独文本条先发）；工具 `-p` 四档恒装配（`/bg` 不带，见上），图片须为 PNG/JPEG/GIF/WebP 且 ≤20MB。

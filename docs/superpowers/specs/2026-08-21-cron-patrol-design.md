@@ -183,3 +183,15 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
 4. 同类异常静默期内不重报；静默期后仍异常会再报。
 5. CPU 瞬时尖峰（不足连续 N 采样）不告警。
 6. 全量测试绿（现有 359 + 新增）。
+
+## 10. 真机验收结论（2026-08-21）
+
+验收通过（383 测试全绿 + 生产服务器 + 微信真机）：
+
+1. `/cron` 列表 / on / off / time / interval 即改即生效 ✅（验收期实机操作）。
+2. 日报到点推送、三板块完整 ✅（outbox 393）；当日含异常 → 自动升 Claude 分析、挂 ops 话题、结论推送全链路三证 ✅（outbox 409-411）。
+3. 正常轮次零 Claude 调用 ✅（patrol `last_result=正常` 轮转、无任务产生）。
+4. 同类异常静默期（state KV `cron_alert:<key>`，6h）与 CPU 瞬时尖峰不告警（`load_sustain_min` 连续采样窗口）：单测钉死 + 真机运行期零误报佐证。
+5. 全量测试绿 ✅（383，M4 时点基线）。
+
+**验收期首 bug（已修 9bc627f）**：ops 话题分析任务进程中断后重入异常——`ensure_ops_session` 检测 OPS_UUID transcript 在场即置 inited 转 `--resume`。教训：任何「固定 uuid 首建会话」路径都要防中断重入（与 /adopt 同款硬约束）。
