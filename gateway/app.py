@@ -69,7 +69,12 @@ async def _flush_merge_pending(db, cfg, pool, outbound, from_user,
                                *, recover: bool = False) -> None:
     """flush 该用户暂存：拼 texts → create_task → 队列感知 ACK → 清 KV/计时。
     recover=True 时 ACK 措辞「已恢复」（启动恢复路径）。无暂存则空操作。"""
-    _pending_timers.pop(from_user, None)
+    # 弹出计时器必须 cancel：flush 常由 flush-first（slash/媒体消息触发）而非
+    # 计时器自身触发，仅 pop 不 cancel 则原计时器悬挂 fire 后过早冲刷新合并
+    # 窗口（文本→slash→文本 交错下合并特性系统性失效，对齐 _schedule_flush 模式）。
+    old = _pending_timers.pop(from_user, None)
+    if old:
+        old.cancel()
     key = f"merge_pending:{from_user}"
     raw = db.get_state(key)
     if not raw:

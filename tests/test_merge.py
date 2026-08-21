@@ -96,3 +96,49 @@ async def test_startup_recovery_flushes_pending(tmp_path):
     assert db.get_state(f"merge_pending:{USER}") is None
     assert any(r["kind"] == "merge_recover" for r in db._conn.execute(
         "SELECT kind FROM audit_log"))
+
+
+async def test_slash_flush_cancels_zombie_timer(tmp_path):
+    """文本→slash→文本 交错：slash 的 flush-first 弹出计时器必须 cancel，
+    否则僵尸在原定 fire 时刻过早冲刷新合并窗口（合并特性系统性失效）。
+    窗口=0.3s；"文本2"在 T1 原 fire 之前进新窗口；中间断言卡在 T1 已 fire、
+    T2 未 fire 的间隙——无僵尸时应仍只有"文本1"+"/review"。"""
+    db = Database(tmp_path / "t.db"); db.ensure_schema()
+    db.set_state("slash_commands", json.dumps(["review"]))
+    cfg = Cfg(tmp_path, window=0.3)
+    await handle_inbound(db, cfg, None, None, _msg(1, "文本1"), ilink=None)
+    await handle_inbound(db, cfg, None, None, _msg(2, "/review"), ilink=None)
+    await asyncio.sleep(0.15)                  # "文本2"进新窗口（早于 T1 fire=0.30s）
+    await handle_inbound(db, cfg, None, None, _msg(3, "文本2"), ilink=None)
+    # T1（slash flush 弹出但未 cancel 的僵尸）原定 fire ≈ t=0.30s；T2 窗口 ≈ t=0.45s。
+    # t≈0.35s：T1 已 fire、T2 未 fire——僵尸不应过早把"文本2"冲刷成单 prompt。
+    await asyncio.sleep(0.20)                  # → t≈0.35s
+    prompts = _task_prompts(db)
+    assert prompts == ["文本1", "/review"], f"僵尸计时器过早冲刷新窗口: {prompts}"
+    # 过窗口后"文本2"作为单 prompt flush（未被僵尸过早冲刷/丢失/拆分）
+    await asyncio.sleep(0.20)                  # → t≈0.55s，T2 已 fire
+    assert _task_prompts(db) == ["文本1", "/review", "文本2"]
+
+
+async def test_voice_transcript_merges_in_window(tmp_path):
+    """语音转写并入 text_parts 走合并窗口（生产路径，merge_window_s>0）：
+    两条语音转写消息窗口内不建任务，过窗口后合并为单 prompt 含两段转写。
+    对照 test_inbound_media.test_voice_transcript_treated_as_text（禁用即时路径）。"""
+    db = Database(tmp_path / "t.db"); db.ensure_schema()
+    cfg = Cfg(tmp_path, window=0.05)
+
+    def _voice_msg(msg_id, transcript):
+        return {"message_id": msg_id, "seq": msg_id, "from_user_id": USER,
+                "message_type": 1, "context_token": "CTX",
+                "item_list": [{"type": 3, "voice_item": {"text": transcript}}]}
+
+    await handle_inbound(db, cfg, None, None,
+                        _voice_msg(1, "第一段转写"), ilink=None)
+    await handle_inbound(db, cfg, None, None,
+                        _voice_msg(2, "第二段转写"), ilink=None)
+    assert _task_prompts(db) == []                      # 窗口内未建任务
+    assert any("正在合并" in t for t in _outbox_texts(db))   # 首条 ACK
+    await asyncio.sleep(0.15)                           # 过窗口
+    prompts = _task_prompts(db)
+    assert len(prompts) == 1 and prompts[0] == "第一段转写\n第二段转写"
+    assert any("已合并 2 条" in t for t in _outbox_texts(db))

@@ -188,10 +188,14 @@ def _file_item(key: bytes, name="报表.xlsx", raw=b"PK\x03\x04data"):
 
 
 async def test_voice_transcript_treated_as_text(tmp_path):
-    """有转写的语音：text 直接当用户文字建任务（零解码成本，官方同构）。"""
+    """有转写的语音：text 直接当用户文字建任务（零解码成本，官方同构）。
+    测禁用合并窗口的 fallback 即时路径——throttle.merge_window_s=0 显式禁用，
+    生产路径（merge_window_s>0 进窗口合并）见 test_merge.test_voice_transcript_merges_in_window。"""
     db = Database(tmp_path / "t.db"); db.ensure_schema()
+    cfg = Cfg(tmp_path)
+    cfg.throttle = {"merge_window_s": 0}      # 显式禁用合并：走 fallback 即时建任务
     msg = _media_msg(11, {"type": 3, "voice_item": {"text": "帮我看下日志"}})
-    await handle_inbound(db, Cfg(tmp_path), None, None, msg, ilink=None)
+    await handle_inbound(db, cfg, None, None, msg, ilink=None)
     rows = _tasks(db)
     assert len(rows) == 1 and rows[0]["prompt"] == "帮我看下日志"
     assert db._conn.execute(
