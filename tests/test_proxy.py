@@ -457,6 +457,7 @@ async def test_config_set_all_seven_keys(db, tmp_path):
         ("throttle.progress_window_s", "3", 3.0),
         ("throttle.page_char_limit", "1500", 1500),
         ("throttle.daily_send_limit", "300", 300),
+        ("throttle.merge_window_s", "0.5", 0.5),
         ("budget.max_turns", "30", 30),
         ("budget.max_usd", "2.5", 2.5),
         ("worker.concurrency", "2", 2),
@@ -470,13 +471,14 @@ async def test_config_set_all_seven_keys(db, tmp_path):
     assert doc["throttle"]["progress_window_s"] == 3.0
     assert doc["throttle"]["page_char_limit"] == 1500
     assert doc["throttle"]["daily_send_limit"] == 300
+    assert doc["throttle"]["merge_window_s"] == 0.5
     assert doc["budget"]["max_turns"] == 30
     assert doc["budget"]["max_usd"] == 2.5
     assert doc["worker"]["concurrency"] == 2
     # 白名单外原样保留
     assert doc["whitelist"] == ["u@im.wechat"]
     assert doc["default_cwd"] == "/srv/proj"
-    assert len(_audit_details(db, "config_change")) == 7
+    assert len(_audit_details(db, "config_change")) == 8
 
 
 async def test_config_set_creates_missing_section(db, tmp_path):
@@ -518,6 +520,7 @@ async def test_config_set_rejects_out_of_range(db, tmp_path):
            ("throttle.progress_window_s", "-1"),
            ("throttle.page_char_limit", "199"),          # ≥ 200
            ("throttle.daily_send_limit", "0"),           # ≥ 1
+           ("throttle.merge_window_s", "0"),            # > 0
            ("budget.max_turns", "0"),                    # ≥ 1
            ("budget.max_usd", "0"),
            ("worker.concurrency", "11"),                 # 1~10

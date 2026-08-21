@@ -42,7 +42,8 @@ def test_load_config_maps_fields(tmp_path):
     assert cfg.default_cwd == "/repo"
     assert cfg.claude_bin == ["node", "/opt/claude.js"]
     assert cfg.throttle == {"min_send_interval_s": 2.0, "progress_window_s": 3.0,
-                            "page_char_limit": 1500, "daily_send_limit": 300}
+                            "page_char_limit": 1500, "daily_send_limit": 300,
+                            "merge_window_s": 2.0}
     assert cfg.budget == Budget(max_turns=30, max_usd=2.5)
     assert cfg.worker == {"concurrency": 2, "poll_interval_s": 0.2,
                           "bg_poll_s": 10, "bg_blocked_timeout_s": 1800}
@@ -76,6 +77,15 @@ def test_load_config_partial_throttle_merged(tmp_path):
     cfg = load_config(tmp_path)
     assert cfg.throttle["page_char_limit"] == 800
     assert cfg.throttle["progress_window_s"] == 2.5
+
+
+def test_load_config_merge_window_default(tmp_path):
+    _write_config(tmp_path, {})
+    cfg = load_config(tmp_path)
+    assert cfg.throttle["merge_window_s"] == 2.0
+    _write_config(tmp_path, {"throttle": {"merge_window_s": 0.5}})
+    cfg = load_config(tmp_path)
+    assert cfg.throttle["merge_window_s"] == 0.5
 
 
 def test_load_config_notify_defaults_and_merge(tmp_path):

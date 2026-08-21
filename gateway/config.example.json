@@ -9,7 +9,8 @@
     "min_send_interval_s": 1.0,
     "progress_window_s": 2.5,
     "page_char_limit": 2000,
-    "daily_send_limit": 500
+    "daily_send_limit": 500,
+    "merge_window_s": 2.0
   },
   "budget": {
     "max_turns": 50,
