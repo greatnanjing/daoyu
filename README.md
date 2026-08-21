@@ -100,7 +100,7 @@ fc-cache -f ~/.local/share/fonts && fc-list :lang=zh   # 应列出 Noto Sans CJK
 | `default_cwd` | 初始工作目录（也是默认 Claude 会话绑定的仓库） |
 | `claude_bin` | claude 可执行文件（字符串或 argv 前缀列表）。Windows 下建议直接指向 npm shim 内的真实 `claude.exe`（`.cmd` 含空格路径有 cmd /c 剥引号坑，版本探测会自动解析 shim 但 spawn 不会） |
 | `throttle` | 节流：最小发送间隔 / 进度窗口 / 单条分页字符上限 / 每日发送上限（**按实际发送页数计**、跨重启不清零——按已送达 outbox 行折算恢复）。分页另有字节硬闸（微信单条 16384 字节实测上限，超限 `errcode=0` 静默丢），`page_char_limit` 怎么调都安全 |
-| `media_retention_days` | `data/media/inbound\|outbound` 保留天数（默认 14；启动与日界时清理过期 `img-*` 文件，未终态 outbox 行引用的受保护；0 = 关闭） |
+| `media_retention_days` | `data/media` 保留天数（默认 14；启动与日界时按三分规则清理：outbound/ 全量、inbound/ 按 img-/file-/voice-/vid- 前缀、根目录仅图片类——claude 写的非媒体文件不碰；未终态 outbox 行引用的受保护；0 = 关闭） |
 | `budget` | 预算闸：`max_turns` + `max_usd`，与权限档位独立、恒生效 |
 | `worker` | 任务池并发数与轮询间隔 |
 | `reconnect` | 连接守护参数（`session_duration_s` 默认 30 天——token 长效实证；token 真失效时 401 自动触发重扫；`silent_grace_s`：重连先静默尝试再推二维码） |
@@ -215,18 +215,18 @@ deploy/daoyu-tui.sh          # 聊完 /exit 退出
 ## 开发
 
 ```bash
-python -m pytest                        # 全量测试（400 个）
+python -m pytest                        # 全量测试（419 个）
 python -m pytest tests/test_e2e.py -v   # E2E：fake iLink + fake claude 子进程全链路
 python -m gateway.app                   # 前台调试运行（不进 systemd）
 ```
 
 ```
 ├── gateway/   # app 入口 / ilink 协议 / router 命令路由 / bridge 桥命令 /
-│              # proxy 配置代理命令 / outbound 出站节流重试 / media 媒体 CDN AES 上传下载解密 /
+│              # proxy 配置代理命令 / outbound 出站节流重试 / media 媒体 CDN AES 上传下载解密（图片+文件/语音/视频） /
 │              # reconnect 连接守护（被动重连）/ login 扫码 / scheduler 定时日报+巡检 /
 │              # notify_http 通知 HTTP 入口 / notify_cli 通知命令行
 ├── worker/    # pool 会话串行调度+bg 后台监视 / cli_builder argv 组装 / runner 子进程执行 /
-│              # stream 解析 / approval_mcp daoyu MCP server（审批+发图+发通知，stdio） / ocr_mcp 本地 OCR（daoyu-ocr）
+│              # stream 解析 / approval_mcp daoyu MCP server（审批+发图+发文件+发通知，stdio） / ocr_mcp 本地 OCR（daoyu-ocr）
 ├── common/    # db（SQLite 五表+approvals+state KV）/ config / models / text（分页）/ notify（通知入队）
 ├── claude/    # settings.json + mcp.json（进 git）、secrets.env（gitignore）
 ├── tests/     # 单测 + E2E（fixtures/ 模拟 claude 子进程：-p 流回放与 --bg 两种形态）
@@ -241,9 +241,13 @@ python -m gateway.app                   # 前台调试运行（不进 systemd）
 - **bypass 档 `/bg` 带 `--disallowedTools` 工具级兜底**（与 `-p` 同源常量；`--bg` 下 acceptEdits 与 Bash 正常放行已真机实证）。
 - **OCR**：daoyu-ocr（RapidOCR 本地封装，中英混识）随任务恒装载（系统条目，不受 /mcp 启停管辖）；视觉理解由 Claude 模型原生视觉承担（Read 看图）。静态三台 chrome-devtools / context7 / web-reader 可经 /mcp 启停。
 - **`/mcp`、`/config`**：/mcp 列表 + on/off 启停（下一任务生效，停用不丢配置）；/config 概览 + set 改常用键（throttle/budget/concurrency，M4 起 cron 阈值七键并入白名单，重启生效）。whitelist 等不开放，改 gateway/config.json。
-- **语音/文件/视频收发**：仍为二期（图片收发 M3 已实现，见下节）。
+- **语音/视频出站专用条**：不做——音频/视频文件经 `send_file` 走文件条/视频条（官方同款模式，见下节）；语音 SILK 解码亦不做（转写缺失时存档 + 回执兜底）。
 
-## M3 媒体收发（图片双向，已真机验收 2026-08-19）
+## M3+M5B 媒体收发（图片双向已真机验收 2026-08-19；文件/语音/视频已实现、真机验收另行）
 
-- **发图即对话**：微信里直接发图片即进入当前对话——刀鱼从 CDN 下载解密落盘后转成 prompt（"[用户发来图片，已保存到 …，请查看并回应]"）发给当前会话的 Claude；图文混发拼接为同一条 prompt。下载失败回 ⚠️ 提示、不建任务。
-- **Claude 回图**：Claude 调 MCP 工具 `send_image(path, caption)` 把图片经 CDN 加密上传发回微信（caption 作为单独文本条先发）；工具 `-p` 四档恒装配（`/bg` 不带，见上），图片须为 PNG/JPEG/GIF/WebP 且 ≤20MB。
+- **发图即对话**（M3）：微信里直接发图片即进入当前对话——刀鱼从 CDN 下载解密落盘后转成 prompt（"[用户发来图片，已保存到 …，请查看并回应]"）发给当前会话的 Claude；图文混发拼接为同一条 prompt。下载失败回 ⚠️ 提示、不建任务。
+- **Claude 回图**（M3）：Claude 调 MCP 工具 `send_image(path, caption)` 把图片经 CDN 加密上传发回微信（caption 作为单独文本条先发）；工具 `-p` 四档恒装配（`/bg` 不带，见上），图片须为 PNG/JPEG/GIF/WebP 且 ≤20MB。
+- **发文件即对话**（M5B）：微信发任意文件（≤100MB）同样下载落盘建任务，prompt 带原始文件名与大小（"[用户发来文件 报表.xlsx（0.0MB），已保存到 …，请查看处理]"），Claude 可直接读文件处理。
+- **Claude 回文件 `send_file(path, caption)`**（M5B）：按扩展名三路由——图片扩展名转 `send_image` 原图发送；视频扩展名（mp4/mov/webm/mkv/avi）发视频条（微信端可直接播放）；其余发文件条（保留原文件名，微信端可下载）。≤100MB；工具 `-p` 四档恒装配（`/bg` 不带，见上）。
+- **语音入站**（M5B）：服务端转写非空时，转写文字直接当用户消息对话（零解码成本）；无转写时下载存档并回 ⚠️ 提示补发文字（Claude 解不了 SILK，不建任务）。
+- **视频入站**（M5B）：下载存盘（.mp4）建任务，prompt 提示可用 ffmpeg 抽帧查看内容（服务器未装 ffmpeg 则如实告知）。

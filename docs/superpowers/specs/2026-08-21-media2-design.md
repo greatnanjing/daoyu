@@ -1,7 +1,7 @@
 # 刀鱼 M5B：媒体二期（文件双向 + 语音入站 + 视频入站）设计
 
 - **日期**: 2026-08-21
-- **状态**: 设计已确认（brainstorm 对话结论沉淀），待实现
+- **状态**: 已实现（2026-08-21，419 测试全绿；真机验收另行）
 - **配套文档**: [PRD.md](../../PRD.md) / [TRD.md](../../TRD.md) / [M3 媒体 spec](2026-08-19-m3-media-design.md)
 - **协议事实源**: [.superpowers/sdd/media2-research.md](../../../.superpowers/sdd/media2-research.md)（@tencent-weixin/openclaw-weixin@2.4.6 src 逐行佐证；本 spec 引用其行号）
 - **背景**: M5A 通知通道完成后按「通知 → 媒体 → 输入」顺序推进第二项。范围经 brainstorm 选定：**文件双向 + 语音入站（转写优先）+ 视频入站存盘；语音/视频出站以媒体条替代文件下载体验——send_file 按扩展名三路由（方案 A）**。
@@ -82,7 +82,17 @@ item_list 遍历扩展四分支（与 M3 图片分支并列），混合消息拼
 
 ### 3.5 schema
 
-无变更（outbox `kind/media_path/caption` 三列 M3 已有；messages.media_path 已有）。`data/media/inbound|outbound` 清理已被 `media_retention_days` 覆盖（M2 收尾批）。
+无变更（outbox `kind/media_path/caption` 三列 M3 已有；messages.media_path 已有）。
+
+> **实现期修正（2026-08-21）**：本节原文「`data/media/inbound|outbound` 清理已被
+> `media_retention_days` 覆盖（M2 收尾批）」**不成立**——M2 批的 `cleanup_expired_media`
+> 对三个目录统一只认 `img-*` 前缀或图片扩展名，M5B 的 `file-`/`voice-`/`vid-` 入站
+> 落盘与 outbound 原名复制产物（如 `报表.xlsx`）均不在其列，永不清。已在 Task 1
+> 落地清理三分规则（`cleanup_expired_media` 扩展）：
+> - **outbound/**：全量按 mtime 清（daoyu 独占——`img-*` 随机名与 M5B 原名复制产物）；
+> - **inbound/**：按前缀 `img-|file-|voice-|vid-` 清（daoyu 随机名落盘；claude 误写的非前缀文件不碰）；
+> - **media 根目录**：保守规则不变（`img-*` 或图片扩展名——claude 工作产物混居，不作猜测）；
+> - 未终态 outbox 行引用的 media_path 一律保护（`db.active_media_paths`）。
 
 ## 4. 测试策略
 
@@ -110,4 +120,4 @@ item_list 遍历扩展四分支（与 M3 图片分支并列），混合消息拼
 - 引用消息携带媒体（ref_msg.message_item，M3 未处理路径，三期留档）
 - 入站图片明文下载兜底（无 aes_key 场景，低频）
 - 文件类型白名单 / 病毒扫描（任意文件合法，安全模型同 M3 已论证：外泄面仅用户本人微信）
-- 新配置键（100MB 硬上限跟协议；media 清理已覆盖）
+- 新配置键（100MB 硬上限跟协议；media 清理经既有 `media_retention_days` 三分规则覆盖，见 §3.5 修正）
